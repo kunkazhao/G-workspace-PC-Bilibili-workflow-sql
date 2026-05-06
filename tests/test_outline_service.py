@@ -19,7 +19,7 @@ def test_outline_uses_price_uid_title_and_preserves_existing_copy(tmp_path: Path
     repo.upsert_products_from_master(
         project_id,
         [
-            {"uid": "YXEJ002", "title": "竹林鸟夜莺Z1", "price_label": "59元"},
+            {"uid": "YXEJ002", "title": "竹林鸟夜莺Z1", "price_label": "59.0"},
             {"uid": "YXEJ003", "title": "KZ Gale疾风", "price_label": "79元"},
         ],
     )
@@ -49,5 +49,7 @@ def test_outline_uses_price_uid_title_and_preserves_existing_copy(tmp_path: Path
     assert len(result["preserved"]) == 1
     assert "### 59元-YXEJ002-竹林鸟夜莺Z1" in text
     assert "### 79元-YXEJ003-KZ Gale疾风" in text
+    assert "#### 正文" in text
+    assert "59.0-YXEJ002" not in text
     assert "保留商品正文" in text
     assert "保留引言" in text

@@ -79,6 +79,8 @@ class OutlineService:
             lines += [f"### {format_product_heading(product)}", ""]
             if existing:
                 lines.extend(render_product_body(existing))
+            else:
+                lines += ["#### 正文", ""]
             lines.append("")
 
         lines += ["## 价格过渡文案", ""]
@@ -108,7 +110,23 @@ class OutlineService:
 
 
 def format_product_heading(product: dict[str, Any]) -> str:
-    return f"{safe_text(product.get('price_label'))}-{safe_text(product.get('uid'))}-{safe_text(product.get('title'))}"
+    return f"{format_price_label(product.get('price_label'))}-{safe_text(product.get('uid'))}-{safe_text(product.get('title'))}"
+
+
+def format_price_label(value: Any) -> str:
+    raw = safe_text(value).replace("¥", "").replace("￥", "").strip()
+    if not raw:
+        return "未定价"
+    if raw.endswith("元") and not raw.endswith(".0元"):
+        return raw
+    raw = raw[:-1].strip() if raw.endswith("元") else raw
+    try:
+        number = float(raw)
+    except ValueError:
+        return raw or "未定价"
+    if number.is_integer():
+        return f"{int(number)}元"
+    return f"{number:.2f}".rstrip("0").rstrip(".") + "元"
 
 
 def render_product_body(product: ProductDoc) -> list[str]:
