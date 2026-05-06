@@ -6,6 +6,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
 from .db import Database
+from .master_data import MasterDataService, display_name
 from .repositories import Repository
 from .settings import DEFAULT_IMAGE_ROOT, DEFAULT_MARKDOWN_ROOT, DEFAULT_OUTPUT_ROOT, DEFAULT_VIDEO_ROOT, DEFAULT_VOICE_ROOT
 from .sync_service import SyncService
@@ -23,6 +24,7 @@ class App(tk.Tk):
         self.repo = Repository(self.db)
         self.sync = SyncService(self.db)
         self.workflow = WorkflowService(self.db)
+        self.master_data = MasterDataService()
         self.current_project_id: int | None = self.db.latest_project_id()
         self.pages: dict[str, BasePage] = {}
         self.nav_buttons: dict[str, ttk.Button] = {}
@@ -92,6 +94,7 @@ class BasePage(ttk.Frame):
         self.repo = app.repo
         self.sync = app.sync
         self.workflow = app.workflow
+        self.master_data = app.master_data
         self.columnconfigure(0, weight=1)
         self.rowconfigure(99, weight=1)
 
@@ -117,10 +120,18 @@ class ProjectPage(BasePage):
     def __init__(self, master, app: App):
         super().__init__(master, app)
         self.project_var = tk.StringVar()
+        self.workspace_var = tk.StringVar()
+        self.parent_category_var = tk.StringVar()
+        self.child_category_var = tk.StringVar()
+        self.scheme_var = tk.StringVar()
+        self.workspaces: list[dict[str, Any]] = []
+        self.category_tree: list[dict[str, Any]] = []
+        self.schemes: list[dict[str, Any]] = []
         self.fields: dict[str, tk.StringVar] = {key: tk.StringVar() for key in [
             "name",
             "workspace_id",
             "workspace_name",
+            "category_parent_id",
             "category_parent_name",
             "category_id",
             "category_name",
@@ -145,19 +156,38 @@ class ProjectPage(BasePage):
         ttk.Button(top, text="新建", command=self._new_project).grid(row=0, column=2, padx=8)
         ttk.Button(top, text="保存", command=self._save_project).grid(row=0, column=3)
 
-        form = ttk.LabelFrame(self, text="品类项目配置", padding=12)
+        form = ttk.LabelFrame(self, text="从 Master 选择品类方案", padding=12)
         form.grid(row=1, column=0, sticky="ew")
         form.columnconfigure(1, weight=1)
         form.columnconfigure(3, weight=1)
+        ttk.Label(form, text="项目名称").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=5)
+        ttk.Entry(form, textvariable=self.fields["name"]).grid(row=0, column=1, columnspan=3, sticky="ew", pady=5)
+
+        ttk.Label(form, text="Master 工作空间").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=5)
+        self.workspace_combo = ttk.Combobox(form, textvariable=self.workspace_var, state="readonly")
+        self.workspace_combo.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=5)
+        self.workspace_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_workspace_selected())
+        ttk.Button(form, text="刷新 Master", command=lambda: self._load_workspaces(force_refresh=True)).grid(row=1, column=2, sticky="w", padx=(0, 8), pady=5)
+
+        ttk.Label(form, text="一级品类").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=5)
+        self.parent_combo = ttk.Combobox(form, textvariable=self.parent_category_var, state="readonly")
+        self.parent_combo.grid(row=2, column=1, sticky="ew", padx=(0, 12), pady=5)
+        self.parent_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_parent_selected())
+        ttk.Label(form, text="二级品类").grid(row=2, column=2, sticky="w", padx=(0, 8), pady=5)
+        self.child_combo = ttk.Combobox(form, textvariable=self.child_category_var, state="readonly")
+        self.child_combo.grid(row=2, column=3, sticky="ew", pady=5)
+        self.child_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_child_selected())
+
+        ttk.Label(form, text="Master 方案").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=5)
+        self.scheme_combo = ttk.Combobox(form, textvariable=self.scheme_var, state="readonly")
+        self.scheme_combo.grid(row=3, column=1, columnspan=3, sticky="ew", pady=5)
+        self.scheme_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_scheme_selected())
+
+        path_form = ttk.LabelFrame(self, text="本地文件位置", padding=12)
+        path_form.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        path_form.columnconfigure(1, weight=1)
+        path_form.columnconfigure(3, weight=1)
         labels = [
-            ("项目名", "name"),
-            ("Workspace ID", "workspace_id"),
-            ("Workspace 名称", "workspace_name"),
-            ("一级品类", "category_parent_name"),
-            ("二级品类 ID", "category_id"),
-            ("二级品类", "category_name"),
-            ("方案 ID", "scheme_id"),
-            ("方案名称", "scheme_name"),
             ("MD 文档", "md_path"),
             ("图片根目录", "image_root"),
             ("视频根目录", "video_root"),
@@ -167,14 +197,13 @@ class ProjectPage(BasePage):
         for index, (label, key) in enumerate(labels):
             row = index // 2
             col = (index % 2) * 2
-            ttk.Label(form, text=label).grid(row=row, column=col, sticky="w", padx=(0, 8), pady=5)
-            entry = ttk.Entry(form, textvariable=self.fields[key])
+            ttk.Label(path_form, text=label).grid(row=row, column=col, sticky="w", padx=(0, 8), pady=5)
+            entry = ttk.Entry(path_form, textvariable=self.fields[key])
             entry.grid(row=row, column=col + 1, sticky="ew", padx=(0, 12), pady=5)
-            if key.endswith("_path") or key.endswith("_root"):
-                ttk.Button(form, text="选", width=4, command=lambda item=key: self._browse(item)).grid(row=row, column=col + 1, sticky="e", padx=(0, 12))
+            ttk.Button(path_form, text="选", width=4, command=lambda item=key: self._browse(item)).grid(row=row, column=col + 1, sticky="e", padx=(0, 12))
 
         actions = ttk.Frame(self)
-        actions.grid(row=2, column=0, sticky="ew", pady=12)
+        actions.grid(row=3, column=0, sticky="ew", pady=12)
         ttk.Button(actions, text="预览 Master 方案变化", command=self._preview_master).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="同步 Master 方案商品", command=self._sync_master).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="同步 MD 文案", command=self._sync_md).pack(side="left")
@@ -192,6 +221,10 @@ class ProjectPage(BasePage):
     def _new_project(self) -> None:
         for key, var in self.fields.items():
             var.set("")
+        self.workspace_var.set("")
+        self.parent_category_var.set("")
+        self.child_category_var.set("")
+        self.scheme_var.set("")
         self.fields["image_root"].set(str(DEFAULT_IMAGE_ROOT))
         self.fields["video_root"].set(str(DEFAULT_VIDEO_ROOT))
         self.fields["voice_root"].set(str(DEFAULT_VOICE_ROOT))
@@ -227,6 +260,10 @@ class ProjectPage(BasePage):
         for key, var in self.fields.items():
             var.set(safe_text(project.get(key)))
         self.project_var.set(f"{project_id} - {project['name']}")
+        self.workspace_var.set(safe_text(project.get("workspace_name")))
+        self.parent_category_var.set(safe_text(project.get("category_parent_name")))
+        self.child_category_var.set(safe_text(project.get("category_name")))
+        self.scheme_var.set(safe_text(project.get("scheme_name")))
 
     def _preview_master(self) -> None:
         project = self.project_required()
@@ -273,6 +310,131 @@ class ProjectPage(BasePage):
         elif projects:
             self.app.current_project_id = projects[0]["id"]
             self._fill(projects[0]["id"])
+        if not self.workspaces:
+            self._load_workspaces(force_refresh=False, quiet=True)
+
+    def _load_workspaces(self, *, force_refresh: bool = False, quiet: bool = False) -> None:
+        try:
+            self.workspaces = self.master_data.fetch_workspaces(force_refresh=force_refresh)
+        except Exception as exc:
+            if not quiet:
+                messagebox.showerror("读取 Master 失败", str(exc))
+            return
+        values = [display_name(item) for item in self.workspaces]
+        self.workspace_combo.configure(values=values)
+        if values:
+            saved_workspace_id = self.fields["workspace_id"].get().strip()
+            if saved_workspace_id:
+                for item in self.workspaces:
+                    if safe_text(item.get("id")) == saved_workspace_id:
+                        self.workspace_var.set(display_name(item))
+                        self._load_category_tree(item, keep_existing=True)
+                        break
+            elif not self.workspace_var.get():
+                self.workspace_var.set(values[0])
+                self._on_workspace_selected()
+        if not quiet:
+            self.log(f"已读取 Master 工作空间：{len(values)} 个。")
+
+    def _selected_workspace(self) -> dict[str, Any] | None:
+        name = self.workspace_var.get()
+        for item in self.workspaces:
+            if display_name(item) == name:
+                return item
+        return None
+
+    def _on_workspace_selected(self) -> None:
+        workspace = self._selected_workspace()
+        if not workspace:
+            return
+        self.fields["workspace_id"].set(safe_text(workspace.get("id")))
+        self.fields["workspace_name"].set(display_name(workspace))
+        self._load_category_tree(workspace, keep_existing=False)
+
+    def _load_category_tree(self, workspace: dict[str, Any], *, keep_existing: bool) -> None:
+        try:
+            _workspace, tree, source = self.master_data.fetch_category_tree(safe_text(workspace.get("id")))
+        except Exception as exc:
+            messagebox.showerror("读取品类失败", str(exc))
+            return
+        self.category_tree = tree
+        parent_names = [safe_text(parent.get("name")) for parent in tree]
+        self.parent_combo.configure(values=parent_names)
+        self.parent_category_var.set("")
+        self.child_category_var.set("")
+        self.scheme_var.set("")
+        self.scheme_combo.configure(values=[])
+        if parent_names:
+            saved_parent = self.fields["category_parent_name"].get().strip() if keep_existing else ""
+            self.parent_category_var.set(saved_parent if saved_parent in parent_names else parent_names[0])
+            self._on_parent_selected(keep_existing=keep_existing)
+        self.log(f"已读取 Master 品类：{len(parent_names)} 个一级品类（来源：{source}）。")
+
+    def _selected_parent(self) -> dict[str, Any] | None:
+        name = self.parent_category_var.get()
+        for parent in self.category_tree:
+            if safe_text(parent.get("name")) == name:
+                return parent
+        return None
+
+    def _on_parent_selected(self, *, keep_existing: bool = False) -> None:
+        parent = self._selected_parent()
+        if not parent:
+            return
+        self.fields["category_parent_id"].set(safe_text(parent.get("id")))
+        self.fields["category_parent_name"].set(safe_text(parent.get("name")))
+        children = parent.get("children") or []
+        child_names = [safe_text(child.get("name")) for child in children if safe_text(child.get("name"))]
+        self.child_combo.configure(values=child_names)
+        saved_child = self.fields["category_name"].get().strip() if keep_existing else ""
+        self.child_category_var.set(saved_child if saved_child in child_names else (child_names[0] if child_names else ""))
+        self.scheme_var.set("")
+        self.scheme_combo.configure(values=[])
+        if child_names:
+            self._on_child_selected(keep_existing=keep_existing)
+
+    def _selected_child(self) -> dict[str, Any] | None:
+        parent = self._selected_parent()
+        if not parent:
+            return None
+        name = self.child_category_var.get()
+        for child in parent.get("children") or []:
+            if safe_text(child.get("name")) == name:
+                return child
+        return None
+
+    def _on_child_selected(self, *, keep_existing: bool = False) -> None:
+        workspace = self._selected_workspace()
+        child = self._selected_child()
+        if not workspace or not child:
+            return
+        self.fields["category_id"].set(safe_text(child.get("id")))
+        self.fields["category_name"].set(safe_text(child.get("name")))
+        try:
+            self.schemes, source = self.master_data.fetch_schemes(workspace_id=safe_text(workspace.get("id")), category_id=safe_text(child.get("id")))
+        except Exception as exc:
+            messagebox.showerror("读取方案失败", str(exc))
+            return
+        scheme_names = [display_name(item, safe_text(item.get("id"))) for item in self.schemes]
+        self.scheme_combo.configure(values=scheme_names)
+        saved_scheme = self.fields["scheme_name"].get().strip() if keep_existing else ""
+        self.scheme_var.set(saved_scheme if saved_scheme in scheme_names else (scheme_names[0] if scheme_names else ""))
+        if scheme_names:
+            self._on_scheme_selected()
+        self.log(f"已读取“{safe_text(child.get('name'))}”方案：{len(scheme_names)} 个（来源：{source}）。")
+
+    def _on_scheme_selected(self) -> None:
+        name = self.scheme_var.get()
+        for scheme in self.schemes:
+            if display_name(scheme, safe_text(scheme.get("id"))) != name:
+                continue
+            self.fields["scheme_id"].set(safe_text(scheme.get("id")))
+            self.fields["scheme_name"].set(name)
+            if not self.fields["name"].get().strip():
+                parent = self.fields["category_parent_name"].get().strip()
+                child = self.fields["category_name"].get().strip()
+                self.fields["name"].set(f"{parent}-{child}" if parent and child else name)
+            return
 
 
 class TablePage(BasePage):
@@ -400,7 +562,7 @@ class SyncPage(TablePage):
 
 
 class AccountPage(TablePage):
-    columns = ("标签", "Account ID", "音色 ID", "音色名", "图片身份", "结尾音频", "启用")
+    columns = ("用户名称", "账号标识", "音色标识", "音色名称", "素材身份", "结尾配音", "启用")
 
     def __init__(self, master, app: App):
         super().__init__(master, app)
@@ -408,11 +570,19 @@ class AccountPage(TablePage):
         form = ttk.LabelFrame(self, text="新增/更新用户", padding=10)
         form.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         form.columnconfigure(1, weight=1)
-        keys = list(self.vars)
-        for index, key in enumerate(keys):
-            ttk.Label(form, text=key).grid(row=index // 2, column=(index % 2) * 2, sticky="w", padx=(0, 8), pady=4)
+        labels = [
+            ("用户名称", "label"),
+            ("账号标识", "account_id"),
+            ("音色标识", "voice_id"),
+            ("音色名称", "voice_name"),
+            ("素材身份", "media_identity"),
+            ("结尾配音路径", "closing_audio_path"),
+        ]
+        for index, (label, key) in enumerate(labels):
+            ttk.Label(form, text=label).grid(row=index // 2, column=(index % 2) * 2, sticky="w", padx=(0, 8), pady=4)
             ttk.Entry(form, textvariable=self.vars[key]).grid(row=index // 2, column=(index % 2) * 2 + 1, sticky="ew", padx=(0, 8), pady=4)
         ttk.Button(form, text="保存用户", command=self._save_account).grid(row=3, column=0, sticky="w", pady=6)
+        ttk.Label(form, text="说明：用户名称就是小燃、小博、小歪这类账号；音色标识用于生成对应配音。").grid(row=3, column=1, columnspan=3, sticky="w", pady=6)
         self._build_table()
 
     def _save_account(self) -> None:
@@ -465,12 +635,18 @@ class WorkflowPage(BasePage):
         actions = ttk.Frame(self)
         actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(actions, text=self.primary_label()).pack(side="left")
-        ttk.Entry(actions, textvariable=self.account_var, width=22).pack(side="left", padx=8)
-        ttk.Label(actions, text=self.uid_label()).pack(side="left")
-        ttk.Entry(actions, textvariable=self.uid_var, width=30).pack(side="left", padx=8)
-        ttk.Label(actions, text="模式").pack(side="left")
-        ttk.Combobox(actions, textvariable=self.mode_var, values=["standard", "top"], width=10).pack(side="left", padx=8)
+        if isinstance(self, JianyingPage):
+            self.account_input = ttk.Entry(actions, textvariable=self.account_var, width=24)
+        else:
+            self.account_input = ttk.Combobox(actions, textvariable=self.account_var, state="readonly", width=20)
+        self.account_input.pack(side="left", padx=8)
+        if not isinstance(self, JianyingPage):
+            ttk.Label(actions, text=self.uid_label()).pack(side="left")
+            ttk.Entry(actions, textvariable=self.uid_var, width=32).pack(side="left", padx=8)
         if isinstance(self, AssemblePage):
+            self.mode_var.set("标准模式")
+            ttk.Label(actions, text="组合方式").pack(side="left")
+            ttk.Combobox(actions, textvariable=self.mode_var, values=["标准模式", "Top 模式"], state="readonly", width=10).pack(side="left", padx=8)
             ttk.Label(actions, text="引言编号").pack(side="left")
             ttk.Entry(actions, textvariable=self.intro_var, width=5).pack(side="left", padx=8)
         ttk.Button(actions, text="生成命令", command=self._build_command).pack(side="left", padx=8)
@@ -478,16 +654,25 @@ class WorkflowPage(BasePage):
         self.log_text = tk.Text(self, height=28, state="disabled")
         self.log_text.grid(row=99, column=0, sticky="nsew")
 
+    def refresh(self) -> None:
+        if isinstance(getattr(self, "account_input", None), ttk.Combobox):
+            values = [item["label"] for item in self.repo.accounts()]
+            self.account_input.configure(values=values)
+            if values and not self.account_var.get():
+                self.account_var.set(values[0])
+
     def primary_label(self) -> str:
         if isinstance(self, JianyingPage):
             return "草稿名"
-        return "账号标签"
+        if isinstance(self, VoicePage):
+            return "配音用户"
+        return "口播用户"
 
     def uid_label(self) -> str:
         if isinstance(self, AssemblePage):
-            return "Top UID"
+            return "Top 商品UID"
         if isinstance(self, VoicePage):
-            return "商品 UID"
+            return "商品UID（可不填）"
         return "预留"
 
     def _command(self) -> list[str]:
@@ -499,9 +684,10 @@ class WorkflowPage(BasePage):
             return self.workflow.build_voice_command(project["id"], account_label=self.account_var.get().strip(), uids=uids or None)
         if isinstance(self, AssemblePage):
             top_uids = [item.strip() for item in self.uid_var.get().split(",") if item.strip()]
+            mode = "top" if self.mode_var.get() == "Top 模式" else "standard"
             return self.workflow.build_assembly_command(
                 project["id"],
-                mode=self.mode_var.get(),
+                mode=mode,
                 top_uids=top_uids or None,
                 account_label=self.account_var.get().strip(),
                 intro_index=int(self.intro_var.get() or "1"),
