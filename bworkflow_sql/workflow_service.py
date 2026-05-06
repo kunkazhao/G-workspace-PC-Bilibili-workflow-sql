@@ -110,12 +110,13 @@ class WorkflowService:
         account_label: str = "",
         intro_index: int = 1,
         product_uids: list[str] | None = None,
+        output_markdown_path: str | Path | None = None,
     ) -> list[str]:
         project = self.repo.project(project_id)
         if not project:
             raise ValueError("请先选择品类项目。")
         markdown_path = self.export_project_markdown(project_id)
-        output_markdown = self._spoken_markdown_path(project)
+        output_markdown = self._spoken_markdown_path(project, output_markdown_path)
         manifest_output = manifest_path_for_markdown(output_markdown)
         account = self._resolve_account(account_label)
         registry_dir = Path(safe_text(project.get("voice_root")) or DEFAULT_OUTPUT_ROOT) / safe_text(account.get("label") or account_label or "voice")
@@ -153,11 +154,11 @@ class WorkflowService:
             cmd += ["--top3-uids", ",".join(top_uids)]
         return cmd
 
-    def build_jianying_command(self, project_id: int, *, draft_name: str = "") -> list[str]:
+    def build_jianying_command(self, project_id: int, *, draft_name: str = "", spoken_markdown_path: str | Path | None = None) -> list[str]:
         project = self.repo.project(project_id)
         if not project:
             raise ValueError("请先选择品类项目。")
-        output_markdown = self._spoken_markdown_path(project)
+        output_markdown = self._spoken_markdown_path(project, spoken_markdown_path)
         manifest = manifest_path_for_markdown(output_markdown)
         return [
             "python",
@@ -187,10 +188,10 @@ class WorkflowService:
         target.mkdir(parents=True, exist_ok=True)
         return target
 
-    def _spoken_markdown_path(self, project: dict[str, Any]) -> Path:
-        path_text = safe_text(project.get("spoken_md_path"))
+    def _spoken_markdown_path(self, project: dict[str, Any], explicit_path: str | Path | None = None) -> Path:
+        path_text = safe_text(explicit_path) or safe_text(project.get("spoken_md_path"))
         if not path_text:
-            raise ValueError("请先在“品类项目”里选择口播稿输出 MD。")
+            raise ValueError("请先在“组合口播稿”里选择口播稿输出 MD。")
         path = Path(path_text)
         if path.suffix.casefold() != ".md":
             raise ValueError("口播稿输出文件必须是 .md 文档。")

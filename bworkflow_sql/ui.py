@@ -173,9 +173,8 @@ class ProjectPage(BasePage):
         ttk.Entry(form, textvariable=self.fields["name"]).grid(row=0, column=1, columnspan=3, sticky="ew", pady=5)
 
         ttk.Label(form, text="Master 工作空间").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=5)
-        self.workspace_combo = ttk.Combobox(form, textvariable=self.workspace_var, state="readonly")
-        self.workspace_combo.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=5)
-        self.workspace_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_workspace_selected())
+        self.workspace_label = ttk.Label(form, text="赵二（默认）")
+        self.workspace_label.grid(row=1, column=1, sticky="w", padx=(0, 12), pady=5)
         ttk.Button(form, text="刷新 Master", command=lambda: self._load_workspaces(force_refresh=True)).grid(row=1, column=2, sticky="w", padx=(0, 8), pady=5)
 
         ttk.Label(form, text="一级品类").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=5)
@@ -192,13 +191,12 @@ class ProjectPage(BasePage):
         self.scheme_combo.grid(row=3, column=1, columnspan=3, sticky="ew", pady=5)
         self.scheme_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_scheme_selected())
 
-        path_form = ttk.LabelFrame(self, text="本地文件位置", padding=12)
+        path_form = ttk.LabelFrame(self, text="文案与素材来源", padding=12)
         path_form.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         path_form.columnconfigure(1, weight=1)
         path_form.columnconfigure(3, weight=1)
         labels = [
             ("商品文案 MD", "md_path"),
-            ("口播稿输出 MD（会覆盖）", "spoken_md_path"),
             ("图片根目录", "image_root"),
             ("视频根目录", "video_root"),
             ("配音根目录", "voice_root"),
@@ -222,13 +220,6 @@ class ProjectPage(BasePage):
     def _browse(self, key: str) -> None:
         if key == "md_path":
             path = filedialog.askopenfilename(filetypes=[("Markdown", "*.md"), ("All", "*.*")], initialdir=str(DEFAULT_MARKDOWN_ROOT))
-        elif key == "spoken_md_path":
-            path = filedialog.asksaveasfilename(
-                defaultextension=".md",
-                filetypes=[("Markdown", "*.md"), ("All", "*.*")],
-                initialdir=str(DEFAULT_SPOKEN_MD_ROOT),
-                initialfile=f"{self.fields['name'].get().strip() or '口播稿'}.md",
-            )
         else:
             path = filedialog.askdirectory()
         if path:
@@ -336,21 +327,15 @@ class ProjectPage(BasePage):
             if not quiet:
                 messagebox.showerror("读取 Master 失败", str(exc))
             return
-        values = [display_name(item) for item in self.workspaces]
-        self.workspace_combo.configure(values=values)
-        if values:
-            saved_workspace_id = self.fields["workspace_id"].get().strip()
-            if saved_workspace_id:
-                for item in self.workspaces:
-                    if safe_text(item.get("id")) == saved_workspace_id:
-                        self.workspace_var.set(display_name(item))
-                        self._load_category_tree(item, keep_existing=True)
-                        break
-            elif not self.workspace_var.get():
-                self.workspace_var.set(values[0])
-                self._on_workspace_selected()
+        workspace = self._default_workspace()
+        if workspace:
+            self.workspace_var.set(display_name(workspace))
+            self.workspace_label.configure(text=f"{display_name(workspace)}（默认）")
+            self.fields["workspace_id"].set(safe_text(workspace.get("id")))
+            self.fields["workspace_name"].set(display_name(workspace))
+            self._load_category_tree(workspace, keep_existing=bool(self.fields["category_name"].get().strip()))
         if not quiet:
-            self.log(f"已读取 Master 工作空间：{len(values)} 个。")
+            self.log(f"已读取 Master 工作空间，当前固定使用：{self.workspace_var.get() or '赵二'}。")
 
     def _selected_workspace(self) -> dict[str, Any] | None:
         name = self.workspace_var.get()
@@ -358,6 +343,12 @@ class ProjectPage(BasePage):
             if display_name(item) == name:
                 return item
         return None
+
+    def _default_workspace(self) -> dict[str, Any] | None:
+        for item in self.workspaces:
+            if safe_text(item.get("name")) == "赵二" or safe_text(item.get("slug")) == "zhaoer":
+                return item
+        return self.workspaces[0] if self.workspaces else None
 
     def _on_workspace_selected(self) -> None:
         workspace = self._selected_workspace()
@@ -450,8 +441,6 @@ class ProjectPage(BasePage):
                 parent = self.fields["category_parent_name"].get().strip()
                 child = self.fields["category_name"].get().strip()
                 self.fields["name"].set(f"{parent}-{child}" if parent and child else name)
-            if not self.fields["spoken_md_path"].get().strip():
-                self.fields["spoken_md_path"].set(str(DEFAULT_SPOKEN_MD_ROOT / f"{self.fields['name'].get().strip() or name}.md"))
             return
 
 
@@ -652,6 +641,7 @@ class WorkflowPage(BasePage):
         self.account_var = tk.StringVar()
         self.uid_var = tk.StringVar()
         self.intro_var = tk.StringVar(value="1")
+        self.spoken_md_var = tk.StringVar()
         actions = ttk.Frame(self)
         actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(actions, text=self.primary_label()).pack(side="left")
@@ -669,17 +659,33 @@ class WorkflowPage(BasePage):
             ttk.Combobox(actions, textvariable=self.mode_var, values=["标准模式", "Top 模式"], state="readonly", width=10).pack(side="left", padx=8)
             ttk.Label(actions, text="引言编号").pack(side="left")
             ttk.Entry(actions, textvariable=self.intro_var, width=5).pack(side="left", padx=8)
+            output_row = ttk.Frame(self)
+            output_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+            output_row.columnconfigure(1, weight=1)
+            ttk.Label(output_row, text="口播稿输出 MD（会覆盖全部内容）").grid(row=0, column=0, sticky="w", padx=(0, 8))
+            ttk.Entry(output_row, textvariable=self.spoken_md_var).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+            ttk.Button(output_row, text="选", width=4, command=self._browse_spoken_md).grid(row=0, column=2, sticky="e")
+        if isinstance(self, JianyingPage):
+            output_row = ttk.Frame(self)
+            output_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+            output_row.columnconfigure(1, weight=1)
+            ttk.Label(output_row, text="口播稿 MD").grid(row=0, column=0, sticky="w", padx=(0, 8))
+            ttk.Entry(output_row, textvariable=self.spoken_md_var).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+            ttk.Button(output_row, text="选", width=4, command=self._browse_spoken_md).grid(row=0, column=2, sticky="e")
         ttk.Button(actions, text="生成命令", command=self._build_command).pack(side="left", padx=8)
         ttk.Button(actions, text="执行", command=self._run_command).pack(side="left")
         self.log_text = tk.Text(self, height=28, state="disabled")
         self.log_text.grid(row=99, column=0, sticky="nsew")
 
     def refresh(self) -> None:
+        project = self.app.current_project()
         if isinstance(getattr(self, "account_input", None), ttk.Combobox):
             values = [item["label"] for item in self.repo.accounts()]
             self.account_input.configure(values=values)
             if values and not self.account_var.get():
                 self.account_var.set(values[0])
+        if project and not self.spoken_md_var.get().strip():
+            self.spoken_md_var.set(safe_text(project.get("spoken_md_path")))
 
     def primary_label(self) -> str:
         if isinstance(self, JianyingPage):
@@ -711,8 +717,31 @@ class WorkflowPage(BasePage):
                 top_uids=top_uids or None,
                 account_label=self.account_var.get().strip(),
                 intro_index=int(self.intro_var.get() or "1"),
+                output_markdown_path=self._remember_spoken_md(project["id"]),
             )
-        return self.workflow.build_jianying_command(project["id"], draft_name=self.account_var.get().strip())
+        return self.workflow.build_jianying_command(
+            project["id"],
+            draft_name=self.account_var.get().strip(),
+            spoken_markdown_path=self._remember_spoken_md(project["id"]),
+        )
+
+    def _browse_spoken_md(self) -> None:
+        project = self.app.current_project()
+        default_name = safe_text(project.get("name")) if project else "口播稿"
+        path = filedialog.asksaveasfilename(
+            defaultextension=".md",
+            filetypes=[("Markdown", "*.md"), ("All", "*.*")],
+            initialdir=str(DEFAULT_SPOKEN_MD_ROOT),
+            initialfile=f"{default_name or '口播稿'}.md",
+        )
+        if path:
+            self.spoken_md_var.set(path.replace("/", "\\"))
+
+    def _remember_spoken_md(self, project_id: int) -> str:
+        path = self.spoken_md_var.get().strip()
+        if path:
+            self.db.execute("UPDATE projects SET spoken_md_path=?, updated_at=? WHERE id=?", (path, now_iso(), project_id))
+        return path
 
     def _build_command(self) -> None:
         try:
