@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from .db import Database
+from .md_parser import ProductDoc, parse_markdown_text
+from .repositories import Repository
+from .settings import DEFAULT_MARKDOWN_ROOT
+from .utils import safe_text
+
+
+class OutlineService:
+    def __init__(self, db: Database):
+        self.db = db
+        self.repo = Repository(db)
+
+    def default_markdown_path(self, project_id: int) -> Path:
+        project = self.repo.project(project_id)
+        if not project:
+            raise ValueError("请先选择品类项目。")
+        parent = safe_text(project.get("category_parent_name"))
+        child = safe_text(project.get("category_name"))
+        filename = f"{parent}-{child}.md" if parent and child else f"{project['name']}.md"
+        return DEFAULT_MARKDOWN_ROOT / filename
+
+    def init_or_update_outline(self, project_id: int, target_path: str | Path | None = None) -> dict[str, Any]:
+        project = self.repo.project(project_id)
+        if not project:
+            raise ValueError("请先选择品类项目。")
+        products = self.repo.products(project_id, include_removed=False)
+        if not products:
+            raise ValueError("当前品类项目还没有商品，请先同步 Master 方案商品。")
+        target = Path(target_path) if target_path else self.default_markdown_path(project_id)
+
+        existing_text = target.read_text(encoding="utf-8-sig") if target.exists() else ""
+        parsed = parse_markdown_text(existing_text) if existing_text.strip() else None
+        existing_products = {item.uid: item for item in parsed.products} if parsed else {}
+        existing_intro = parsed.intro_scripts if parsed else []
+        existing_transitions = parsed.price_transitions if parsed else []
+        extra_sections = parsed.extra_sections if parsed else {}
+
+        added: list[dict[str, Any]] = []
+        preserved: list[dict[str, Any]] = []
+        lines: list[str] = [
+            "---",
+            f"primary_category: {safe_text(project.get('category_parent_name'))}",
+            f"primary_category_id: {safe_text(project.get('category_parent_id'))}",
+            f"category: {safe_text(project.get('category_name'))}",
+            f"category_id: {safe_text(project.get('category_id'))}",
+            f"scheme: {safe_text(project.get('scheme_name'))}",
+            f"scheme_id: {safe_text(project.get('scheme_id'))}",
+            "---",
+            "",
+            "## 视频信息",
+            "",
+        ]
+        for section_name, section_lines in extra_sections.items():
+            if section_name == "视频信息":
+                lines.extend(section_lines)
+                lines.append("")
+                break
+
+        lines += ["## 引言文案", ""]
+        if existing_intro:
+            for block in existing_intro:
+                lines += [f"### {block.label}", block.body, ""]
+        else:
+            lines += ["### 引言1", "", ""]
+
+        lines += ["## 商品文案", ""]
+        for product in products:
+            uid = product["uid"]
+            existing = existing_products.get(uid)
+            if existing:
+                preserved.append(product)
+            else:
+                added.append(product)
+            lines += [f"### {format_product_heading(product)}", ""]
+            if existing:
+                lines.extend(render_product_body(existing))
+            lines.append("")
+
+        lines += ["## 价格过渡文案", ""]
+        if existing_transitions:
+            for transition in existing_transitions:
+                lines += [f"### {transition.label}", ""]
+                for script in transition.scripts:
+                    lines += [f"#### {script.label}", script.body, ""]
+        else:
+            lines += ["### 0-100元", "", "", "### 100-200元", "", ""]
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        self.db.execute("UPDATE projects SET md_path=?, updated_at=datetime('now') WHERE id=?", (str(target), project_id))
+        self.db.log_event(
+            project_id,
+            "outline_init",
+            "success",
+            f"文案框架已更新：新增 {len(added)}，保留 {len(preserved)}，目标 {target}",
+        )
+        return {
+            "target_path": str(target),
+            "added": added,
+            "preserved": preserved,
+            "total": len(products),
+        }
+
+
+def format_product_heading(product: dict[str, Any]) -> str:
+    return f"{safe_text(product.get('price_label'))}-{safe_text(product.get('uid'))}-{safe_text(product.get('title'))}"
+
+
+def render_product_body(product: ProductDoc) -> list[str]:
+    lines: list[str] = []
+    for script in product.scripts:
+        lines += [f"#### {script.label}", script.body, ""]
+    if product.image_path:
+        lines.append(f"图片：{product.image_path}")
+    if product.video_path:
+        lines.append(f"视频：{product.video_path}")
+    return lines

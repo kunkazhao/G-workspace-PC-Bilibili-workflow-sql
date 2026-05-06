@@ -66,3 +66,11 @@ The parser uses fixed headings instead of guessing:
 - `## 商品顺序`
 
 Product headings should include UID, for example `### 竹林鸟夜莺Z1-YXEJ002-59元`. Multiple versions can be written with `#### 正文`, `#### 版本2`, or similar labels under the same intro/product/price block.
+
+The V2 outline creator writes product headings as `价格-UID-商品名`, for example:
+
+```md
+### 59元-YXEJ002-竹林鸟夜莺Z1
+```
+
+The parser still accepts the older `商品名-UID-价格` heading format for existing documents.

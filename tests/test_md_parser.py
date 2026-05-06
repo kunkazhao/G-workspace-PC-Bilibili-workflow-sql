@@ -46,3 +46,18 @@ def test_parse_multi_version_markdown():
     assert parsed.price_transitions[0].label == "100-200元"
     assert [item.label for item in parsed.price_transitions[0].scripts] == ["正文", "版本2"]
     assert parsed.ordered_uids == ["YXEJ002"]
+
+
+def test_parse_price_uid_title_heading():
+    parsed = parse_markdown_text(
+        """
+## 商品文案
+
+### 59元-YXEJ002-竹林鸟夜莺Z1
+#### 正文
+商品正文
+""".strip()
+    )
+    assert parsed.products[0].price_label == "59元"
+    assert parsed.products[0].uid == "YXEJ002"
+    assert parsed.products[0].title == "竹林鸟夜莺Z1"

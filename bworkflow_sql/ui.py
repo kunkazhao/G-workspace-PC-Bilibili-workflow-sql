@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from .db import Database
 from .master_data import MasterDataService, display_name
+from .outline_service import OutlineService
 from .repositories import Repository
 from .settings import (
     DEFAULT_IMAGE_ROOT,
@@ -32,6 +33,7 @@ class App(tk.Tk):
         self.repo = Repository(self.db)
         self.sync = SyncService(self.db)
         self.workflow = WorkflowService(self.db)
+        self.outline = OutlineService(self.db)
         self.master_data = MasterDataService()
         self.current_project_id: int | None = self.db.latest_project_id()
         self.pages: dict[str, BasePage] = {}
@@ -102,6 +104,7 @@ class BasePage(ttk.Frame):
         self.repo = app.repo
         self.sync = app.sync
         self.workflow = app.workflow
+        self.outline = app.outline
         self.master_data = app.master_data
         self.columnconfigure(0, weight=1)
         self.rowconfigure(99, weight=1)
@@ -213,6 +216,7 @@ class ProjectPage(BasePage):
         actions.grid(row=3, column=0, sticky="ew", pady=12)
         ttk.Button(actions, text="预览 Master 方案变化", command=self._preview_master).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="同步 Master 方案商品", command=self._sync_master).pack(side="left", padx=(0, 8))
+        ttk.Button(actions, text="创建/更新文案框架", command=self._init_outline).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="同步 MD 文案", command=self._sync_md).pack(side="left")
         self.log_text = tk.Text(self, height=14, state="disabled")
         self.log_text.grid(row=99, column=0, sticky="nsew", pady=(8, 0))
@@ -307,6 +311,32 @@ class ProjectPage(BasePage):
             messagebox.showerror("同步失败", str(exc))
             return
         self.log(f"MD 已同步：入库 {result['upserted']} 条，额外商品 {len(result['extra_md'])}，缺文案 {len(result['missing_copy'])}")
+
+    def _init_outline(self) -> None:
+        project = self.project_required()
+        if not project:
+            return
+        if not self.fields["md_path"].get().strip():
+            self.fields["md_path"].set(str(self.outline.default_markdown_path(project["id"])))
+        path = filedialog.asksaveasfilename(
+            defaultextension=".md",
+            filetypes=[("Markdown", "*.md"), ("All", "*.*")],
+            initialdir=str(DEFAULT_MARKDOWN_ROOT),
+            initialfile=Path(self.fields["md_path"].get()).name,
+        )
+        if not path:
+            return
+        try:
+            result = self.outline.init_or_update_outline(project["id"], path)
+            sync_result = self.sync.sync_markdown(project["id"])
+        except Exception as exc:
+            messagebox.showerror("创建失败", str(exc))
+            return
+        self.fields["md_path"].set(result["target_path"])
+        self.log(
+            f"文案框架已更新：商品 {result['total']} 个，新增 {len(result['added'])}，保留 {len(result['preserved'])}。"
+        )
+        self.log(f"已同步 MD 到数据库：入库 {sync_result['upserted']} 条。")
 
     def refresh(self) -> None:
         projects = self.repo.projects()

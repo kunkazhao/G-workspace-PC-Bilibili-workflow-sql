@@ -12,6 +12,7 @@ H3_RE = re.compile(r"^###\s+(.+?)\s*$")
 H4_RE = re.compile(r"^####\s+(.+?)\s*$")
 UID_RE = re.compile(r"(?P<uid>[A-Za-z]{1,12}\d[\w-]*)")
 PRODUCT_HEADING_RE = re.compile(r"^(?P<title>.+?)[-/](?P<uid>[A-Za-z]{1,12}\d[\w-]*)[-/](?P<price>.+)$")
+PRICE_UID_TITLE_HEADING_RE = re.compile(r"^(?P<price>.+?)[-/](?P<uid>[A-Za-z]{1,12}\d[\w-]*)[-/](?P<title>.+)$")
 SCRIPT_ID_RE = re.compile(r"^<!--\s*script_id:\s*(?P<script_id>[^>]+?)\s*-->$")
 VOICE_STATUS_RE = re.compile(r"^<!--\s*voice_status:")
 BLOCK_LABEL_ALIASES = {"正文", "版本1", "版本2", "来源 1", "来源 2", "来源1", "来源2"}
@@ -172,6 +173,9 @@ def parse_intro(lines: list[str]) -> list[ScriptVariant]:
 
 def parse_product_heading(heading: str) -> tuple[str, str, str] | None:
     heading = safe_text(heading)
+    price_first_match = PRICE_UID_TITLE_HEADING_RE.match(heading)
+    if price_first_match:
+        return price_first_match.group("uid").strip(), price_first_match.group("title").strip(), price_first_match.group("price").strip()
     match = PRODUCT_HEADING_RE.match(heading)
     if match:
         return match.group("uid").strip(), match.group("title").strip(), match.group("price").strip()
