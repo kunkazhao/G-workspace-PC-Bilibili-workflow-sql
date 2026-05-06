@@ -6,6 +6,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
 from .db import Database
+from .legacy_import import LegacyImportService
 from .master_data import MasterDataService, display_name
 from .outline_service import OutlineService
 from .repositories import Repository
@@ -34,6 +35,7 @@ class App(tk.Tk):
         self.sync = SyncService(self.db)
         self.workflow = WorkflowService(self.db)
         self.outline = OutlineService(self.db)
+        self.legacy_import = LegacyImportService(self.db)
         self.master_data = MasterDataService()
         self.current_project_id: int | None = self.db.latest_project_id()
         self.pages: dict[str, BasePage] = {}
@@ -105,6 +107,7 @@ class BasePage(ttk.Frame):
         self.sync = app.sync
         self.workflow = app.workflow
         self.outline = app.outline
+        self.legacy_import = app.legacy_import
         self.master_data = app.master_data
         self.columnconfigure(0, weight=1)
         self.rowconfigure(99, weight=1)
@@ -477,16 +480,16 @@ class ProjectPage(BasePage):
 class TablePage(BasePage):
     columns: tuple[str, ...] = ()
 
-    def _build_table(self) -> None:
+    def _build_table(self, row: int = 1) -> None:
         self.tree = ttk.Treeview(self, columns=self.columns, show="headings")
         for column in self.columns:
             self.tree.heading(column, text=column)
             self.tree.column(column, width=140, anchor="w")
-        self.tree.grid(row=1, column=0, sticky="nsew")
-        self.rowconfigure(1, weight=1)
+        self.tree.grid(row=row, column=0, sticky="nsew")
+        self.rowconfigure(row, weight=1)
         ybar = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=ybar.set)
-        ybar.grid(row=1, column=1, sticky="ns")
+        ybar.grid(row=row, column=1, sticky="ns")
 
     def _set_rows(self, rows: list[tuple[Any, ...]]) -> None:
         self.tree.delete(*self.tree.get_children())
@@ -528,14 +531,35 @@ class CopyPage(TablePage):
 
 
 class AssetPage(TablePage):
-    columns = ("UID", "商品", "文案", "图片", "视频", "配音", "问题")
+    columns = ("品类", "用户", "对象", "文案类型", "文案", "图片", "视频", "配音", "问题")
 
     def __init__(self, master, app: App):
         super().__init__(master, app)
+        self.category_var = tk.StringVar(value="全部")
+        self.user_var = tk.StringVar(value="全部")
+        self.status_var = tk.StringVar(value="全部")
         actions = ttk.Frame(self)
         actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ttk.Button(actions, text="同步素材文件夹", command=self._sync_assets).pack(side="left")
-        self._build_table()
+        ttk.Button(actions, text="导入旧项目用户/音色", command=self._import_legacy_accounts).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="导入屏幕挂灯资产", command=self._import_screen_light).pack(side="left", padx=(8, 0))
+        filters = ttk.Frame(self)
+        filters.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(filters, text="品类").pack(side="left")
+        self.category_combo = ttk.Combobox(filters, textvariable=self.category_var, state="readonly", width=18)
+        self.category_combo.pack(side="left", padx=(6, 14))
+        self.category_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+        ttk.Label(filters, text="用户").pack(side="left")
+        self.user_combo = ttk.Combobox(filters, textvariable=self.user_var, state="readonly", width=14)
+        self.user_combo.pack(side="left", padx=(6, 14))
+        self.user_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+        ttk.Label(filters, text="筛选").pack(side="left")
+        self.status_combo = ttk.Combobox(filters, textvariable=self.status_var, state="readonly", values=["全部", "缺文案", "缺图片", "缺视频", "缺配音", "配音过期"], width=14)
+        self.status_combo.pack(side="left", padx=(6, 14))
+        self.status_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+        self.summary_label = ttk.Label(self, text="")
+        self.summary_label.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        self._build_table(row=3)
 
     def _sync_assets(self) -> None:
         project = self.project_required()
@@ -550,33 +574,189 @@ class AssetPage(TablePage):
         self.refresh()
 
     def refresh(self) -> None:
-        project = self.app.current_project()
-        if not project:
+        projects = self.repo.projects()
+        if not projects:
             self._set_rows([])
             return
+        categories = ["全部"] + sorted({item["category_name"] for item in projects if item["category_name"]})
+        self.category_combo.configure(values=categories)
+        if self.category_var.get() not in categories:
+            self.category_var.set("全部")
+        users = ["全部"] + [item["label"] for item in self.repo.accounts()]
+        self.user_combo.configure(values=users)
+        if self.user_var.get() not in users:
+            self.user_var.set("全部")
+
+        rows: list[tuple[Any, ...]] = []
+        summary = {"copy": 0, "missing_copy": 0, "image": 0, "missing_image": 0, "video": 0, "missing_video": 0, "voice": 0, "missing_voice": 0}
+        selected_category = self.category_var.get()
+        selected_user = self.user_var.get()
+        for project in projects:
+            if selected_category != "全部" and project["category_name"] != selected_category:
+                continue
+            project_rows, project_summary = self._rows_for_project(project, selected_user=selected_user)
+            rows.extend(project_rows)
+            for key, value in project_summary.items():
+                summary[key] += value
+        rows = [row for row in rows if self._row_matches_filter(row)]
+        self.summary_label.configure(
+            text=(
+                f"文案 {summary['copy']} / 缺 {summary['missing_copy']}  | "
+                f"图片 {summary['image']} / 缺 {summary['missing_image']}  | "
+                f"视频 {summary['video']} / 缺 {summary['missing_video']}  | "
+                f"配音 {summary['voice']} / 缺 {summary['missing_voice']}"
+            )
+        )
+        self._set_rows(rows)
+
+    def _rows_for_project(self, project: dict[str, Any], *, selected_user: str) -> tuple[list[tuple[Any, ...]], dict[str, int]]:
         blocks = self.repo.script_blocks(project["id"])
         assets = self.repo.asset_bindings(project["id"])
-        by_uid: dict[str, dict[str, int]] = {}
-        for asset in assets:
-            uid = asset["uid"]
-            by_uid.setdefault(uid, {"image": 0, "video": 0, "voice": 0})
-            if asset["status"] == "ready" and asset["asset_type"] in by_uid[uid]:
-                by_uid[uid][asset["asset_type"]] += 1
-        copy_uids = {block["owner_uid"] for block in blocks if block["script_type"] == "product" and block["owner_uid"]}
+        products = self.repo.products(project["id"], include_removed=True)
+        accounts = self.repo.accounts()
+        if selected_user != "全部":
+            accounts = [item for item in accounts if item["label"] == selected_user]
+        if not accounts:
+            accounts = [{"label": "未设置", "account_id": "", "media_identity": ""}]
+        summary = {"copy": 0, "missing_copy": 0, "image": 0, "missing_image": 0, "video": 0, "missing_video": 0, "voice": 0, "missing_voice": 0}
+        rows: list[tuple[Any, ...]] = []
+        block_counts: dict[tuple[str, str], int] = {}
+        block_hashes: dict[tuple[str, str], set[str]] = {}
+        for block in blocks:
+            if block["script_type"] == "product":
+                block_counts[("product", block["owner_uid"])] = block_counts.get(("product", block["owner_uid"]), 0) + 1
+                block_hashes.setdefault(("product", block["owner_uid"]), set()).add(block["text_hash"])
+            elif block["script_type"] == "intro":
+                block_counts[("intro", "INTRO")] = block_counts.get(("intro", "INTRO"), 0) + 1
+                block_hashes.setdefault(("intro", "INTRO"), set()).add(block["text_hash"])
+            elif block["script_type"] == "price_transition":
+                price_label = block["price_range_label"] or "价格过渡"
+                block_counts[("price_transition", price_label)] = block_counts.get(("price_transition", price_label), 0) + 1
+                block_hashes.setdefault(("price_transition", price_label), set()).add(block["text_hash"])
+
+        for account in accounts:
+            rows.extend(self._shared_rows(project, account, assets, block_counts, block_hashes, summary))
+            for product in products:
+                rows.append(self._product_row(project, account, product, assets, block_counts, block_hashes, summary))
+        return rows, summary
+
+    def _shared_rows(
+        self,
+        project: dict[str, Any],
+        account: dict[str, Any],
+        assets: list[dict[str, Any]],
+        block_counts: dict[tuple[str, str], int],
+        block_hashes: dict[tuple[str, str], set[str]],
+        summary: dict[str, int],
+    ) -> list[tuple[Any, ...]]:
         rows = []
-        for product in self.repo.products(project["id"], include_removed=True):
-            uid = product["uid"]
-            stats = by_uid.get(uid, {})
+        shared_specs = [("INTRO", "引言文案", "引言文案", "intro", "INTRO", "")]
+        price_labels = sorted(key[1] for key in block_counts if key[0] == "price_transition") or ["价格过渡"]
+        shared_specs.extend(("PRICE_TRANSITION", label, "价格过渡文案", "price_transition", label, label) for label in price_labels)
+        for uid, object_label, copy_type, script_type, block_key, asset_block_label in shared_specs:
+            copy_count = block_counts.get((script_type, block_key), 0)
+            voice_count = self._asset_count(assets, uid=uid, asset_type="voice", account_label=account["label"], block_label=asset_block_label)
             issues = []
-            if uid not in copy_uids:
+            if copy_count:
+                summary["copy"] += 1
+            else:
+                summary["missing_copy"] += 1
                 issues.append("缺文案")
-            for kind, label in [("image", "缺图片"), ("video", "缺视频"), ("voice", "缺配音")]:
-                if not stats.get(kind):
-                    issues.append(label)
-            if int(product["removed_from_master"]):
-                issues.append("已从 Master 移除")
-            rows.append((uid, product["title"], "有" if uid in copy_uids else "缺", stats.get("image", 0), stats.get("video", 0), stats.get("voice", 0), "，".join(issues)))
-        self._set_rows(rows)
+            if voice_count:
+                summary["voice"] += 1
+            else:
+                summary["missing_voice"] += 1
+                issues.append("缺配音")
+            if self._has_expired_voice(assets, uid=uid, account_label=account["label"], hashes=block_hashes.get((script_type, block_key), set()), block_label=asset_block_label):
+                issues.append("配音过期")
+            rows.append((project["category_name"], account["label"], object_label, copy_type, copy_count, "--", "--", voice_count, "，".join(issues)))
+        return rows
+
+    def _product_row(
+        self,
+        project: dict[str, Any],
+        account: dict[str, Any],
+        product: dict[str, Any],
+        assets: list[dict[str, Any]],
+        block_counts: dict[tuple[str, str], int],
+        block_hashes: dict[tuple[str, str], set[str]],
+        summary: dict[str, int],
+    ) -> tuple[Any, ...]:
+        uid = product["uid"]
+        copy_count = block_counts.get(("product", uid), 0)
+        image_count = self._asset_count(assets, uid=uid, asset_type="image", account_label=account["label"])
+        video_count = self._asset_count(assets, uid=uid, asset_type="video")
+        voice_count = self._asset_count(assets, uid=uid, asset_type="voice", account_label=account["label"])
+        issues = []
+        for key, count, label in [
+            ("copy", copy_count, "缺文案"),
+            ("image", image_count, "缺图片"),
+            ("video", video_count, "缺视频"),
+            ("voice", voice_count, "缺配音"),
+        ]:
+            if count:
+                summary[key] += 1
+            else:
+                summary[f"missing_{key}"] += 1
+                issues.append(label)
+        if int(product["removed_from_master"]):
+            issues.append("已从 Master 移除")
+        if self._has_expired_voice(assets, uid=uid, account_label=account["label"], hashes=block_hashes.get(("product", uid), set())):
+            issues.append("配音过期")
+        return (project["category_name"], account["label"], f"{product['price_label']} / {uid} / {product['title']}", "商品文案", copy_count, image_count, video_count, voice_count, "，".join(issues))
+
+    def _asset_count(self, assets: list[dict[str, Any]], *, uid: str, asset_type: str, account_label: str = "", block_label: str = "") -> int:
+        return sum(
+            1
+            for asset in assets
+            if asset["uid"] == uid
+            and asset["asset_type"] == asset_type
+            and asset["status"] == "ready"
+            and (not account_label or asset["account_label"] == account_label or not asset["account_label"])
+            and (not block_label or asset["block_label"] == block_label)
+        )
+
+    def _has_expired_voice(self, assets: list[dict[str, Any]], *, uid: str, account_label: str, hashes: set[str], block_label: str = "") -> bool:
+        if not hashes:
+            return False
+        for asset in assets:
+            if asset["uid"] != uid or asset["asset_type"] != "voice" or asset["status"] != "ready":
+                continue
+            if account_label and asset["account_label"] != account_label:
+                continue
+            if block_label and asset["block_label"] != block_label:
+                continue
+            text_hash = safe_text(asset["text_hash"])
+            if text_hash and text_hash not in hashes:
+                return True
+        return False
+
+    def _row_matches_filter(self, row: tuple[Any, ...]) -> bool:
+        issue = str(row[-1] or "")
+        value = self.status_var.get()
+        if value == "全部":
+            return True
+        return value in issue
+
+    def _import_legacy_accounts(self) -> None:
+        accounts = self.legacy_import.import_accounts()
+        voices = self.legacy_import.import_voice_profiles()
+        messagebox.showinfo("导入完成", f"用户 {accounts} 个，音色 {voices} 个。")
+        self.refresh()
+
+    def _import_screen_light(self) -> None:
+        try:
+            result = self.legacy_import.import_category_project(
+                parent_category="数码",
+                category="屏幕挂灯",
+                md_path=Path(r"G:\WriteSpace\B站-文案脚本\10_b站文案\3.商品文案\数码-屏幕挂灯.md"),
+            )
+        except Exception as exc:
+            messagebox.showerror("导入失败", str(exc))
+            return
+        self.app.set_current_project(result["project_id"])
+        messagebox.showinfo("导入完成", f"屏幕挂灯已导入：商品/文案/素材映射已写入数据库。\n{result}")
+        self.refresh()
 
 
 class SyncPage(TablePage):
@@ -619,7 +799,8 @@ class AccountPage(TablePage):
             ttk.Label(form, text=label).grid(row=index // 2, column=(index % 2) * 2, sticky="w", padx=(0, 8), pady=4)
             ttk.Entry(form, textvariable=self.vars[key]).grid(row=index // 2, column=(index % 2) * 2 + 1, sticky="ew", padx=(0, 8), pady=4)
         ttk.Button(form, text="保存用户", command=self._save_account).grid(row=3, column=0, sticky="w", pady=6)
-        ttk.Label(form, text="说明：用户名称就是小燃、小博、小歪这类账号；音色标识用于生成对应配音。").grid(row=3, column=1, columnspan=3, sticky="w", pady=6)
+        ttk.Button(form, text="导入旧项目用户/音色", command=self._import_legacy_accounts).grid(row=3, column=1, sticky="w", pady=6)
+        ttk.Label(form, text="说明：用户名称就是小燃、小博、小歪这类账号；音色标识用于生成对应配音。").grid(row=4, column=0, columnspan=4, sticky="w", pady=6)
         self._build_table()
 
     def _save_account(self) -> None:
@@ -643,6 +824,12 @@ class AccountPage(TablePage):
                 """,
                 (payload["label"], payload["account_id"], payload["voice_id"], payload["voice_name"], payload["media_identity"], payload["closing_audio_path"], ts, ts),
             )
+        self.refresh()
+
+    def _import_legacy_accounts(self) -> None:
+        accounts = self.legacy_import.import_accounts()
+        voices = self.legacy_import.import_voice_profiles()
+        messagebox.showinfo("导入完成", f"已写入旧项目用户 {accounts} 个，音色 {voices} 个。")
         self.refresh()
 
     def refresh(self) -> None:

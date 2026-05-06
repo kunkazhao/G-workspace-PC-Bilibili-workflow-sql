@@ -1,0 +1,15 @@
+from pathlib import Path
+
+from bworkflow_sql.legacy_import import _product_from_path
+
+
+def test_product_from_path_matches_uid_title_then_order():
+    products = [
+        {"uid": "PMGD010", "title": "机械师 ML3", "sort_order": 1},
+        {"uid": "PMGD006", "title": "微星 B500PRO", "sort_order": 6},
+        {"uid": "PMGD003", "title": "dpdupi 德普", "sort_order": 9},
+    ]
+
+    assert _product_from_path(Path("1-机械师 ML3_去字幕.mp4"), products)["uid"] == "PMGD010"
+    assert _product_from_path(Path("6-微星B500PRO_去字幕.mp4"), products)["uid"] == "PMGD006"
+    assert _product_from_path(Path("9-没有标题命中_去字幕.mp4"), products)["uid"] == "PMGD003"

@@ -15,6 +15,7 @@ PRODUCT_HEADING_RE = re.compile(r"^(?P<title>.+?)[-/](?P<uid>[A-Za-z]{1,12}\d[\w
 PRICE_UID_TITLE_HEADING_RE = re.compile(r"^(?P<price>.+?)[-/](?P<uid>[A-Za-z]{1,12}\d[\w-]*)[-/](?P<title>.+)$")
 SCRIPT_ID_RE = re.compile(r"^<!--\s*script_id:\s*(?P<script_id>[^>]+?)\s*-->$")
 VOICE_STATUS_RE = re.compile(r"^<!--\s*voice_status:")
+MANUAL_LABEL_RE = re.compile(r"^\*\*(?P<label>.+?)\*\*$")
 BLOCK_LABEL_ALIASES = {"正文", "版本1", "版本2", "来源 1", "来源 2", "来源1", "来源2"}
 
 
@@ -95,6 +96,12 @@ def parse_script_variants(lines: list[str], fallback_label: str = "正文") -> l
     loose_lines: list[str] = []
     pending_script_id = ""
     current_script_id = ""
+    auto_index = 0
+
+    def next_auto_label() -> str:
+        nonlocal auto_index
+        auto_index += 1
+        return fallback_label if auto_index == 1 else f"{fallback_label}{auto_index}"
 
     def flush() -> None:
         nonlocal current_label, current_lines, current_script_id
@@ -111,6 +118,14 @@ def parse_script_variants(lines: list[str], fallback_label: str = "正文") -> l
             pending_script_id = safe_text(script_match.group("script_id"))
             continue
         if VOICE_STATUS_RE.match(stripped):
+            continue
+        manual_match = MANUAL_LABEL_RE.match(stripped)
+        if manual_match:
+            flush()
+            current_label = next_auto_label()
+            current_lines = []
+            current_script_id = pending_script_id
+            pending_script_id = ""
             continue
         heading4 = H4_RE.match(stripped)
         heading3 = H3_RE.match(stripped)
@@ -147,6 +162,8 @@ def parse_script_variants(lines: list[str], fallback_label: str = "正文") -> l
 
 def parse_intro(lines: list[str]) -> list[ScriptVariant]:
     # In intro sections, H3 headings are independent intro choices.
+    if not any(H3_RE.match(raw.strip()) for raw in lines):
+        return parse_script_variants(lines, fallback_label="引言")
     chunks: list[tuple[str, list[str]]] = []
     current_label = ""
     current_lines: list[str] = []
@@ -174,17 +191,24 @@ def parse_intro(lines: list[str]) -> list[ScriptVariant]:
 def parse_product_heading(heading: str) -> tuple[str, str, str] | None:
     heading = safe_text(heading)
     price_first_match = PRICE_UID_TITLE_HEADING_RE.match(heading)
-    if price_first_match:
+    product_match = PRODUCT_HEADING_RE.match(heading)
+    if product_match and _looks_like_price(product_match.group("price")) and not _looks_like_price(product_match.group("title")):
+        return product_match.group("uid").strip(), product_match.group("title").strip(), product_match.group("price").strip()
+    if price_first_match and _looks_like_price(price_first_match.group("price")):
         return price_first_match.group("uid").strip(), price_first_match.group("title").strip(), price_first_match.group("price").strip()
-    match = PRODUCT_HEADING_RE.match(heading)
-    if match:
-        return match.group("uid").strip(), match.group("title").strip(), match.group("price").strip()
+    if product_match:
+        return product_match.group("uid").strip(), product_match.group("title").strip(), product_match.group("price").strip()
     uid_match = UID_RE.search(heading)
     if not uid_match:
         return None
     uid = uid_match.group("uid")
     title = heading.replace(uid, "").strip(" -/|")
     return uid, title or uid, ""
+
+
+def _looks_like_price(value: str) -> bool:
+    value = safe_text(value)
+    return "元" in value or bool(re.match(r"^\d+(\.\d+)?$", value))
 
 
 def parse_products(lines: list[str]) -> list[ProductDoc]:

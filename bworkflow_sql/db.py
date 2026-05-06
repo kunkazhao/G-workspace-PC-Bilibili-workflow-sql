@@ -74,10 +74,15 @@ CREATE TABLE IF NOT EXISTS asset_bindings (
     asset_type TEXT NOT NULL,
     account_label TEXT NOT NULL DEFAULT '',
     account_id TEXT NOT NULL DEFAULT '',
+    media_identity TEXT NOT NULL DEFAULT '',
+    image_set TEXT NOT NULL DEFAULT '',
     block_label TEXT NOT NULL DEFAULT '',
+    script_id TEXT NOT NULL DEFAULT '',
+    text_hash TEXT NOT NULL DEFAULT '',
     path TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'missing',
     source_kind TEXT NOT NULL DEFAULT 'scan',
+    source_path TEXT NOT NULL DEFAULT '',
     file_size INTEGER,
     file_mtime TEXT NOT NULL DEFAULT '',
     confirmed INTEGER NOT NULL DEFAULT 0,
@@ -95,6 +100,17 @@ CREATE TABLE IF NOT EXISTS accounts (
     media_identity TEXT NOT NULL DEFAULT '',
     closing_audio_path TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS voice_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    voice_id TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL DEFAULT '',
+    speaker_audio_path TEXT NOT NULL DEFAULT '',
+    emotion_audio_path TEXT NOT NULL DEFAULT '',
+    source_audio_path TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -152,6 +168,16 @@ class Database:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
         if "spoken_md_path" not in columns:
             conn.execute("ALTER TABLE projects ADD COLUMN spoken_md_path TEXT DEFAULT ''")
+        asset_columns = {row[1] for row in conn.execute("PRAGMA table_info(asset_bindings)").fetchall()}
+        for column, ddl in {
+            "media_identity": "TEXT NOT NULL DEFAULT ''",
+            "image_set": "TEXT NOT NULL DEFAULT ''",
+            "script_id": "TEXT NOT NULL DEFAULT ''",
+            "text_hash": "TEXT NOT NULL DEFAULT ''",
+            "source_path": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if column not in asset_columns:
+                conn.execute(f"ALTER TABLE asset_bindings ADD COLUMN {column} {ddl}")
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> None:
         with self.connect() as conn:

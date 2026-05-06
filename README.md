@@ -27,7 +27,7 @@ Configuration:
 
 - 品类项目
 - 文案中心
-- 资产中心
+- 资产中心：按品类、用户、文案类型查看商品文案、引言文案、价格过渡文案，以及图片、视频、配音映射状态
 - 同步中心
 - 用户管理
 - 设置
@@ -48,6 +48,11 @@ The UI is intentionally direct and database-first. JSON/Markdown support is comp
 4. Sync asset folders. Image/video/voice files are matched to current products by UID in the filename or path and saved as database bindings.
 5. Use the workflow pages in order: `生成配音` -> `组合口播稿` -> `生成剪映草稿`. The spoken-script output MD is chosen in `组合口播稿`, not in the category project.
 
+Legacy migration helpers are available in `资产中心` and `用户管理`:
+
+- `导入旧项目用户/音色` imports old account and voice-profile data into SQLite.
+- `导入屏幕挂灯资产` imports the existing `数码-屏幕挂灯` project, MD copy, images, videos, and voice mappings from the old workflow folders.
+
 Output rules:
 
 - `商品文案 MD` is the source copy document.
@@ -66,6 +71,8 @@ The parser uses fixed headings instead of guessing:
 - `## 商品顺序`
 
 Product headings should include UID, for example `### 竹林鸟夜莺Z1-YXEJ002-59元`. Multiple versions can be written with `#### 正文`, `#### 版本2`, or similar labels under the same intro/product/price block.
+
+Existing old MD files are also supported when a block has no `####` title and uses repeated `**手动录入**` markers. Those blocks are imported as `正文`, `正文2`, or `引言`, `引言2`, while preserving the nearby `script_id` comments for matching and auditing.
 
 The V2 outline creator writes product headings as `价格-UID-商品名`, for example:
 
