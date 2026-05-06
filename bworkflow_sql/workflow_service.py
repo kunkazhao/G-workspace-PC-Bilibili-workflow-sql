@@ -8,7 +8,13 @@ from typing import Any
 from .db import Database
 from .legacy_bridge import legacy_script_path
 from .repositories import Repository
-from .settings import B_WORKFLOW_SKILL_SCRIPTS, DEFAULT_OUTPUT_ROOT, PEIYINDAN_SKILL_SCRIPTS
+from .settings import (
+    B_WORKFLOW_SKILL_SCRIPTS,
+    DEFAULT_JIANYING_DRAFT_ROOT,
+    DEFAULT_OUTPUT_ROOT,
+    INTERNAL_WORKSPACE_ROOT,
+    PEIYINDAN_SKILL_SCRIPTS,
+)
 from .utils import safe_text
 
 
@@ -24,7 +30,7 @@ class WorkflowService:
         products = self.repo.products(project_id, include_removed=False)
         blocks = self.repo.script_blocks(project_id)
         assets = self.repo.asset_bindings(project_id)
-        target = Path(target_path) if target_path else Path(safe_text(project.get("output_root")) or DEFAULT_OUTPUT_ROOT) / f"{project['name']}-db-export.md"
+        target = Path(target_path) if target_path else self._internal_project_dir(project_id) / "project-export.md"
         target.parent.mkdir(parents=True, exist_ok=True)
         by_type: dict[str, list[dict[str, Any]]] = {"intro": [], "product": [], "price_transition": []}
         for block in blocks:
@@ -109,9 +115,8 @@ class WorkflowService:
         if not project:
             raise ValueError("请先选择品类项目。")
         markdown_path = self.export_project_markdown(project_id)
-        out_dir = Path(safe_text(project.get("output_root")) or DEFAULT_OUTPUT_ROOT)
-        output_markdown = out_dir / "口播稿.md"
-        manifest_output = out_dir / "口播稿.manifest.json"
+        output_markdown = self._spoken_markdown_path(project)
+        manifest_output = manifest_path_for_markdown(output_markdown)
         account = self._resolve_account(account_label)
         registry_dir = Path(safe_text(project.get("voice_root")) or DEFAULT_OUTPUT_ROOT) / safe_text(account.get("label") or account_label or "voice")
         cmd = [
@@ -152,9 +157,8 @@ class WorkflowService:
         project = self.repo.project(project_id)
         if not project:
             raise ValueError("请先选择品类项目。")
-        out_dir = Path(safe_text(project.get("output_root")) or DEFAULT_OUTPUT_ROOT)
-        manifest = out_dir / "口播稿.manifest.json"
-        draft_root = out_dir / "jianying_drafts"
+        output_markdown = self._spoken_markdown_path(project)
+        manifest = manifest_path_for_markdown(output_markdown)
         return [
             "python",
             str(legacy_script_path("scripts", "generate_jianying_draft_with_display_videos.py")),
@@ -163,7 +167,7 @@ class WorkflowService:
             "--draft-name",
             safe_path_component(draft_name or safe_text(project.get("name")) or "B-Workflow-SQL"),
             "--draft-root",
-            str(draft_root),
+            str(DEFAULT_JIANYING_DRAFT_ROOT),
             "--allow-replace",
         ]
 
@@ -178,9 +182,28 @@ class WorkflowService:
                     return account
         return accounts[0] if accounts else {}
 
+    def _internal_project_dir(self, project_id: int) -> Path:
+        target = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}"
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def _spoken_markdown_path(self, project: dict[str, Any]) -> Path:
+        path_text = safe_text(project.get("spoken_md_path"))
+        if not path_text:
+            raise ValueError("请先在“品类项目”里选择口播稿输出 MD。")
+        path = Path(path_text)
+        if path.suffix.casefold() != ".md":
+            raise ValueError("口播稿输出文件必须是 .md 文档。")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
 
 def safe_path_component(value: str) -> str:
     text = safe_text(value).strip()
     text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text)
     text = re.sub(r"\s+", " ", text).strip(" .")
     return text or "B-Workflow-SQL"
+
+
+def manifest_path_for_markdown(markdown_path: Path) -> Path:
+    return markdown_path.with_name(f"{markdown_path.stem}.manifest.json")

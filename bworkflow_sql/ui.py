@@ -8,7 +8,15 @@ from typing import Any, Callable
 from .db import Database
 from .master_data import MasterDataService, display_name
 from .repositories import Repository
-from .settings import DEFAULT_IMAGE_ROOT, DEFAULT_MARKDOWN_ROOT, DEFAULT_OUTPUT_ROOT, DEFAULT_VIDEO_ROOT, DEFAULT_VOICE_ROOT
+from .settings import (
+    DEFAULT_IMAGE_ROOT,
+    DEFAULT_JIANYING_DRAFT_ROOT,
+    DEFAULT_MARKDOWN_ROOT,
+    DEFAULT_SPOKEN_MD_ROOT,
+    DEFAULT_VIDEO_ROOT,
+    DEFAULT_VOICE_ROOT,
+    INTERNAL_WORKSPACE_ROOT,
+)
 from .sync_service import SyncService
 from .utils import compact_path, now_iso, safe_text
 from .workflow_service import WorkflowService
@@ -138,6 +146,7 @@ class ProjectPage(BasePage):
             "scheme_id",
             "scheme_name",
             "md_path",
+            "spoken_md_path",
             "image_root",
             "video_root",
             "voice_root",
@@ -188,11 +197,11 @@ class ProjectPage(BasePage):
         path_form.columnconfigure(1, weight=1)
         path_form.columnconfigure(3, weight=1)
         labels = [
-            ("MD 文档", "md_path"),
+            ("商品文案 MD", "md_path"),
+            ("口播稿输出 MD（会覆盖）", "spoken_md_path"),
             ("图片根目录", "image_root"),
             ("视频根目录", "video_root"),
             ("配音根目录", "voice_root"),
-            ("输出目录", "output_root"),
         ]
         for index, (label, key) in enumerate(labels):
             row = index // 2
@@ -213,6 +222,13 @@ class ProjectPage(BasePage):
     def _browse(self, key: str) -> None:
         if key == "md_path":
             path = filedialog.askopenfilename(filetypes=[("Markdown", "*.md"), ("All", "*.*")], initialdir=str(DEFAULT_MARKDOWN_ROOT))
+        elif key == "spoken_md_path":
+            path = filedialog.asksaveasfilename(
+                defaultextension=".md",
+                filetypes=[("Markdown", "*.md"), ("All", "*.*")],
+                initialdir=str(DEFAULT_SPOKEN_MD_ROOT),
+                initialfile=f"{self.fields['name'].get().strip() or '口播稿'}.md",
+            )
         else:
             path = filedialog.askdirectory()
         if path:
@@ -228,7 +244,7 @@ class ProjectPage(BasePage):
         self.fields["image_root"].set(str(DEFAULT_IMAGE_ROOT))
         self.fields["video_root"].set(str(DEFAULT_VIDEO_ROOT))
         self.fields["voice_root"].set(str(DEFAULT_VOICE_ROOT))
-        self.fields["output_root"].set(str(DEFAULT_OUTPUT_ROOT))
+        self.fields["output_root"].set(str(INTERNAL_WORKSPACE_ROOT))
         self.project_var.set("")
 
     def _payload(self) -> dict[str, Any]:
@@ -434,6 +450,8 @@ class ProjectPage(BasePage):
                 parent = self.fields["category_parent_name"].get().strip()
                 child = self.fields["category_name"].get().strip()
                 self.fields["name"].set(f"{parent}-{child}" if parent and child else name)
+            if not self.fields["spoken_md_path"].get().strip():
+                self.fields["spoken_md_path"].set(str(DEFAULT_SPOKEN_MD_ROOT / f"{self.fields['name'].get().strip() or name}.md"))
             return
 
 
@@ -619,7 +637,9 @@ class SettingsPage(BasePage):
     def __init__(self, master, app: App):
         super().__init__(master, app)
         ttk.Label(self, text=f"数据库：{self.db.path}").grid(row=0, column=0, sticky="w", pady=4)
-        ttk.Label(self, text="V2 规则：数据库是主账本；MD 是文案编辑格式；素材文件夹保存真实文件。").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Label(self, text=f"软件中间文件：{INTERNAL_WORKSPACE_ROOT}").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Label(self, text=f"剪映草稿固定目录：{DEFAULT_JIANYING_DRAFT_ROOT}").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Label(self, text="V2 规则：数据库是主账本；MD 是文案编辑格式；素材文件夹保存真实文件。").grid(row=3, column=0, sticky="w", pady=4)
 
 
 class WorkflowPage(BasePage):

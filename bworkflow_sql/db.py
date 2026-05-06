@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS projects (
     scheme_id TEXT DEFAULT '',
     scheme_name TEXT DEFAULT '',
     md_path TEXT DEFAULT '',
+    spoken_md_path TEXT DEFAULT '',
     image_root TEXT DEFAULT '',
     video_root TEXT DEFAULT '',
     voice_root TEXT DEFAULT '',
@@ -145,6 +146,12 @@ class Database:
     def init(self) -> None:
         with sqlite3.connect(self.path) as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
+        if "spoken_md_path" not in columns:
+            conn.execute("ALTER TABLE projects ADD COLUMN spoken_md_path TEXT DEFAULT ''")
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> None:
         with self.connect() as conn:
@@ -172,6 +179,7 @@ class Database:
             "scheme_id",
             "scheme_name",
             "md_path",
+            "spoken_md_path",
             "image_root",
             "video_root",
             "voice_root",

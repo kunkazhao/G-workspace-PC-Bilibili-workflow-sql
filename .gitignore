@@ -5,3 +5,5 @@ data/*.db
 data/*.db-*
 data/*.sqlite
 data/*.sqlite-*
+data/workspace/*
+!data/workspace/.gitkeep

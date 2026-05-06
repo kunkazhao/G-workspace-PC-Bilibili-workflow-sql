@@ -42,11 +42,19 @@ The UI is intentionally direct and database-first. JSON/Markdown support is comp
 
 ## Recommended Flow
 
-1. Open `品类项目`, create a category project, and fill in Master workspace/scheme, MD path, image/video/voice roots, and output root.
+1. Open `品类项目`, create a category project, choose the Master workspace/category/scheme, then select the source MD, spoken-script output MD, image/video/voice roots.
 2. Use `预览 Master 方案变化`, then sync Master products into SQLite after confirming the product boundary.
 3. Sync the MD copy. The importer only accepts products that are already in the current Master scheme; extra MD products are reported but not imported.
 4. Sync asset folders. Image/video/voice files are matched to current products by UID in the filename or path and saved as database bindings.
 5. Use the workflow pages in order: `生成配音` -> `组合口播稿` -> `生成剪映草稿`.
+
+Output rules:
+
+- `商品文案 MD` is the source copy document.
+- `口播稿输出 MD` is the final combined spoken script. The assembly step overwrites the whole file.
+- The manifest is written next to the spoken script with the same stem, for example `数码-有线耳机.manifest.json`.
+- Internal generated files are kept under `data/workspace`.
+- Jianying drafts are written to `E:\剪辑-剪映\草稿\JianyingPro Drafts`.
 
 ## Markdown Contract
 

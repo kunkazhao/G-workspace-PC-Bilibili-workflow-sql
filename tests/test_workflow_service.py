@@ -20,7 +20,8 @@ def seed_project(tmp_path: Path):
             "image_root": str(tmp_path / "images"),
             "video_root": str(tmp_path / "videos"),
             "voice_root": str(tmp_path / "voice"),
-            "output_root": str(tmp_path / "out"),
+            "spoken_md_path": str(tmp_path / "口播稿.md"),
+            "output_root": str(tmp_path / "legacy-out"),
         }
     )
     repo.upsert_products_from_master(project_id, [{"uid": "YXEJ002", "title": "竹林鸟夜莺Z1", "price_label": "59元"}])
@@ -72,14 +73,18 @@ def test_workflow_commands_use_legacy_script_flags(tmp_path: Path):
     assert "top3" in assembly
     assert "--account-id" in assembly
     assert "xiaoran" in assembly
+    assert str(tmp_path / "口播稿.md") in assembly
+    assert str(tmp_path / "口播稿.manifest.json") in assembly
     assert "--markdown-path" not in assembly
     assert "--out-dir" not in assembly
 
     jianying = service.build_jianying_command(project_id, draft_name="数码/有线耳机")
     assert "--manifest" in jianying
+    assert str(tmp_path / "口播稿.manifest.json") in jianying
     assert "--draft-name" in jianying
     assert "数码_有线耳机" in jianying
     assert "--draft-root" in jianying
+    assert r"E:\剪辑-剪映\草稿\JianyingPro Drafts" in jianying
     assert "--output-dir" not in jianying
 
 
@@ -106,6 +111,8 @@ def test_export_markdown_uses_database_asset_bindings_and_asset_sync_dedupes(tmp
     assert len([asset for asset in assets if asset["asset_type"] == "video"]) == 1
 
     markdown_path = WorkflowService(db).export_project_markdown(project_id)
+    assert "data" in str(markdown_path)
+    assert "workspace" in str(markdown_path)
     text = markdown_path.read_text(encoding="utf-8")
     assert f"图片：{image_path}" in text
     assert f"视频：{video_path}" in text
