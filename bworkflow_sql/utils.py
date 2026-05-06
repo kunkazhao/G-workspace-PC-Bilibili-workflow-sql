@@ -19,7 +19,7 @@ def normalize_text(value: Any) -> str:
 
 
 def text_hash(value: Any) -> str:
-    return hashlib.sha256(normalize_text(value).encode("utf-8")).hexdigest()
+    return hashlib.sha1(normalize_text(value).encode("utf-8")).hexdigest()
 
 
 def file_metadata(path_text: str | Path) -> dict[str, Any]:

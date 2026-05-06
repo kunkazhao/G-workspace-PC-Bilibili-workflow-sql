@@ -9,7 +9,7 @@ from .legacy_bridge import install_legacy_paths, try_import
 from .md_parser import ParsedMarkdown, parse_markdown_file
 from .repositories import Repository
 from .settings import DEFAULT_IMAGE_ROOT, DEFAULT_VIDEO_ROOT, DEFAULT_VOICE_ROOT
-from .utils import file_metadata, now_iso, safe_text
+from .utils import file_metadata, now_iso, safe_text, text_hash
 
 
 AUDIO_SUFFIXES = {".wav"}
@@ -162,7 +162,7 @@ class SyncService:
         return {"upserted": upserted, "extra_md": extra_md, "missing_copy": missing_copy}
 
     def _upsert_script_block(self, conn, *, project_id: int, script_type: str, owner_uid: str, price_range_label: str, block_label: str, body: str, source_anchor: str, ts: str) -> int:
-        text_hash = __import__("hashlib").sha256(body.strip().encode("utf-8")).hexdigest()
+        block_hash = text_hash(body)
         conn.execute(
             """
             INSERT INTO script_blocks (project_id, script_type, owner_uid, price_range_label, block_label, body, text_hash, source_anchor, active, created_at, updated_at)
@@ -170,7 +170,7 @@ class SyncService:
             ON CONFLICT(project_id, script_type, owner_uid, price_range_label, block_label)
             DO UPDATE SET body=excluded.body, text_hash=excluded.text_hash, source_anchor=excluded.source_anchor, active=1, updated_at=excluded.updated_at
             """,
-            (project_id, script_type, owner_uid, price_range_label, block_label, body.strip(), text_hash, source_anchor, ts, ts),
+            (project_id, script_type, owner_uid, price_range_label, block_label, body.strip(), block_hash, source_anchor, ts, ts),
         )
         return 1
 

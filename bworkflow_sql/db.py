@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .settings import DB_PATH, ensure_data_dir
-from .utils import now_iso, safe_text
+from .utils import now_iso, safe_text, text_hash
 
 
 SCHEMA = """
@@ -178,6 +178,15 @@ class Database:
         }.items():
             if column not in asset_columns:
                 conn.execute(f"ALTER TABLE asset_bindings ADD COLUMN {column} {ddl}")
+        self._migrate_script_hashes(conn)
+
+    def _migrate_script_hashes(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute("SELECT id, body, text_hash FROM script_blocks").fetchall()
+        for row in rows:
+            current = safe_text(row[2])
+            if current and len(current) != 64:
+                continue
+            conn.execute("UPDATE script_blocks SET text_hash=? WHERE id=?", (text_hash(row[1]), row[0]))
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> None:
         with self.connect() as conn:
