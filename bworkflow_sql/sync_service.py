@@ -23,7 +23,7 @@ class SyncService:
         self.db = db
         self.repo = Repository(db)
 
-    def sync_master_scheme(self, project_id: int, *, apply_changes: bool = True) -> dict[str, Any]:
+    def sync_master_scheme(self, project_id: int, *, apply_changes: bool = True, force_refresh: bool = True) -> dict[str, Any]:
         project = self.repo.project(project_id)
         if not project:
             raise ValueError("请先创建或选择品类项目。")
@@ -36,7 +36,7 @@ class SyncService:
         master_schemes = try_import("core.master_schemes")
         if master_schemes is None:
             raise ValueError("无法加载旧项目 Master 方案模块。")
-        summary = master_schemes.fetch_scheme_summary(workspace_id=workspace_id, scheme_id=scheme_id)
+        summary = master_schemes.fetch_scheme_summary(workspace_id=workspace_id, scheme_id=scheme_id, force_refresh=force_refresh)
         raw_items = summary.get("items") or []
         products = []
         for index, item in enumerate(raw_items, start=1):

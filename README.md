@@ -7,9 +7,16 @@ The project treats SQLite as the local source of truth:
 - Master scheme defines the product boundary.
 - Markdown remains the writing format, but sync only imports products already in the local project.
 - Asset folders store real files. The database stores paths, status, file metadata, and mappings.
-- Legacy scripts from `G:\workspace\PC-Bilibili-workflow` and Codex skills are reused through adapters.
+- Runtime workflow is database-first: voice generation writes SQLite asset bindings directly, spoken-script assembly reads SQLite directly, and `audio_segment_registry.json` is not used by the new workflow.
+- Old project files are only read by explicit migration/import helpers.
 
 ## Run
+
+Install the UI theme dependency first:
+
+```powershell
+python -m pip install -r requirements.txt
+```
 
 ```powershell
 .\start_app.bat
@@ -57,7 +64,7 @@ Output rules:
 
 - `商品文案 MD` is the source copy document.
 - `口播稿输出 MD` is selected in the `组合口播稿` workflow. It is the final combined spoken script, and the assembly step overwrites the whole file.
-- The manifest is written next to the spoken script with the same stem, for example `数码-有线耳机.manifest.json`.
+- The spoken script manifest is an internal task file under `data/workspace/project-<id>/manifests/`.
 - Internal generated files are kept under `data/workspace`.
 - Jianying drafts are written to `E:\剪辑-剪映\草稿\JianyingPro Drafts`.
 

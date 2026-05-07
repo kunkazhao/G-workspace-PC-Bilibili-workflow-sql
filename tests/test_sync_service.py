@@ -60,3 +60,35 @@ def test_script_hash_matches_legacy_voice_registry_format(tmp_path: Path):
 
     assert row["text_hash"] == text_hash("正常配音文案")
     assert len(row["text_hash"]) == 40
+
+
+def test_master_sync_forces_fresh_scheme_summary(tmp_path: Path, monkeypatch):
+    db = Database(tmp_path / "test.db")
+    project_id = db.upsert_project(
+        {
+            "name": "keyboard",
+            "workspace_id": "workspace-1",
+            "scheme_id": "scheme-1",
+        }
+    )
+    calls = []
+
+    class FakeMasterSchemes:
+        @staticmethod
+        def fetch_scheme_summary(*, workspace_id, scheme_id, force_refresh=False):
+            calls.append(
+                {
+                    "workspace_id": workspace_id,
+                    "scheme_id": scheme_id,
+                    "force_refresh": force_refresh,
+                }
+            )
+            return {"items": [{"uid": "JP096", "title": "狼蛛F75Max 客制化", "price": "279元"}]}
+
+    monkeypatch.setattr("bworkflow_sql.sync_service.install_legacy_paths", lambda: None)
+    monkeypatch.setattr("bworkflow_sql.sync_service.try_import", lambda name: FakeMasterSchemes)
+
+    result = SyncService(db).sync_master_scheme(project_id, apply_changes=False)
+
+    assert calls == [{"workspace_id": "workspace-1", "scheme_id": "scheme-1", "force_refresh": True}]
+    assert result["added"] == [{"uid": "JP096", "title": "狼蛛F75Max 客制化", "price_label": "279元", "master_item_id": "", "sort_order": 1}]

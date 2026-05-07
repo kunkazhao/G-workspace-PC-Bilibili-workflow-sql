@@ -63,6 +63,21 @@ def test_parse_price_uid_title_heading():
     assert parsed.products[0].title == "竹林鸟夜莺Z1"
 
 
+def test_parse_price_uid_title_heading_keeps_slash_in_title():
+    parsed = parse_markdown_text(
+        """
+## 商品文案
+
+### 199元-SB058-贱驴RSR5/S
+#### 正文
+商品正文
+""".strip()
+    )
+    assert parsed.products[0].price_label == "199元"
+    assert parsed.products[0].uid == "SB058"
+    assert parsed.products[0].title == "贱驴RSR5/S"
+
+
 def test_parse_legacy_manual_blocks_without_titles():
     parsed = parse_markdown_text(
         """

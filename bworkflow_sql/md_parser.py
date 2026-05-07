@@ -10,9 +10,10 @@ from .utils import normalize_text, safe_text, text_hash
 SECTION_RE = re.compile(r"^##\s+(.+?)\s*$")
 H3_RE = re.compile(r"^###\s+(.+?)\s*$")
 H4_RE = re.compile(r"^####\s+(.+?)\s*$")
-UID_RE = re.compile(r"(?P<uid>[A-Za-z]{1,12}\d[\w-]*)")
-PRODUCT_HEADING_RE = re.compile(r"^(?P<title>.+?)[-/](?P<uid>[A-Za-z]{1,12}\d[\w-]*)[-/](?P<price>.+)$")
-PRICE_UID_TITLE_HEADING_RE = re.compile(r"^(?P<price>.+?)[-/](?P<uid>[A-Za-z]{1,12}\d[\w-]*)[-/](?P<title>.+)$")
+UID_PATTERN = r"[A-Za-z]{1,12}\d[A-Za-z0-9_-]*"
+UID_RE = re.compile(rf"(?P<uid>{UID_PATTERN})")
+PRODUCT_HEADING_RE = re.compile(rf"^(?P<title>.+?)[-/](?P<uid>{UID_PATTERN})[-/](?P<price>.+)$")
+PRICE_UID_TITLE_HEADING_RE = re.compile(rf"^(?P<price>.+?)[-/](?P<uid>{UID_PATTERN})[-/](?P<title>.+)$")
 SCRIPT_ID_RE = re.compile(r"^<!--\s*script_id:\s*(?P<script_id>[^>]+?)\s*-->$")
 VOICE_STATUS_RE = re.compile(r"^<!--\s*voice_status:")
 MANUAL_LABEL_RE = re.compile(r"^\*\*(?P<label>.+?)\*\*$")

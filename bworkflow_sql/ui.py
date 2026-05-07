@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import re
 import tkinter as tk
+import json
+import os
+import threading
+import traceback
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
@@ -27,9 +32,15 @@ from .workflow_service import WorkflowService
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        self._apply_theme()
         self.title("B-Workflow SQL 资产工作台")
         self.geometry("1400x900")
         self.minsize(1180, 760)
+        self.state("zoomed")
+        self._busy = False
+        self._toast_after: str | None = None
+        self._task_disabled_buttons: list[ttk.Button] = []
+        self.status_var = tk.StringVar(value="就绪")
         self.db = Database()
         self.repo = Repository(self.db)
         self.sync = SyncService(self.db)
@@ -43,6 +54,30 @@ class App(tk.Tk):
         self._build_shell()
         self.show_page("品类项目")
 
+    def _apply_theme(self) -> None:
+        theme_applied = False
+        try:
+            import sv_ttk  # type: ignore
+
+            sv_ttk.set_theme("light")
+            theme_applied = True
+        except Exception:
+            pass
+        style = ttk.Style(self)
+        if not theme_applied:
+            try:
+                style.theme_use("clam")
+            except tk.TclError:
+                pass
+        style.configure("TFrame", background="#f7faf9")
+        style.configure("TLabel", background="#f7faf9", foreground="#173b33", font=("Microsoft YaHei UI", 10))
+        style.configure("TButton", padding=(12, 6), font=("Microsoft YaHei UI", 10))
+        style.configure("TEntry", padding=4)
+        style.configure("TLabelframe", background="#f7faf9", borderwidth=0, relief="flat")
+        style.configure("TLabelframe.Label", background="#f7faf9", foreground="#0f3d33", font=("Microsoft YaHei UI", 11, "bold"))
+        style.configure("Treeview", rowheight=28, font=("Microsoft YaHei UI", 10))
+        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 10, "bold"))
+
     def _build_shell(self) -> None:
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
@@ -53,7 +88,7 @@ class App(tk.Tk):
         title.grid(row=0, column=0, sticky="w", pady=(0, 16))
         row = 1
         groups = {
-            "配置": ["品类项目", "文案中心", "资产中心", "同步中心", "用户管理", "设置"],
+            "配置": ["品类项目", "文案中心", "资产中心", "同步中心", "用户管理"],
             "工作流": ["生成配音", "组合口播稿", "生成剪映草稿"],
         }
         for group, names in groups.items():
@@ -74,6 +109,25 @@ class App(tk.Tk):
         self.body.grid(row=1, column=0, sticky="nsew")
         self.body.rowconfigure(0, weight=1)
         self.body.columnconfigure(0, weight=1)
+
+        self.status_bar = ttk.Frame(self, padding=(14, 6))
+        self.status_bar.grid(row=1, column=0, columnspan=2, sticky="ew")
+        self.status_bar.columnconfigure(0, weight=1)
+        ttk.Label(self.status_bar, textvariable=self.status_var).grid(row=0, column=0, sticky="w")
+        self.busy_bar = ttk.Progressbar(self.status_bar, mode="indeterminate", length=140)
+        self.busy_bar.grid(row=0, column=1, sticky="e")
+        self.busy_bar.grid_remove()
+
+        self.toast_label = tk.Label(
+            self,
+            text="",
+            bg="#0f766e",
+            fg="white",
+            padx=16,
+            pady=10,
+            font=("Microsoft YaHei UI", 10),
+            relief="flat",
+        )
 
     def show_page(self, name: str) -> None:
         self.header.configure(text=name)
@@ -96,6 +150,108 @@ class App(tk.Tk):
         self.current_project_id = project_id
         for page in self.pages.values():
             page.refresh()
+
+    def set_status(self, text: str) -> None:
+        self.status_var.set(text or "就绪")
+
+    def toast(self, text: str, *, kind: str = "success", duration: int = 3000) -> None:
+        colors = {
+            "success": ("#0f766e", "white"),
+            "info": ("#2563eb", "white"),
+            "warning": ("#b45309", "white"),
+            "error": ("#b91c1c", "white"),
+        }
+        bg, fg = colors.get(kind, colors["success"])
+        if self._toast_after:
+            self.after_cancel(self._toast_after)
+            self._toast_after = None
+        self.toast_label.configure(text=text, bg=bg, fg=fg)
+        self.toast_label.place(relx=1.0, y=18, x=-22, anchor="ne")
+        self.toast_label.lift()
+        self._toast_after = self.after(duration, self.toast_label.place_forget)
+
+    def run_background(
+        self,
+        title: str,
+        work: Callable[[], Any],
+        *,
+        on_success: Callable[[Any], None] | None = None,
+        on_error: Callable[[Exception, str], None] | None = None,
+        on_done: Callable[[], None] | None = None,
+        success_message: str | None = None,
+        silent: bool = False,
+        disable_buttons: bool = True,
+        show_success_toast: bool = True,
+    ) -> bool:
+        if self._busy:
+            self.toast("当前已有任务在执行，请稍等。", kind="warning")
+            return False
+        self._busy = True
+        self.set_status(f"{title}中...")
+        self.configure(cursor="watch")
+        if disable_buttons:
+            self._set_task_buttons_disabled(True)
+        self.busy_bar.grid()
+        self.busy_bar.start(12)
+
+        def finish(result: Any = None, error: Exception | None = None, tb: str = "") -> None:
+            self._busy = False
+            self.busy_bar.stop()
+            self.busy_bar.grid_remove()
+            self.configure(cursor="")
+            if disable_buttons:
+                self._set_task_buttons_disabled(False)
+            try:
+                if error is not None:
+                    self.set_status(f"{title}失败")
+                    if on_error:
+                        on_error(error, tb)
+                    else:
+                        messagebox.showerror(f"{title}失败", str(error))
+                    if not silent:
+                        self.toast(f"{title}失败", kind="error")
+                else:
+                    if on_success:
+                        on_success(result)
+                    message = success_message if success_message is not None else f"{title}完成"
+                    self.set_status(message)
+                    if message and not silent and show_success_toast:
+                        self.toast(message, kind="success")
+            finally:
+                if on_done:
+                    on_done()
+
+        def worker() -> None:
+            try:
+                result = work()
+            except Exception as exc:
+                tb = traceback.format_exc()
+                self.after(0, lambda exc=exc, tb=tb: finish(error=exc, tb=tb))
+                return
+            self.after(0, lambda result=result: finish(result=result))
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def _set_task_buttons_disabled(self, disabled: bool) -> None:
+        if disabled:
+            self._task_disabled_buttons = []
+
+            def walk(widget: tk.Widget) -> None:
+                for child in widget.winfo_children():
+                    if isinstance(child, ttk.Button) and "disabled" not in child.state():
+                        child.state(["disabled"])
+                        self._task_disabled_buttons.append(child)
+                    walk(child)
+
+            walk(self)
+            return
+        for button in self._task_disabled_buttons:
+            try:
+                button.state(["!disabled"])
+            except tk.TclError:
+                pass
+        self._task_disabled_buttons = []
 
 
 class BasePage(ttk.Frame):
@@ -128,6 +284,37 @@ class BasePage(ttk.Frame):
             self.log_text.insert("end", text.rstrip() + "\n")
             self.log_text.see("end")
             self.log_text.configure(state="disabled")
+
+    def set_status(self, text: str) -> None:
+        self.app.set_status(text)
+
+    def toast(self, text: str, *, kind: str = "success", duration: int = 3000) -> None:
+        self.app.toast(text, kind=kind, duration=duration)
+
+    def run_task(
+        self,
+        title: str,
+        work: Callable[[], Any],
+        *,
+        on_success: Callable[[Any], None] | None = None,
+        on_error: Callable[[Exception, str], None] | None = None,
+        on_done: Callable[[], None] | None = None,
+        success_message: str | None = None,
+        silent: bool = False,
+        disable_buttons: bool = True,
+        show_success_toast: bool = True,
+    ) -> bool:
+        return self.app.run_background(
+            title,
+            work,
+            on_success=on_success,
+            on_error=on_error,
+            on_done=on_done,
+            success_message=success_message,
+            silent=silent,
+            disable_buttons=disable_buttons,
+            show_success_toast=show_success_toast,
+        )
 
 
 class ProjectPage(BasePage):
@@ -217,10 +404,8 @@ class ProjectPage(BasePage):
 
         actions = ttk.Frame(self)
         actions.grid(row=3, column=0, sticky="ew", pady=12)
-        ttk.Button(actions, text="预览 Master 方案变化", command=self._preview_master).pack(side="left", padx=(0, 8))
-        ttk.Button(actions, text="同步 Master 方案商品", command=self._sync_master).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="创建/更新文案框架", command=self._init_outline).pack(side="left", padx=(0, 8))
-        ttk.Button(actions, text="同步 MD 文案", command=self._sync_md).pack(side="left")
+        ttk.Label(actions, text="Master、MD、素材同步请到“同步中心”统一操作。").pack(side="left")
         self.log_text = tk.Text(self, height=14, state="disabled")
         self.log_text.grid(row=99, column=0, sticky="nsew", pady=(8, 0))
 
@@ -258,6 +443,7 @@ class ProjectPage(BasePage):
         project_id = self.db.upsert_project(payload)
         self.app.set_current_project(project_id)
         self.log(f"已保存项目：{payload['name']}")
+        self.toast("项目已保存")
 
     def _select_project(self) -> None:
         value = self.project_var.get()
@@ -329,17 +515,22 @@ class ProjectPage(BasePage):
         )
         if not path:
             return
-        try:
+
+        def work() -> tuple[dict[str, Any], dict[str, Any]]:
             result = self.outline.init_or_update_outline(project["id"], path)
             sync_result = self.sync.sync_markdown(project["id"])
-        except Exception as exc:
-            messagebox.showerror("创建失败", str(exc))
-            return
-        self.fields["md_path"].set(result["target_path"])
-        self.log(
-            f"文案框架已更新：商品 {result['total']} 个，新增 {len(result['added'])}，保留 {len(result['preserved'])}。"
-        )
-        self.log(f"已同步 MD 到数据库：入库 {sync_result['upserted']} 条。")
+            return result, sync_result
+
+        def on_success(payload: tuple[dict[str, Any], dict[str, Any]]) -> None:
+            result, sync_result = payload
+            self.fields["md_path"].set(result["target_path"])
+            self.log(
+                f"文案框架已更新：商品 {result['total']} 个，新增 {len(result['added'])}，保留 {len(result['preserved'])}。"
+            )
+            self.log(f"已同步 MD 到数据库：入库 {sync_result['upserted']} 条。")
+            self.toast("文案框架已更新")
+
+        self.run_task("创建文案框架", work, on_success=on_success, success_message="文案框架已更新", show_success_toast=False)
 
     def refresh(self) -> None:
         projects = self.repo.projects()
@@ -354,21 +545,52 @@ class ProjectPage(BasePage):
             self._load_workspaces(force_refresh=False, quiet=True)
 
     def _load_workspaces(self, *, force_refresh: bool = False, quiet: bool = False) -> None:
-        try:
-            self.workspaces = self.master_data.fetch_workspaces(force_refresh=force_refresh)
-        except Exception as exc:
+        if getattr(self, "_workspaces_loading", False):
+            return
+        self._workspaces_loading = True
+        keep_existing = bool(self.fields["category_name"].get().strip())
+
+        def choose_default(workspaces: list[dict[str, Any]]) -> dict[str, Any] | None:
+            for item in workspaces:
+                if safe_text(item.get("name")) == "赵二" or safe_text(item.get("slug")) == "zhaoer":
+                    return item
+            return workspaces[0] if workspaces else None
+
+        def work() -> dict[str, Any]:
+            workspaces = self.master_data.fetch_workspaces(force_refresh=force_refresh)
+            workspace = choose_default(workspaces)
+            tree: list[dict[str, Any]] = []
+            source = ""
+            if workspace:
+                _workspace, tree, source = self.master_data.fetch_category_tree(safe_text(workspace.get("id")))
+            return {"workspaces": workspaces, "workspace": workspace, "tree": tree, "source": source}
+
+        def on_success(result: dict[str, Any]) -> None:
+            self.workspaces = result["workspaces"]
+            workspace = result["workspace"]
+            if workspace:
+                self.workspace_var.set(display_name(workspace))
+                self.workspace_label.configure(text=f"{display_name(workspace)}（默认）")
+                self.fields["workspace_id"].set(safe_text(workspace.get("id")))
+                self.fields["workspace_name"].set(display_name(workspace))
+                self._apply_category_tree(result["tree"], source=result["source"], keep_existing=keep_existing)
+            if not quiet:
+                self.log(f"已读取 Master 工作空间，当前固定使用：{self.workspace_var.get() or '赵二'}。")
+
+        def on_error(exc: Exception, _tb: str) -> None:
             if not quiet:
                 messagebox.showerror("读取 Master 失败", str(exc))
-            return
-        workspace = self._default_workspace()
-        if workspace:
-            self.workspace_var.set(display_name(workspace))
-            self.workspace_label.configure(text=f"{display_name(workspace)}（默认）")
-            self.fields["workspace_id"].set(safe_text(workspace.get("id")))
-            self.fields["workspace_name"].set(display_name(workspace))
-            self._load_category_tree(workspace, keep_existing=bool(self.fields["category_name"].get().strip()))
-        if not quiet:
-            self.log(f"已读取 Master 工作空间，当前固定使用：{self.workspace_var.get() or '赵二'}。")
+
+        self.run_task(
+            "读取 Master",
+            work,
+            on_success=on_success,
+            on_error=on_error,
+            on_done=lambda: setattr(self, "_workspaces_loading", False),
+            success_message=None if quiet else "Master 已刷新",
+            silent=quiet,
+            disable_buttons=not quiet,
+        )
 
     def _selected_workspace(self) -> dict[str, Any] | None:
         name = self.workspace_var.get()
@@ -392,11 +614,19 @@ class ProjectPage(BasePage):
         self._load_category_tree(workspace, keep_existing=False)
 
     def _load_category_tree(self, workspace: dict[str, Any], *, keep_existing: bool) -> None:
-        try:
-            _workspace, tree, source = self.master_data.fetch_category_tree(safe_text(workspace.get("id")))
-        except Exception as exc:
-            messagebox.showerror("读取品类失败", str(exc))
-            return
+        workspace_id = safe_text(workspace.get("id"))
+
+        def work() -> tuple[list[dict[str, Any]], str]:
+            _workspace, tree, source = self.master_data.fetch_category_tree(workspace_id)
+            return tree, source
+
+        def on_success(result: tuple[list[dict[str, Any]], str]) -> None:
+            tree, source = result
+            self._apply_category_tree(tree, source=source, keep_existing=keep_existing)
+
+        self.run_task("读取品类", work, on_success=on_success, success_message="品类已刷新")
+
+    def _apply_category_tree(self, tree: list[dict[str, Any]], *, source: str, keep_existing: bool) -> None:
         self.category_tree = tree
         parent_names = [safe_text(parent.get("name")) for parent in tree]
         self.parent_combo.configure(values=parent_names)
@@ -450,18 +680,30 @@ class ProjectPage(BasePage):
             return
         self.fields["category_id"].set(safe_text(child.get("id")))
         self.fields["category_name"].set(safe_text(child.get("name")))
-        try:
-            self.schemes, source = self.master_data.fetch_schemes(workspace_id=safe_text(workspace.get("id")), category_id=safe_text(child.get("id")))
-        except Exception as exc:
+        workspace_id = safe_text(workspace.get("id"))
+        child_id = safe_text(child.get("id"))
+        child_name = safe_text(child.get("name"))
+        self.scheme_combo.configure(values=[])
+        self.scheme_var.set("读取中...")
+
+        def work() -> tuple[list[dict[str, Any]], str]:
+            return self.master_data.fetch_schemes(workspace_id=workspace_id, category_id=child_id)
+
+        def on_success(result: tuple[list[dict[str, Any]], str]) -> None:
+            self.schemes, source = result
+            scheme_names = [display_name(item, safe_text(item.get("id"))) for item in self.schemes]
+            self.scheme_combo.configure(values=scheme_names)
+            saved_scheme = self.fields["scheme_name"].get().strip() if keep_existing else ""
+            self.scheme_var.set(saved_scheme if saved_scheme in scheme_names else (scheme_names[0] if scheme_names else ""))
+            if scheme_names:
+                self._on_scheme_selected()
+            self.log(f"已读取“{child_name}”方案：{len(scheme_names)} 个（来源：{source}）。")
+
+        def on_error(exc: Exception, _tb: str) -> None:
+            self.scheme_var.set("")
             messagebox.showerror("读取方案失败", str(exc))
-            return
-        scheme_names = [display_name(item, safe_text(item.get("id"))) for item in self.schemes]
-        self.scheme_combo.configure(values=scheme_names)
-        saved_scheme = self.fields["scheme_name"].get().strip() if keep_existing else ""
-        self.scheme_var.set(saved_scheme if saved_scheme in scheme_names else (scheme_names[0] if scheme_names else ""))
-        if scheme_names:
-            self._on_scheme_selected()
-        self.log(f"已读取“{safe_text(child.get('name'))}”方案：{len(scheme_names)} 个（来源：{source}）。")
+
+        self.run_task("读取方案", work, on_success=on_success, on_error=on_error, success_message=None, silent=True)
 
     def _on_scheme_selected(self) -> None:
         name = self.scheme_var.get()
@@ -497,37 +739,103 @@ class TablePage(BasePage):
             self.tree.insert("", "end", values=row)
 
 
+TYPE_LABELS = {
+    "intro": "引言",
+    "product": "商品文案",
+    "price_transition": "价格过渡",
+}
+
+COLUMN_WIDTHS = {
+    "品类": 80,
+    "类型": 80,
+    "对象UID": 80,
+    "产品名称": 110,
+    "标签": 80,
+    "正文预览": 400,
+}
+
+
 class CopyPage(TablePage):
-    columns = ("类型", "对象", "标签", "正文预览", "Hash")
+    columns = ("品类", "类型", "对象UID", "产品名称", "标签", "正文预览")
 
     def __init__(self, master, app: App):
         super().__init__(master, app)
+        self.category_var = tk.StringVar(value="全部")
+        self._body_map: dict[str, str] = {}
         actions = ttk.Frame(self)
         actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ttk.Button(actions, text="同步 MD 文案到数据库", command=self._sync_md).pack(side="left")
+        ttk.Label(actions, text="品类").pack(side="left")
+        self.category_combo = ttk.Combobox(actions, textvariable=self.category_var, state="readonly", width=16)
+        self.category_combo.pack(side="left", padx=(6, 12))
+        self.category_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+        ttk.Label(actions, text="单击正文可查看完整内容。同步 MD 请到“同步中心”。").pack(side="left")
         self._build_table()
+        for col, width in COLUMN_WIDTHS.items():
+            self.tree.column(col, width=width)
+        self.tree.bind("<ButtonRelease-1>", self._on_body_click)
 
-    def _sync_md(self) -> None:
-        project = self.project_required()
-        if not project:
+    def _on_body_click(self, event: tk.Event) -> None:
+        region = self.tree.identify_region(event.x, event.y)
+        if region != "cell":
             return
-        try:
-            self.sync.sync_markdown(project["id"])
-        except Exception as exc:
-            messagebox.showerror("同步失败", str(exc))
+        column = self.tree.identify_column(event.x)
+        col_index = int(column.replace("#", "")) - 1
+        if col_index != 5:
             return
-        self.refresh()
+        row_id = self.tree.identify_row(event.y)
+        if not row_id:
+            return
+        full_body = self._body_map.get(row_id, "")
+        if full_body:
+            self._show_body_popup(full_body)
+
+    def _show_body_popup(self, text: str) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title("正文内容")
+        dialog.geometry("700x500")
+        dialog.minsize(500, 300)
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()
+        text_widget = tk.Text(dialog, wrap="word", padx=16, pady=16, font=("Microsoft YaHei UI", 10))
+        text_widget.pack(fill="both", expand=True)
+        text_widget.insert("1.0", text)
+        text_widget.configure(state="disabled")
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill="x", pady=(0, 10))
+        ttk.Button(btn_frame, text="关闭", command=dialog.destroy).pack()
+        dialog.update_idletasks()
+        x = dialog.winfo_screenwidth() // 2 - dialog.winfo_width() // 2
+        y = dialog.winfo_screenheight() // 2 - dialog.winfo_height() // 2
+        dialog.geometry(f"+{x}+{y}")
 
     def refresh(self) -> None:
-        project = self.app.current_project()
-        if not project:
+        projects = self.repo.projects()
+        if not projects:
             self._set_rows([])
             return
-        rows = []
-        for block in self.repo.script_blocks(project["id"]):
-            owner = block["owner_uid"] or block["price_range_label"] or "项目"
-            rows.append((block["script_type"], owner, block["block_label"], block["body"][:70], block["text_hash"][:10]))
-        self._set_rows(rows)
+        categories = sorted({item["category_name"] for item in projects if item["category_name"]})
+        self.category_combo.configure(values=categories)
+        if self.category_var.get() not in categories:
+            self.category_var.set(categories[0] if categories else "")
+        selected_category = self.category_var.get()
+        self._body_map.clear()
+        self.tree.delete(*self.tree.get_children())
+        block_order = {"intro": 0, "price_transition": 1, "product": 2}
+        for project in projects:
+            if project["category_name"] != selected_category:
+                continue
+            products_map = {item["uid"]: item["title"] for item in self.repo.products(project["id"], include_removed=True)}
+            category_name = project["category_name"] or ""
+            blocks = list(self.repo.script_blocks(project["id"]))
+            blocks.sort(key=lambda b: (block_order.get(b["script_type"], 99), b.get("owner_uid", ""), b.get("price_range_label", ""), b.get("block_label", "")))
+            for block in blocks:
+                uid = block["owner_uid"] or ""
+                product_name = products_map.get(uid, "") if uid else ""
+                owner_display = uid or block["price_range_label"] or ""
+                type_label = TYPE_LABELS.get(block["script_type"], block["script_type"])
+                row = (category_name, type_label, owner_display, product_name, block["block_label"], block["body"][:70])
+                iid = self.tree.insert("", "end", values=row)
+                self._body_map[iid] = block["body"]
 
 
 class AssetPage(TablePage):
@@ -536,23 +844,20 @@ class AssetPage(TablePage):
     def __init__(self, master, app: App):
         super().__init__(master, app)
         self.category_var = tk.StringVar(value="全部")
-        self.user_var = tk.StringVar(value="全部")
         self.status_var = tk.StringVar(value="全部")
         actions = ttk.Frame(self)
         actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ttk.Button(actions, text="同步素材文件夹", command=self._sync_assets).pack(side="left")
-        ttk.Button(actions, text="导入旧项目用户/音色", command=self._import_legacy_accounts).pack(side="left", padx=(8, 0))
-        ttk.Button(actions, text="导入屏幕挂灯资产", command=self._import_screen_light).pack(side="left", padx=(8, 0))
+        ttk.Label(actions, text="这里只查看资产缺口。同步素材和导入旧数据请到“同步中心”。").pack(side="left")
         filters = ttk.Frame(self)
         filters.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(filters, text="品类").pack(side="left")
         self.category_combo = ttk.Combobox(filters, textvariable=self.category_var, state="readonly", width=18)
         self.category_combo.pack(side="left", padx=(6, 14))
         self.category_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
-        ttk.Label(filters, text="用户").pack(side="left")
-        self.user_combo = ttk.Combobox(filters, textvariable=self.user_var, state="readonly", width=14)
-        self.user_combo.pack(side="left", padx=(6, 14))
-        self.user_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+        ttk.Label(filters, text="用户").pack(side="left", anchor="n", pady=(2, 0))
+        self.user_listbox = tk.Listbox(filters, selectmode=tk.MULTIPLE, height=4, width=16, exportselection=False)
+        self.user_listbox.pack(side="left", padx=(6, 14))
+        self.user_listbox.bind("<<ListboxSelect>>", lambda _event: self.refresh())
         ttk.Label(filters, text="筛选").pack(side="left")
         self.status_combo = ttk.Combobox(filters, textvariable=self.status_var, state="readonly", values=["全部", "缺文案", "缺图片", "缺视频", "缺配音", "配音过期"], width=14)
         self.status_combo.pack(side="left", padx=(6, 14))
@@ -560,6 +865,13 @@ class AssetPage(TablePage):
         self.summary_label = ttk.Label(self, text="")
         self.summary_label.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         self._build_table(row=3)
+        self.tree.tag_configure("has_issues", background="#fff0ed")
+
+    def _set_rows(self, rows: list[tuple[Any, ...]]) -> None:
+        self.tree.delete(*self.tree.get_children())
+        for row in rows:
+            tags = ("has_issues",) if row[-1] else ()
+            self.tree.insert("", "end", values=row, tags=tags)
 
     def _sync_assets(self) -> None:
         project = self.project_required()
@@ -582,19 +894,19 @@ class AssetPage(TablePage):
         self.category_combo.configure(values=categories)
         if self.category_var.get() not in categories:
             self.category_var.set("全部")
-        users = ["全部"] + [item["label"] for item in self.repo.accounts()]
-        self.user_combo.configure(values=users)
-        if self.user_var.get() not in users:
-            self.user_var.set("全部")
+        self.user_listbox.delete(0, "end")
+        for item in self.repo.accounts():
+            self.user_listbox.insert("end", item["label"])
 
         rows: list[tuple[Any, ...]] = []
         summary = {"copy": 0, "missing_copy": 0, "image": 0, "missing_image": 0, "video": 0, "missing_video": 0, "voice": 0, "missing_voice": 0}
         selected_category = self.category_var.get()
-        selected_user = self.user_var.get()
+        selected_user_indices = self.user_listbox.curselection()
+        selected_users = [self.user_listbox.get(i) for i in selected_user_indices]
         for project in projects:
             if selected_category != "全部" and project["category_name"] != selected_category:
                 continue
-            project_rows, project_summary = self._rows_for_project(project, selected_user=selected_user)
+            project_rows, project_summary = self._rows_for_project(project, selected_users=selected_users)
             rows.extend(project_rows)
             for key, value in project_summary.items():
                 summary[key] += value
@@ -609,13 +921,13 @@ class AssetPage(TablePage):
         )
         self._set_rows(rows)
 
-    def _rows_for_project(self, project: dict[str, Any], *, selected_user: str) -> tuple[list[tuple[Any, ...]], dict[str, int]]:
+    def _rows_for_project(self, project: dict[str, Any], *, selected_users: list[str]) -> tuple[list[tuple[Any, ...]], dict[str, int]]:
         blocks = self.repo.script_blocks(project["id"])
         assets = self.repo.asset_bindings(project["id"])
         products = self.repo.products(project["id"], include_removed=True)
         accounts = self.repo.accounts()
-        if selected_user != "全部":
-            accounts = [item for item in accounts if item["label"] == selected_user]
+        if selected_users:
+            accounts = [item for item in accounts if item["label"] in selected_users]
         if not accounts:
             accounts = [{"label": "未设置", "account_id": "", "media_identity": ""}]
         summary = {"copy": 0, "missing_copy": 0, "image": 0, "missing_image": 0, "video": 0, "missing_video": 0, "voice": 0, "missing_voice": 0}
@@ -651,8 +963,6 @@ class AssetPage(TablePage):
     ) -> list[tuple[Any, ...]]:
         rows = []
         shared_specs = [("INTRO", "引言文案", "引言文案", "intro", "INTRO", "")]
-        price_labels = sorted(key[1] for key in block_counts if key[0] == "price_transition") or ["价格过渡"]
-        shared_specs.extend(("PRICE_TRANSITION", label, "价格过渡文案", "price_transition", label, label) for label in price_labels)
         for uid, object_label, copy_type, script_type, block_key, asset_block_label in shared_specs:
             copy_count = block_counts.get((script_type, block_key), 0)
             voice_count = self._asset_count(assets, uid=uid, asset_type="voice", account_label=account["label"], block_label=asset_block_label)
@@ -759,23 +1069,361 @@ class AssetPage(TablePage):
         self.refresh()
 
 
-class SyncPage(TablePage):
-    columns = ("时间", "类型", "状态", "说明")
-
+class SyncPage(BasePage):
     def __init__(self, master, app: App):
         super().__init__(master, app)
-        self._build_table()
+        self.project_var = tk.StringVar()
+        self.user_var = tk.StringVar(value="全部")
+        self._build()
+
+    def _build(self) -> None:
+        self.rowconfigure(1, weight=0)
+        self.rowconfigure(99, weight=1)
+        top = ttk.Frame(self)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        top.columnconfigure(1, weight=1)
+        ttk.Label(top, text="本次品类项目").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.project_combo = ttk.Combobox(top, textvariable=self.project_var, state="readonly")
+        self.project_combo.grid(row=0, column=1, sticky="ew", padx=(0, 12))
+        self.project_combo.bind("<<ComboboxSelected>>", lambda _event: self._select_project())
+        ttk.Label(top, text="用户").grid(row=0, column=2, sticky="w", padx=(0, 8))
+        self.user_combo = ttk.Combobox(top, textvariable=self.user_var, state="readonly", width=14)
+        self.user_combo.grid(row=0, column=3, sticky="w", padx=(0, 12))
+        self.user_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+        ttk.Button(top, text="刷新状态", command=self.refresh).grid(row=0, column=4, padx=(0, 8))
+        ttk.Button(top, text="一键同步当前品类", command=self._sync_all).grid(row=0, column=5, padx=(0, 8))
+        ttk.Button(top, text="打开数据库目录", command=lambda: open_path(self.db.path.parent)).grid(row=0, column=6)
+
+        grid = ttk.Frame(self)
+        grid.grid(row=1, column=0, sticky="ew")
+        grid.columnconfigure(0, weight=1, uniform="sync_cards")
+        grid.columnconfigure(1, weight=1, uniform="sync_cards")
+        grid.rowconfigure(0, weight=1)
+        grid.rowconfigure(1, weight=1)
+        self.master_status = self._section(
+            grid,
+            "Master 方案商品",
+            0,
+            0,
+            [
+                ("预览变化", self._preview_master),
+                ("同步 Master", self._sync_master),
+                ("打开品类项目", lambda: self.app.show_page("品类项目")),
+            ],
+        )
+        self.md_status = self._section(
+            grid,
+            "MD 文案",
+            0,
+            1,
+            [
+                ("打开 MD", self._open_md),
+                ("打开所在文件夹", self._open_md_folder),
+                ("同步 MD", self._sync_md),
+                ("创建/更新文案框架", self._init_outline),
+            ],
+        )
+        self.folder_status = self._section(
+            grid,
+            "素材文件夹",
+            1,
+            0,
+            [
+                ("打开图片目录", lambda: self._open_project_path("image_root")),
+                ("打开视频目录", lambda: self._open_project_path("video_root")),
+                ("打开配音目录", lambda: self._open_project_path("voice_root")),
+                ("扫描素材", self._sync_assets),
+            ],
+        )
+        self.mapping_status = self._section(
+            grid,
+            "映射关系与缺口",
+            1,
+            1,
+            [
+                ("查看资产中心", lambda: self.app.show_page("资产中心")),
+                ("导入旧项目用户/音色", self._import_legacy_accounts),
+                ("导入屏幕挂灯资产", self._import_screen_light),
+            ],
+        )
+
+        log_frame = ttk.LabelFrame(self, text="最近同步记录", padding=10)
+        log_frame.grid(row=99, column=0, sticky="nsew", pady=(10, 0))
+        log_frame.rowconfigure(0, weight=1)
+        log_frame.columnconfigure(0, weight=1)
+        self.log_tree = ttk.Treeview(log_frame, columns=("时间", "类型", "状态", "说明"), show="headings", height=10)
+        for col in ("时间", "类型", "状态", "说明"):
+            self.log_tree.heading(col, text=col)
+            width = 150 if col == "时间" else 110 if col in {"类型", "状态"} else 420
+            self.log_tree.column(col, width=width, anchor="w", stretch=(col == "说明"))
+        self.log_tree.grid(row=0, column=0, sticky="nsew")
+        ybar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_tree.yview)
+        self.log_tree.configure(yscrollcommand=ybar.set)
+        ybar.grid(row=0, column=1, sticky="ns")
+
+    def _section(self, parent: ttk.Frame, title: str, row: int, column: int, buttons: list[tuple[str, Callable[[], None]]]) -> ttk.Label:
+        frame = ttk.LabelFrame(parent, text=title, padding=10)
+        frame.grid(row=row, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 8 if column == 0 else 0), pady=(0, 8))
+        frame.columnconfigure(0, weight=1)
+        label = ttk.Label(frame, text="等待刷新", justify="left", anchor="nw", wraplength=480)
+        label.grid(row=0, column=0, sticky="nsew")
+        actions = ttk.Frame(frame)
+        actions.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        for text, command in buttons:
+            ttk.Button(actions, text=text, command=command).pack(side="left", padx=(0, 6), pady=2)
+        frame.bind("<Configure>", lambda event, item=label: item.configure(wraplength=max(event.width - 28, 260)))
+        return label
 
     def refresh(self) -> None:
+        projects = self.repo.projects()
+        values = [f"{item['id']} - {item['name']}" for item in projects]
+        self.project_combo.configure(values=values)
+        project = self.app.current_project()
+        if not project and projects:
+            self.app.current_project_id = projects[0]["id"]
+            project = projects[0]
+        if project:
+            value = f"{project['id']} - {project['name']}"
+            if self.project_var.get() != value:
+                self.project_var.set(value)
+        users = ["全部"] + [item["label"] for item in self.repo.accounts()]
+        self.user_combo.configure(values=users)
+        if self.user_var.get() not in users:
+            self.user_var.set("全部")
+        self._refresh_status()
+        self._refresh_logs()
+
+    def _select_project(self) -> None:
+        value = self.project_var.get()
+        if not value:
+            return
+        self.app.current_project_id = int(value.split(" - ", 1)[0])
+        self.refresh()
+
+    def _current_project_or_warn(self) -> dict[str, Any] | None:
         project = self.app.current_project()
         if not project:
-            self._set_rows([])
+            messagebox.showinfo("需要品类项目", "请先选择品类项目。")
+            return None
+        return project
+
+    def _refresh_status(self) -> None:
+        project = self.app.current_project()
+        if not project:
+            for label in (self.master_status, self.md_status, self.folder_status, self.mapping_status):
+                label.configure(text="请先创建或选择品类项目。")
             return
-        rows = [
-            (item["created_at"], item["event_type"], item["status"], item["message"])
-            for item in self.db.fetchall("SELECT * FROM sync_events WHERE project_id=? ORDER BY id DESC LIMIT 200", (project["id"],))
-        ]
-        self._set_rows(rows)
+        products = self.repo.products(project["id"], include_removed=False)
+        blocks = self.repo.script_blocks(project["id"])
+        assets = self.repo.asset_bindings(project["id"])
+        intro_count = sum(1 for block in blocks if block["script_type"] == "intro")
+        product_block_count = sum(1 for block in blocks if block["script_type"] == "product")
+        price_count = sum(1 for block in blocks if block["script_type"] == "price_transition")
+        asset_counts = {
+            "image": sum(1 for item in assets if item["asset_type"] == "image" and item["status"] == "ready"),
+            "video": sum(1 for item in assets if item["asset_type"] == "video" and item["status"] == "ready"),
+            "voice": sum(1 for item in assets if item["asset_type"] == "voice" and item["status"] == "ready"),
+        }
+        issues = build_project_issue_summary(project, products, blocks, assets, self.repo.accounts(), selected_user=self.user_var.get())
+        last_master = self._last_event(project["id"], "master_scheme_sync")
+        last_md = self._last_event(project["id"], "markdown_sync")
+        last_asset = self._last_event(project["id"], "asset_sync")
+        self.master_status.configure(
+            text=(
+                f"方案：{project['scheme_name'] or '--'}\n"
+                f"商品：{len(products)} 个\n"
+                f"上次同步：{last_master or '未同步'}"
+            )
+        )
+        self.md_status.configure(
+            text=(
+                f"MD：{compact_path(project['md_path'], 58) or '--'}\n"
+                f"引言 {intro_count}，商品文案 {product_block_count}，价格过渡 {price_count}\n"
+                f"上次同步：{last_md or '未同步'}"
+            )
+        )
+        self.folder_status.configure(
+            text=(
+                f"图片：{compact_path(project['image_root'], 48)}\n"
+                f"视频：{compact_path(project['video_root'], 48)}\n"
+                f"配音：{compact_path(project['voice_root'], 48)}\n"
+                f"已识别 图片 {asset_counts['image']} / 视频 {asset_counts['video']} / 配音 {asset_counts['voice']}\n"
+                f"上次扫描：{last_asset or '未扫描'}"
+            )
+        )
+        self.mapping_status.configure(
+            text=(
+                f"筛选用户：{self.user_var.get()}\n"
+                f"缺文案 {len(issues['missing_copy'])}，缺图片 {len(issues['missing_image'])}，缺视频 {len(issues['missing_video'])}，"
+                f"缺配音 {len(issues['missing_voice'])}，配音过期 {len(issues['expired_voice'])}\n"
+                f"{format_issue_preview(issues, limit=3)}"
+            )
+        )
+
+    def _refresh_logs(self) -> None:
+        self.log_tree.delete(*self.log_tree.get_children())
+        project = self.app.current_project()
+        if not project:
+            return
+        rows = self.db.fetchall("SELECT * FROM sync_events WHERE project_id=? ORDER BY id DESC LIMIT 80", (project["id"],))
+        for item in rows:
+            self.log_tree.insert("", "end", values=(item["created_at"], item["event_type"], item["status"], item["message"]))
+
+    def _last_event(self, project_id: int, event_type: str) -> str:
+        row = self.db.fetchone(
+            "SELECT created_at, message FROM sync_events WHERE project_id=? AND event_type=? ORDER BY id DESC LIMIT 1",
+            (project_id, event_type),
+        )
+        return f"{row['created_at']} | {row['message']}" if row else ""
+
+    def _preview_master(self) -> None:
+        project = self._current_project_or_warn()
+        if not project:
+            return
+
+        def work() -> dict[str, list[dict[str, Any]]]:
+            return self.sync.sync_master_scheme(project["id"], apply_changes=False)
+
+        def on_success(result: dict[str, list[dict[str, Any]]]) -> None:
+            messagebox.showinfo("Master 变化预览", format_master_result(result))
+            self.refresh()
+
+        self.run_task("预览 Master 变化", work, on_success=on_success, success_message="Master 变化预览完成")
+
+    def _sync_master(self) -> None:
+        project = self._current_project_or_warn()
+        if not project:
+            return
+
+        def work() -> dict[str, list[dict[str, Any]]]:
+            return self.sync.sync_master_scheme(project["id"], apply_changes=True)
+
+        def on_success(result: dict[str, list[dict[str, Any]]]) -> None:
+            self.toast(f"Master 已同步：新增 {len(result['added'])}，更新 {len(result['updated'])}，移除 {len(result['removed'])}")
+            self.refresh()
+
+        self.run_task("同步 Master", work, on_success=on_success, success_message="Master 已同步", show_success_toast=False)
+
+    def _sync_md(self) -> None:
+        project = self._current_project_or_warn()
+        if not project:
+            return
+
+        def work() -> dict[str, Any]:
+            return self.sync.sync_markdown(project["id"])
+
+        def on_success(result: dict[str, Any]) -> None:
+            self.toast(f"MD 已同步：入库 {result['upserted']} 条，缺文案 {len(result['missing_copy'])} 个")
+            self.refresh()
+
+        self.run_task("同步 MD", work, on_success=on_success, success_message="MD 已同步", show_success_toast=False)
+
+    def _sync_assets(self) -> None:
+        project = self._current_project_or_warn()
+        if not project:
+            return
+
+        def work() -> dict[str, int]:
+            return self.sync.sync_assets(project["id"])
+
+        def on_success(result: dict[str, int]) -> None:
+            self.toast(f"素材扫描完成：图片 {result['image']}，视频 {result['video']}，配音 {result['voice']}，未识别 {result['unmatched']}")
+            self.refresh()
+
+        self.run_task("扫描素材", work, on_success=on_success, success_message="素材扫描完成", show_success_toast=False)
+
+    def _sync_all(self) -> None:
+        project = self._current_project_or_warn()
+        if not project:
+            return
+
+        def work() -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any], dict[str, int]]:
+            master = self.sync.sync_master_scheme(project["id"], apply_changes=True)
+            md = self.sync.sync_markdown(project["id"])
+            assets = self.sync.sync_assets(project["id"])
+            return master, md, assets
+
+        def on_success(result: tuple[dict[str, list[dict[str, Any]]], dict[str, Any], dict[str, int]]) -> None:
+            master, md, assets = result
+            self.toast(
+                f"一键同步完成：Master 新增 {len(master['added'])}，MD 入库 {md['upserted']}，素材未识别 {assets['unmatched']}",
+                duration=4500,
+            )
+            self.refresh()
+
+        self.run_task("一键同步", work, on_success=on_success, success_message="一键同步完成", show_success_toast=False)
+
+    def _init_outline(self) -> None:
+        project = self._current_project_or_warn()
+        if not project:
+            return
+        current = safe_text(project.get("md_path")) or str(self.outline.default_markdown_path(project["id"]))
+        path = filedialog.asksaveasfilename(
+            defaultextension=".md",
+            filetypes=[("Markdown", "*.md"), ("All", "*.*")],
+            initialdir=str(DEFAULT_MARKDOWN_ROOT),
+            initialfile=Path(current).name,
+        )
+        if not path:
+            return
+
+        def work() -> tuple[dict[str, Any], dict[str, Any]]:
+            result = self.outline.init_or_update_outline(project["id"], path)
+            sync_result = self.sync.sync_markdown(project["id"])
+            return result, sync_result
+
+        def on_success(result: tuple[dict[str, Any], dict[str, Any]]) -> None:
+            outline, sync_result = result
+            self.toast(
+                f"文案框架已更新：商品 {outline['total']} 个，新增 {len(outline['added'])}，入库 {sync_result['upserted']} 条",
+                duration=4500,
+            )
+            self.refresh()
+
+        self.run_task("创建文案框架", work, on_success=on_success, success_message="文案框架已更新", show_success_toast=False)
+
+    def _open_project_path(self, key: str) -> None:
+        project = self._current_project_or_warn()
+        if project:
+            open_path(project.get(key))
+
+    def _open_md(self) -> None:
+        project = self._current_project_or_warn()
+        if project:
+            open_path(project.get("md_path"))
+
+    def _open_md_folder(self) -> None:
+        project = self._current_project_or_warn()
+        if project and project.get("md_path"):
+            open_path(Path(project["md_path"]).parent)
+
+    def _import_legacy_accounts(self) -> None:
+        def work() -> tuple[int, int]:
+            accounts = self.legacy_import.import_accounts()
+            voices = self.legacy_import.import_voice_profiles()
+            return accounts, voices
+
+        def on_success(result: tuple[int, int]) -> None:
+            accounts, voices = result
+            self.toast(f"导入完成：用户 {accounts} 个，音色 {voices} 个")
+            self.refresh()
+
+        self.run_task("导入旧项目用户/音色", work, on_success=on_success, success_message="导入完成", show_success_toast=False)
+
+    def _import_screen_light(self) -> None:
+        def work() -> dict[str, Any]:
+            return self.legacy_import.import_category_project(
+                parent_category="数码",
+                category="屏幕挂灯",
+                md_path=Path(r"G:\WriteSpace\B站-文案脚本\10_b站文案\3.商品文案\数码-屏幕挂灯.md"),
+            )
+
+        def on_success(result: dict[str, Any]) -> None:
+            self.app.set_current_project(result["project_id"])
+            self.toast("屏幕挂灯已导入：商品、文案、素材映射已写入数据库", duration=4500)
+            self.refresh()
+
+        self.run_task("导入屏幕挂灯资产", work, on_success=on_success, success_message="导入完成", show_success_toast=False)
 
 
 class AccountPage(TablePage):
@@ -825,12 +1473,20 @@ class AccountPage(TablePage):
                 (payload["label"], payload["account_id"], payload["voice_id"], payload["voice_name"], payload["media_identity"], payload["closing_audio_path"], ts, ts),
             )
         self.refresh()
+        self.toast("用户已保存")
 
     def _import_legacy_accounts(self) -> None:
-        accounts = self.legacy_import.import_accounts()
-        voices = self.legacy_import.import_voice_profiles()
-        messagebox.showinfo("导入完成", f"已写入旧项目用户 {accounts} 个，音色 {voices} 个。")
-        self.refresh()
+        def work() -> tuple[int, int]:
+            accounts = self.legacy_import.import_accounts()
+            voices = self.legacy_import.import_voice_profiles()
+            return accounts, voices
+
+        def on_success(result: tuple[int, int]) -> None:
+            accounts, voices = result
+            self.toast(f"导入完成：用户 {accounts} 个，音色 {voices} 个")
+            self.refresh()
+
+        self.run_task("导入旧项目用户/音色", work, on_success=on_success, success_message="导入完成", show_success_toast=False)
 
     def refresh(self) -> None:
         rows = []
@@ -839,13 +1495,6 @@ class AccountPage(TablePage):
         self._set_rows(rows)
 
 
-class SettingsPage(BasePage):
-    def __init__(self, master, app: App):
-        super().__init__(master, app)
-        ttk.Label(self, text=f"数据库：{self.db.path}").grid(row=0, column=0, sticky="w", pady=4)
-        ttk.Label(self, text=f"软件中间文件：{INTERNAL_WORKSPACE_ROOT}").grid(row=1, column=0, sticky="w", pady=4)
-        ttk.Label(self, text=f"剪映草稿固定目录：{DEFAULT_JIANYING_DRAFT_ROOT}").grid(row=2, column=0, sticky="w", pady=4)
-        ttk.Label(self, text="V2 规则：数据库是主账本；MD 是文案编辑格式；素材文件夹保存真实文件。").grid(row=3, column=0, sticky="w", pady=4)
 
 
 class WorkflowPage(BasePage):
@@ -855,12 +1504,25 @@ class WorkflowPage(BasePage):
     def __init__(self, master, app: App):
         super().__init__(master, app)
         self.mode_var = tk.StringVar(value="standard")
+        self.project_var = tk.StringVar()
         self.account_var = tk.StringVar()
         self.uid_var = tk.StringVar()
         self.intro_var = tk.StringVar(value="1")
+        self.intro_choice_var = tk.StringVar()
         self.spoken_md_var = tk.StringVar()
+        self.intro_video_var = tk.StringVar()
+        self.loaded_project_id: int | None = None
+
+        project_row = ttk.Frame(self)
+        project_row.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        project_row.columnconfigure(1, weight=1)
+        ttk.Label(project_row, text="本次品类项目").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.project_combo = ttk.Combobox(project_row, textvariable=self.project_var, state="readonly")
+        self.project_combo.grid(row=0, column=1, sticky="ew")
+        self.project_combo.bind("<<ComboboxSelected>>", lambda _event: self._select_project())
+
         actions = ttk.Frame(self)
-        actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        actions.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(actions, text=self.primary_label()).pack(side="left")
         if isinstance(self, JianyingPage):
             self.account_input = ttk.Entry(actions, textvariable=self.account_var, width=24)
@@ -874,28 +1536,60 @@ class WorkflowPage(BasePage):
             self.mode_var.set("标准模式")
             ttk.Label(actions, text="组合方式").pack(side="left")
             ttk.Combobox(actions, textvariable=self.mode_var, values=["标准模式", "Top 模式"], state="readonly", width=10).pack(side="left", padx=8)
-            ttk.Label(actions, text="引言编号").pack(side="left")
-            ttk.Entry(actions, textvariable=self.intro_var, width=5).pack(side="left", padx=8)
+            ttk.Label(actions, text="引言").pack(side="left")
+            self.intro_combo = ttk.Combobox(actions, textvariable=self.intro_choice_var, state="readonly", width=20)
+            self.intro_combo.pack(side="left", padx=8)
+            self.intro_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_intro_index())
             output_row = ttk.Frame(self)
-            output_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+            output_row.grid(row=2, column=0, sticky="ew", pady=(0, 8))
             output_row.columnconfigure(1, weight=1)
             ttk.Label(output_row, text="口播稿输出 MD（会覆盖全部内容）").grid(row=0, column=0, sticky="w", padx=(0, 8))
             ttk.Entry(output_row, textvariable=self.spoken_md_var).grid(row=0, column=1, sticky="ew", padx=(0, 8))
             ttk.Button(output_row, text="选", width=4, command=self._browse_spoken_md).grid(row=0, column=2, sticky="e")
+            ttk.Label(
+                output_row,
+                text="Top UID 用逗号分隔，支持中文和英文逗号；引言编号按 MD 中“引言文案”从上到下排序。",
+            ).grid(row=1, column=1, sticky="w", pady=(4, 0))
         if isinstance(self, JianyingPage):
             output_row = ttk.Frame(self)
-            output_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+            output_row.grid(row=2, column=0, sticky="ew", pady=(0, 8))
             output_row.columnconfigure(1, weight=1)
             ttk.Label(output_row, text="口播稿 MD").grid(row=0, column=0, sticky="w", padx=(0, 8))
             ttk.Entry(output_row, textvariable=self.spoken_md_var).grid(row=0, column=1, sticky="ew", padx=(0, 8))
             ttk.Button(output_row, text="选", width=4, command=self._browse_spoken_md).grid(row=0, column=2, sticky="e")
-        ttk.Button(actions, text="生成命令", command=self._build_command).pack(side="left", padx=8)
-        ttk.Button(actions, text="执行", command=self._run_command).pack(side="left")
+            ttk.Label(output_row, text="引言成片视频").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+            ttk.Entry(output_row, textvariable=self.intro_video_var).grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(8, 0))
+            ttk.Button(output_row, text="选", width=4, command=self._browse_intro_video).grid(row=1, column=2, sticky="e", pady=(8, 0))
+            ttk.Label(
+                output_row,
+                text="选择后会先拼这段引言视频，再拼口播稿里的商品推荐部分；不会重复拼 manifest 里的引言条目。",
+            ).grid(row=2, column=1, sticky="w", pady=(4, 0))
+            template_row = ttk.Frame(self)
+            template_row.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+            ttk.Label(template_row, text="口播用户").pack(side="left")
+            self.jy_user_combo = ttk.Combobox(template_row, textvariable=self.jy_user_var, state="readonly", width=14)
+            self.jy_user_combo.pack(side="left", padx=8)
+            self.jy_user_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_jy_user_changed())
+            ttk.Label(template_row, text="展示模板").pack(side="left", padx=(12, 0))
+            self.jy_template_combo = ttk.Combobox(template_row, textvariable=self.jy_template_var, state="readonly", width=18)
+            self.jy_template_combo.pack(side="left", padx=8)
+        ttk.Button(actions, text="高级：生成命令", command=self._build_command).pack(side="left", padx=8)
+        ttk.Button(actions, text="预检查并执行", command=self._run_command).pack(side="left")
         self.log_text = tk.Text(self, height=28, state="disabled")
         self.log_text.grid(row=99, column=0, sticky="nsew")
 
     def refresh(self) -> None:
         project = self.app.current_project()
+        projects = self.repo.projects()
+        project_values = [f"{item['id']} - {item['name']}" for item in projects]
+        self.project_combo.configure(values=project_values)
+        if project:
+            current_value = f"{project['id']} - {project['name']}"
+            if self.project_var.get() != current_value:
+                self.project_var.set(current_value)
+            if self.loaded_project_id != project["id"]:
+                self.spoken_md_var.set(safe_text(project.get("spoken_md_path")))
+                self.loaded_project_id = project["id"]
         if isinstance(getattr(self, "account_input", None), ttk.Combobox):
             values = [item["label"] for item in self.repo.accounts()]
             self.account_input.configure(values=values)
@@ -903,6 +1597,18 @@ class WorkflowPage(BasePage):
                 self.account_var.set(values[0])
         if project and not self.spoken_md_var.get().strip():
             self.spoken_md_var.set(safe_text(project.get("spoken_md_path")))
+        if isinstance(self, AssemblePage):
+            self._refresh_intro_choices(project)
+        if isinstance(self, JianyingPage):
+            users = [item["label"] for item in self.repo.accounts()]
+            self.jy_user_combo.configure(values=users)
+            if users and not self.jy_user_var.get():
+                self.jy_user_var.set(users[0])
+            self._refresh_jy_templates()
+            if not self.account_var.get().strip():
+                user = self.jy_user_var.get()
+                if user:
+                    self.account_var.set(f"完整-5月-{user}")
 
     def primary_label(self) -> str:
         if isinstance(self, JianyingPage):
@@ -913,20 +1619,71 @@ class WorkflowPage(BasePage):
 
     def uid_label(self) -> str:
         if isinstance(self, AssemblePage):
-            return "Top 商品UID"
+            return "Top 商品UID（可不填）"
         if isinstance(self, VoicePage):
             return "商品UID（可不填）"
         return "预留"
+
+    def _select_project(self) -> None:
+        value = self.project_var.get()
+        if not value:
+            return
+        project_id = int(value.split(" - ", 1)[0])
+        self.app.set_current_project(project_id)
+
+    def _refresh_intro_choices(self, project: dict[str, Any] | None) -> None:
+        combo = getattr(self, "intro_combo", None)
+        if combo is None:
+            return
+        choices: list[str] = []
+        if project:
+            intro_blocks = [block for block in self.repo.script_blocks(project["id"]) if block["script_type"] == "intro"]
+            for index, block in enumerate(intro_blocks, start=1):
+                choices.append(f"{index} - {safe_text(block.get('block_label')) or '引言'}")
+        combo.configure(values=choices)
+        if choices:
+            current = self.intro_choice_var.get()
+            if current not in choices:
+                wanted = max(1, int(self.intro_var.get() or "1"))
+                self.intro_choice_var.set(choices[min(wanted, len(choices)) - 1])
+            self._sync_intro_index()
+        else:
+            self.intro_choice_var.set("")
+            self.intro_var.set("1")
+
+    def _sync_intro_index(self) -> None:
+        match = re.match(r"\s*(\d+)", self.intro_choice_var.get())
+        self.intro_var.set(match.group(1) if match else "1")
+
+    def _on_jy_user_changed(self) -> None:
+        self._refresh_jy_templates()
+        if not self.account_var.get().strip():
+            user = self.jy_user_var.get()
+            if user:
+                self.account_var.set(f"完整-5月-{user}")
+
+    def _refresh_jy_templates(self) -> None:
+        from .template_config import available_templates
+
+        user = self.jy_user_var.get()
+        templates = available_templates(user)
+        self.jy_template_combo.configure(values=templates)
+        if templates:
+            current = self.jy_template_var.get()
+            if current not in templates:
+                self.jy_template_var.set(templates[0])
+        else:
+            self.jy_template_var.set("")
 
     def _command(self) -> list[str]:
         project = self.project_required()
         if not project:
             return []
         if isinstance(self, VoicePage):
-            uids = [item.strip() for item in self.uid_var.get().split(",") if item.strip()]
+            uids = parse_uid_list(self.uid_var.get())
             return self.workflow.build_voice_command(project["id"], account_label=self.account_var.get().strip(), uids=uids or None)
         if isinstance(self, AssemblePage):
-            top_uids = [item.strip() for item in self.uid_var.get().split(",") if item.strip()]
+            top_uids = parse_uid_list(self.uid_var.get())
             mode = "top" if self.mode_var.get() == "Top 模式" else "standard"
             return self.workflow.build_assembly_command(
                 project["id"],
@@ -940,6 +1697,8 @@ class WorkflowPage(BasePage):
             project["id"],
             draft_name=self.account_var.get().strip(),
             spoken_markdown_path=self._remember_spoken_md(project["id"]),
+            intro_video_path=self.intro_video_var.get().strip(),
+            display_template=self.jy_template_var.get().strip(),
         )
 
     def _browse_spoken_md(self) -> None:
@@ -953,6 +1712,16 @@ class WorkflowPage(BasePage):
         )
         if path:
             self.spoken_md_var.set(path.replace("/", "\\"))
+
+    def _browse_intro_video(self) -> None:
+        project = self.app.current_project()
+        initial_dir = safe_text(project.get("video_root")) if project else ""
+        path = filedialog.askopenfilename(
+            filetypes=[("Video", "*.mp4 *.mov *.mkv *.avi *.webm"), ("All", "*.*")],
+            initialdir=initial_dir or str(DEFAULT_VIDEO_ROOT),
+        )
+        if path:
+            self.intro_video_var.set(path.replace("/", "\\"))
 
     def _remember_spoken_md(self, project_id: int) -> str:
         path = self.spoken_md_var.get().strip()
@@ -970,15 +1739,232 @@ class WorkflowPage(BasePage):
 
     def _run_command(self) -> None:
         try:
+            if not self._confirm_precheck():
+                return
             cmd = self._command()
-            result = self.workflow.run_command(cmd)
         except Exception as exc:
             messagebox.showerror("执行失败", str(exc))
             return
-        self.log(result.stdout or "")
-        if result.stderr:
-            self.log(result.stderr)
-        self.log(f"退出码：{result.returncode}")
+        progress_dialog = TaskProgressDialog(self, self._running_dialog_title(), self._running_dialog_message())
+        progress_dialog.append("即将执行：")
+        progress_dialog.append(" ".join(f'"{part}"' if " " in part else part for part in cmd))
+        progress_dialog.append("")
+
+        def work() -> Any:
+            return self.workflow.run_command(cmd)
+
+        def on_success(result: Any) -> None:
+            self.log(result.stdout or "")
+            if result.stderr:
+                self.log(result.stderr)
+            self.log(f"退出码：{result.returncode}")
+            progress_dialog.append(result.stdout or "")
+            if result.stderr:
+                progress_dialog.append(result.stderr)
+            progress_dialog.append(f"退出码：{result.returncode}")
+            if result.returncode == 0:
+                progress_dialog.finish("执行完成，可以关闭窗口。", kind="success")
+                self.toast("执行完成")
+            else:
+                progress_dialog.finish(f"执行结束，退出码：{result.returncode}", kind="warning")
+                self.toast(f"执行结束，退出码：{result.returncode}", kind="warning", duration=4500)
+
+        def on_error(exc: Exception, tb: str) -> None:
+            progress_dialog.append(tb or str(exc))
+            progress_dialog.finish(f"执行失败：{exc}", kind="error")
+            messagebox.showerror("执行失败", str(exc))
+
+        started = self.run_task(
+            "执行任务",
+            work,
+            on_success=on_success,
+            on_error=on_error,
+            success_message="任务执行完成",
+            show_success_toast=False,
+        )
+        if not started:
+            progress_dialog.destroy()
+
+    def _running_dialog_title(self) -> str:
+        if isinstance(self, JianyingPage):
+            return "正在生成剪映草稿"
+        if isinstance(self, VoicePage):
+            return "正在生成配音"
+        if isinstance(self, AssemblePage):
+            return "正在组合口播稿"
+        return "正在执行任务"
+
+    def _running_dialog_message(self) -> str:
+        if isinstance(self, JianyingPage):
+            return "剪映草稿正在生成中，通常需要几分钟。窗口会在执行结束后显示结果。"
+        if isinstance(self, VoicePage):
+            return "配音任务正在执行中，请等待当前任务结束后再继续操作。"
+        if isinstance(self, AssemblePage):
+            return "口播稿正在组合中，请等待当前任务结束后再继续操作。"
+        return "任务正在执行中，请等待当前任务结束后再继续操作。"
+
+    def _confirm_precheck(self) -> bool:
+        project = self.project_required()
+        if not project:
+            return False
+        if isinstance(self, VoicePage):
+            message, can_continue = self._voice_precheck(project)
+            return show_precheck_dialog(self, "确认生成配音", message, can_continue=can_continue)
+        if isinstance(self, JianyingPage):
+            self._remember_spoken_md(project["id"])
+            message, can_continue = self._jianying_precheck(project)
+            return show_precheck_dialog(self, "生成剪映草稿预检查", message, can_continue=can_continue)
+        return True
+
+    def _voice_precheck(self, project: dict[str, Any]) -> tuple[str, bool]:
+        account_label = self.account_var.get().strip()
+        selected_uids = parse_uid_list(self.uid_var.get())
+        products = {item["uid"]: item for item in self.repo.products(project["id"], include_removed=False)}
+        blocks = self.repo.script_blocks(project["id"])
+        assets = self.repo.asset_bindings(project["id"])
+        selected = set(selected_uids)
+        unknown_uids = [uid for uid in selected_uids if uid not in products]
+        product_blocks = [
+            block
+            for block in blocks
+            if block["script_type"] == "product" and (not selected or block["owner_uid"] in selected)
+        ]
+        shared_blocks = [] if selected else [block for block in blocks if block["script_type"] in {"intro", "price_transition"}]
+        pending: list[str] = []
+        skipped: list[str] = []
+        blocked: list[str] = []
+        for uid in selected_uids:
+            if uid in products and not any(block["owner_uid"] == uid for block in product_blocks):
+                blocked.append(f"{uid} {products[uid]['title']}：缺文案")
+        for uid in unknown_uids:
+            blocked.append(f"{uid}：当前品类项目中没有这个商品")
+        for block in product_blocks:
+            product = products.get(block["owner_uid"], {})
+            display = f"{block['owner_uid']} {safe_text(product.get('title'))} / {block['block_label']}"
+            state = voice_state(assets, uid=block["owner_uid"], account_label=account_label, hashes={block["text_hash"]})
+            if state == "ready":
+                skipped.append(f"{display}：已有配音")
+            elif state == "expired":
+                pending.append(f"{display}：配音过期，将重生成")
+            else:
+                pending.append(f"{display}：缺配音，将生成")
+        for block in shared_blocks:
+            if block["script_type"] == "intro":
+                display = f"引言文案 / {block['block_label']}"
+                state = voice_state(assets, uid="INTRO", account_label=account_label, hashes={block["text_hash"]})
+            else:
+                display = f"价格过渡 {block['price_range_label']} / {block['block_label']}"
+                state = voice_state(
+                    assets,
+                    uid="PRICE_TRANSITION",
+                    account_label=account_label,
+                    hashes={block["text_hash"]},
+                    block_label=block["price_range_label"],
+                )
+            if state == "ready":
+                skipped.append(f"{display}：已有配音")
+            elif state == "expired":
+                pending.append(f"{display}：配音过期，将重生成")
+            else:
+                pending.append(f"{display}：缺配音，将生成")
+        selected_text = "全部文案" if not selected_uids else "、".join(selected_uids)
+        lines = [
+            "本次配音生成预览",
+            "",
+            f"品类：{project['name']}",
+            f"用户：{account_label or '未选择'}",
+            f"范围：{selected_text}",
+            "",
+            "统计",
+            f"- 待生成 / 重生成：{len(pending)} 条",
+            f"- 已有配音跳过：{len(skipped)} 条",
+            f"- 缺文案 / 不可处理：{len(blocked)} 条",
+            "",
+            "待生成明细",
+            *preview_lines(pending),
+            "",
+            "已有跳过明细",
+            *preview_lines(skipped),
+            "",
+            "缺失 / 不可处理",
+            *preview_lines(blocked),
+            "",
+            "确认后会先执行底层脚本；已有配音由脚本继续跳过，缺失和过期会生成。",
+        ]
+        return "\n".join(lines), bool(account_label) and bool(pending or skipped or blocked)
+
+    def _jianying_precheck(self, project: dict[str, Any]) -> tuple[str, bool]:
+        path_text = self.spoken_md_var.get().strip() or safe_text(project.get("spoken_md_path"))
+        if not path_text:
+            return "还没有选择口播稿 MD。\n\n请先在“组合口播稿”生成口播稿和 manifest。", False
+        spoken_path = Path(path_text)
+        manifest = self.workflow.spoken_manifest_path(project["id"], spoken_path)
+        intro_video_text = self.intro_video_var.get().strip()
+        intro_video_path = Path(intro_video_text) if intro_video_text else None
+        missing_manifest = not manifest.exists()
+        products = self.repo.products(project["id"], include_removed=False)
+        blocks = self.repo.script_blocks(project["id"])
+        assets = self.repo.asset_bindings(project["id"])
+        selected_user = "全部"
+        missing_files: list[str] = []
+        missing_product_videos: list[str] = []
+        manifest_error = ""
+        if manifest.exists():
+            try:
+                payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
+                selected_user = manifest_account_label(payload) or selected_user
+                missing_product_videos = manifest_product_video_gaps(payload)
+                for path in manifest_file_paths(payload):
+                    if not Path(path).exists():
+                        missing_files.append(path)
+            except Exception as exc:
+                manifest_error = str(exc)
+        issues = build_project_issue_summary(project, products, blocks, assets, self.repo.accounts(), selected_user=selected_user)
+        display_template = self.jy_template_var.get().strip()
+        lines = [
+            "生成剪映草稿预检查",
+            "",
+            f"品类：{project['name']}",
+            f"口播稿：{spoken_path}",
+            f"Manifest：{manifest}",
+            f"口播用户：{selected_user}",
+            f"展示模板：{display_template or '未选择'}",
+            f"引言成片视频：{intro_video_path if intro_video_path else '未选择，将使用 manifest 内的引言配音'}",
+            f"草稿输出：{DEFAULT_JIANYING_DRAFT_ROOT}",
+            "",
+            "阻塞问题",
+        ]
+        if missing_manifest:
+            lines.append("- 缺 manifest：还没有组合口播稿，不能生成剪映草稿。")
+        else:
+            lines.append("- manifest 已找到")
+        if manifest_error:
+            lines.append(f"- manifest 读取失败：{manifest_error}")
+        if intro_video_path is not None:
+            if intro_video_path.exists():
+                lines.append("- 引言成片视频已找到，生成时会过滤 manifest 里的引言条目")
+            else:
+                lines.append(f"- 引言成片视频不存在：{intro_video_path}")
+        if missing_files:
+            lines.append(f"- manifest 中有 {len(missing_files)} 个文件路径不存在")
+            lines.extend(f"  {item}" for item in missing_files[:10])
+            if len(missing_files) > 10:
+                lines.append(f"  ... 其余 {len(missing_files) - 10} 个已省略")
+        if missing_product_videos:
+            lines.append(f"- 有 {len(missing_product_videos)} 个商品没有展示视频，将只显示商品图")
+            lines.extend(f"  {item}" for item in missing_product_videos[:10])
+            if len(missing_product_videos) > 10:
+                lines.append(f"  ... 其余 {len(missing_product_videos) - 10} 个已省略")
+        lines += [
+            "",
+            "数据库缺口",
+            f"- 缺图片：{len(issues['missing_image'])}",
+            f"- 缺视频：{len(issues['missing_video'])}",
+            f"- 缺配音：{len(issues['missing_voice'])}",
+            f"- 配音过期：{len(issues['expired_voice'])}",
+            format_issue_preview(issues),
+        ]
+        return "\n".join(lines), not missing_manifest and not manifest_error and (intro_video_path is None or intro_video_path.exists())
 
 
 class VoicePage(WorkflowPage):
@@ -990,7 +1976,297 @@ class AssemblePage(WorkflowPage):
 
 
 class JianyingPage(WorkflowPage):
-    pass
+    def __init__(self, master, app: App):
+        self.jy_user_var = tk.StringVar()
+        self.jy_template_var = tk.StringVar()
+        super().__init__(master, app)
+
+
+def parse_uid_list(value: str) -> list[str]:
+    return [item.strip() for item in re.split(r"[,，]+", value or "") if item.strip()]
+
+
+def open_path(path: str | Path | None) -> None:
+    text = safe_text(path)
+    if not text:
+        messagebox.showinfo("打开失败", "当前没有配置路径。")
+        return
+    target = Path(text)
+    if not target.exists():
+        messagebox.showwarning("打开失败", f"路径不存在：\n{target}")
+        return
+    os.startfile(str(target))
+
+
+def format_master_result(result: dict[str, list[dict[str, Any]]]) -> str:
+    lines = [
+        f"新增 {len(result['added'])}，更新 {len(result['updated'])}，移除 {len(result['removed'])}",
+        "",
+    ]
+    for key, label in (("added", "新增"), ("updated", "更新"), ("removed", "移除")):
+        items = result.get(key) or []
+        lines.append(label)
+        if not items:
+            lines.append("无")
+            continue
+        for item in items[:20]:
+            lines.append(f"- {item.get('uid', '')} {item.get('title', '')} {item.get('price_label', '')}".strip())
+        if len(items) > 20:
+            lines.append(f"... 其余 {len(items) - 20} 个已省略")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def build_project_issue_summary(
+    project: dict[str, Any],
+    products: list[dict[str, Any]],
+    blocks: list[dict[str, Any]],
+    assets: list[dict[str, Any]],
+    accounts: list[dict[str, Any]],
+    *,
+    selected_user: str = "全部",
+) -> dict[str, list[str]]:
+    product_blocks: dict[str, list[dict[str, Any]]] = {}
+    product_hashes: dict[str, set[str]] = {}
+    intro_hashes: set[str] = set()
+    for block in blocks:
+        if block["script_type"] == "product":
+            product_blocks.setdefault(block["owner_uid"], []).append(block)
+            product_hashes.setdefault(block["owner_uid"], set()).add(block["text_hash"])
+        elif block["script_type"] == "intro":
+            intro_hashes.add(block["text_hash"])
+
+    labels = [item["label"] for item in accounts if selected_user == "全部" or item["label"] == selected_user]
+    if not labels:
+        labels = [selected_user] if selected_user != "全部" else []
+    issues = {"missing_copy": [], "missing_image": [], "missing_video": [], "missing_voice": [], "expired_voice": []}
+    for product in products:
+        uid = product["uid"]
+        title = product["title"]
+        display = f"{uid} {title}"
+        if uid not in product_blocks:
+            issues["missing_copy"].append(display)
+        if not has_ready_asset(assets, uid=uid, asset_type="image"):
+            issues["missing_image"].append(display)
+        if not has_ready_asset(assets, uid=uid, asset_type="video"):
+            issues["missing_video"].append(display)
+        if uid in product_blocks:
+            for label in labels:
+                state = voice_state(assets, uid=uid, account_label=label, hashes=product_hashes.get(uid, set()))
+                if state == "missing":
+                    issues["missing_voice"].append(f"{label} / {display}")
+                elif state == "expired":
+                    issues["expired_voice"].append(f"{label} / {display}")
+    for label in labels:
+        if intro_hashes:
+            state = voice_state(assets, uid="INTRO", account_label=label, hashes=intro_hashes)
+            if state == "missing":
+                issues["missing_voice"].append(f"{label} / 引言文案")
+            elif state == "expired":
+                issues["expired_voice"].append(f"{label} / 引言文案")
+    return issues
+
+
+def has_ready_asset(assets: list[dict[str, Any]], *, uid: str, asset_type: str, account_label: str = "", block_label: str = "") -> bool:
+    return any(
+        asset["uid"] == uid
+        and asset["asset_type"] == asset_type
+        and asset["status"] == "ready"
+        and (not account_label or asset["account_label"] == account_label or not asset["account_label"])
+        and (not block_label or asset["block_label"] == block_label)
+        for asset in assets
+    )
+
+
+def voice_state(assets: list[dict[str, Any]], *, uid: str, account_label: str, hashes: set[str], block_label: str = "") -> str:
+    matching_uid = [
+        asset
+        for asset in assets
+        if asset["uid"] == uid
+        and asset["asset_type"] == "voice"
+        and asset["status"] == "ready"
+        and (not account_label or asset["account_label"] == account_label or not asset["account_label"])
+        and (not block_label or asset["block_label"] == block_label)
+    ]
+    if not matching_uid:
+        return "missing"
+    if hashes and any(safe_text(asset.get("text_hash")) in hashes for asset in matching_uid):
+        return "ready"
+    if any(safe_text(asset.get("text_hash")) for asset in matching_uid):
+        return "expired"
+    return "ready"
+
+
+def format_issue_preview(issues: dict[str, list[str]], limit: int = 8) -> str:
+    parts = []
+    for key, label in (
+        ("missing_copy", "缺文案"),
+        ("missing_image", "缺图片"),
+        ("missing_video", "缺视频"),
+        ("missing_voice", "缺配音"),
+        ("expired_voice", "配音过期"),
+    ):
+        items = issues.get(key) or []
+        if not items:
+            continue
+        shown = "；".join(items[:limit])
+        suffix = f"；另有 {len(items) - limit} 个" if len(items) > limit else ""
+        parts.append(f"{label}：{shown}{suffix}")
+    return "\n".join(parts) if parts else "当前筛选下没有明显缺口。"
+
+
+def preview_lines(items: list[str], limit: int = 18) -> list[str]:
+    if not items:
+        return ["无"]
+    lines = [f"{index}. {item}" for index, item in enumerate(items[:limit], start=1)]
+    if len(items) > limit:
+        lines.append(f"... 其余 {len(items) - limit} 条已省略")
+    return lines
+
+
+def show_precheck_dialog(parent: tk.Widget, title: str, message: str, *, can_continue: bool = True) -> bool:
+    dialog = tk.Toplevel(parent)
+    dialog.title(title)
+    dialog.geometry("780x620")
+    dialog.minsize(620, 420)
+    dialog.transient(parent.winfo_toplevel())
+    dialog.grab_set()
+    dialog.rowconfigure(1, weight=1)
+    dialog.columnconfigure(0, weight=1)
+    ttk.Label(dialog, text=title, font=("Microsoft YaHei UI", 14, "bold")).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 8))
+    text = tk.Text(dialog, wrap="word")
+    text.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 12))
+    text.insert("1.0", message)
+    text.configure(state="disabled")
+    buttons = ttk.Frame(dialog)
+    buttons.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 14))
+    buttons.columnconfigure(0, weight=1)
+    result = {"ok": False}
+
+    def close(ok: bool) -> None:
+        result["ok"] = ok
+        dialog.destroy()
+
+    ttk.Button(buttons, text="取消", command=lambda: close(False)).grid(row=0, column=1, padx=(0, 8))
+    if can_continue:
+        ttk.Button(buttons, text="确认继续", command=lambda: close(True)).grid(row=0, column=2)
+    else:
+        ttk.Button(buttons, text="知道了", command=lambda: close(False)).grid(row=0, column=2)
+    dialog.protocol("WM_DELETE_WINDOW", lambda: close(False))
+    dialog.wait_window()
+    return result["ok"]
+
+
+class TaskProgressDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Widget, title: str, message: str):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("680x430")
+        self.minsize(560, 340)
+        self.transient(parent.winfo_toplevel())
+        self.rowconfigure(3, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        self.status_var = tk.StringVar(value=message)
+        ttk.Label(self, text=title, font=("Microsoft YaHei UI", 14, "bold")).grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=16,
+            pady=(14, 6),
+        )
+        ttk.Label(self, textvariable=self.status_var, wraplength=620).grid(row=1, column=0, sticky="ew", padx=16)
+        self.progress = ttk.Progressbar(self, mode="indeterminate")
+        self.progress.grid(row=2, column=0, sticky="ew", padx=16, pady=(12, 10))
+        self.progress.start(12)
+        self.text = tk.Text(self, height=10, wrap="word", state="disabled")
+        self.text.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 12))
+        buttons = ttk.Frame(self)
+        buttons.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 14))
+        buttons.columnconfigure(0, weight=1)
+        self.close_button = ttk.Button(buttons, text="关闭", command=self.destroy)
+        self.close_button.grid(row=0, column=1)
+        self.close_button.state(["disabled"])
+        self.protocol("WM_DELETE_WINDOW", self._ignore_close)
+        self.lift()
+        self.focus_set()
+
+    def append(self, text: str) -> None:
+        if not self.winfo_exists():
+            return
+        value = text.rstrip()
+        if not value:
+            return
+        self.text.configure(state="normal")
+        self.text.insert("end", value + "\n")
+        self.text.see("end")
+        self.text.configure(state="disabled")
+
+    def finish(self, message: str, *, kind: str = "success") -> None:
+        if not self.winfo_exists():
+            return
+        self.progress.stop()
+        self.status_var.set(message)
+        if kind == "error":
+            self.bell()
+        self.close_button.state(["!disabled"])
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.close_button.focus_set()
+
+    def _ignore_close(self) -> None:
+        self.bell()
+
+
+def manifest_file_paths(value: Any) -> list[str]:
+    suffixes = (".wav", ".mp3", ".png", ".jpg", ".jpeg", ".webp", ".mp4", ".mov", ".mkv", ".avi")
+    paths: list[str] = []
+
+    def walk(item: Any) -> None:
+        if isinstance(item, dict):
+            for child in item.values():
+                walk(child)
+        elif isinstance(item, list):
+            for child in item:
+                walk(child)
+        elif isinstance(item, str):
+            text = item.strip()
+            if len(text) > 2 and text.lower().endswith(suffixes) and (":\\" in text or text.startswith("\\\\")):
+                paths.append(text)
+
+    walk(value)
+    return list(dict.fromkeys(paths))
+
+
+def manifest_product_video_gaps(value: Any) -> list[str]:
+    if not isinstance(value, dict) or not isinstance(value.get("entries"), list):
+        return []
+    gaps: list[str] = []
+    for entry in value["entries"]:
+        if not isinstance(entry, dict) or safe_text(entry.get("type")) != "product":
+            continue
+        if safe_text(entry.get("video_path")) or safe_text(entry.get("display_video_path")):
+            continue
+        uid = safe_text(entry.get("product_uid"))
+        name = safe_text(entry.get("product_name"))
+        gaps.append(" ".join(part for part in [uid, name] if part))
+    return gaps
+
+
+def manifest_account_label(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    label = safe_text(value.get("account_label"))
+    if label:
+        return label
+    entries = value.get("entries")
+    if not isinstance(entries, list):
+        return ""
+    for entry in entries:
+        if isinstance(entry, dict):
+            label = safe_text(entry.get("account_label"))
+            if label:
+                return label
+    return ""
 
 
 PAGE_MAP = {
@@ -999,7 +2275,6 @@ PAGE_MAP = {
     "资产中心": AssetPage,
     "同步中心": SyncPage,
     "用户管理": AccountPage,
-    "设置": SettingsPage,
     "生成配音": VoicePage,
     "组合口播稿": AssemblePage,
     "生成剪映草稿": JianyingPage,
