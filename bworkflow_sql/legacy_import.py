@@ -15,6 +15,7 @@ from .utils import file_metadata, now_iso, safe_text
 
 OLD_ACCOUNTS_PATH = LEGACY_PROJECT_ROOT / "data" / "accounts.json"
 OLD_VOICE_REGISTRY_PATH = Path(r"G:\Tools\IndexTTS2.0\outputs\voices\voices.json")
+OLD_MEDIA_INDEX_PATH = LEGACY_PROJECT_ROOT / "data" / "media_index.json"
 
 
 class LegacyImportService:
@@ -120,8 +121,10 @@ class LegacyImportService:
         )
         master_result = self.sync.sync_master_scheme(project_id, apply_changes=True)
         markdown_result = self.sync.sync_markdown(project_id)
-        image_count = self._import_images(project_id, category=category)
-        video_count = self._import_videos(project_id, category=category)
+        self._prune_out_of_scope_assets(project_id)
+        media_index_counts = self._import_media_index_assets(project_id, parent_category=parent_category, category=category)
+        image_count = self._import_images(project_id, parent_category=parent_category, category=category)
+        video_count = self._import_videos(project_id, parent_category=parent_category, category=category)
         voice_asset_count = self._import_voice_assets(project_id, category=category)
         return {
             "project_id": project_id,
@@ -131,8 +134,8 @@ class LegacyImportService:
             "master_updated": len(master_result["updated"]),
             "master_removed": len(master_result["removed"]),
             "markdown_upserted": markdown_result["upserted"],
-            "images": image_count,
-            "videos": video_count,
+            "images": image_count + media_index_counts["image"],
+            "videos": video_count + media_index_counts["video"],
             "voices": voice_asset_count,
         }
 
@@ -178,17 +181,79 @@ class LegacyImportService:
             }
         )
 
-    def _import_images(self, project_id: int, *, category: str) -> int:
-        root = DEFAULT_IMAGE_ROOT / category
-        return self._import_files_by_uid(project_id, root=root, asset_type="image", category=category)
+    def _import_images(self, project_id: int, *, parent_category: str, category: str) -> int:
+        count = 0
+        for root in _candidate_roots(DEFAULT_IMAGE_ROOT, parent_category=parent_category, category=category):
+            count += self._import_files_by_uid(project_id, root=root, asset_type="image", category=category)
+        return count
 
-    def _import_videos(self, project_id: int, *, category: str) -> int:
-        root = DEFAULT_VIDEO_ROOT / category
-        return self._import_files_by_uid(project_id, root=root, asset_type="video", category=category)
+    def _import_videos(self, project_id: int, *, parent_category: str, category: str) -> int:
+        count = 0
+        for root in _candidate_roots(DEFAULT_VIDEO_ROOT, parent_category=parent_category, category=category, include_contains=True):
+            count += self._import_files_by_uid(project_id, root=root, asset_type="video", category=category)
+        return count
+
+    def _import_media_index_assets(self, project_id: int, *, parent_category: str, category: str) -> dict[str, int]:
+        counts = {"image": 0, "video": 0}
+        if not OLD_MEDIA_INDEX_PATH.exists():
+            return counts
+        payload = _read_json(OLD_MEDIA_INDEX_PATH)
+        scopes = payload.get("scopes") if isinstance(payload, dict) else []
+        products = {item["uid"]: item for item in self.repo.products(project_id, include_removed=False)}
+        accounts = self.repo.accounts()
+        category_names = {category, f"{parent_category}-{category}"}
+        for scope in scopes if isinstance(scopes, list) else []:
+            if not isinstance(scope, dict) or safe_text(scope.get("category")) not in category_names:
+                continue
+            account = _account_by_label(scope.get("image_user"), accounts)
+            image_set = safe_text(scope.get("image_set"))
+            items = scope.get("items") if isinstance(scope.get("items"), dict) else {}
+            for uid, item in items.items():
+                uid_text = safe_text(uid)
+                if uid_text not in products or not isinstance(item, dict):
+                    continue
+                image_path = safe_text(item.get("image_path"))
+                if image_path:
+                    self._upsert_asset(
+                        project_id,
+                        uid=uid_text,
+                        asset_type="image",
+                        path=image_path,
+                        status="ready",
+                        account_label=safe_text(account.get("label")),
+                        account_id=safe_text(account.get("account_id")),
+                        media_identity=safe_text(account.get("media_identity")),
+                        image_set=image_set,
+                        block_label="",
+                        source_kind="legacy_media_index",
+                        source_path=str(OLD_MEDIA_INDEX_PATH),
+                    )
+                    counts["image"] += 1
+                for video_path in item.get("display_videos") or []:
+                    path_text = safe_text(video_path)
+                    if not path_text:
+                        continue
+                    self._upsert_asset(
+                        project_id,
+                        uid=uid_text,
+                        asset_type="video",
+                        path=path_text,
+                        status="ready",
+                        account_label="",
+                        account_id="",
+                        media_identity="",
+                        image_set="",
+                        block_label="",
+                        source_kind="legacy_media_index",
+                        source_path=str(OLD_MEDIA_INDEX_PATH),
+                    )
+                    counts["video"] += 1
+        return counts
 
     def _import_voice_assets(self, project_id: int, *, category: str) -> int:
         root = DEFAULT_VOICE_ROOT
         accounts = {item["account_id"]: item for item in self.repo.accounts()}
+        allowed_uids = {item["uid"] for item in self.repo.products(project_id, include_removed=False)}
         count = 0
         for registry_path in root.glob(f"*{category}/audio_segment_registry.json"):
             payload = _read_json(registry_path)
@@ -199,6 +264,8 @@ class LegacyImportService:
                 account_id = safe_text(entry.get("account_id"))
                 account = accounts.get(account_id, {})
                 uid = safe_text(entry.get("uid"))
+                if uid not in allowed_uids and uid not in {"INTRO", "PRICE_TRANSITION", "CLOSING"}:
+                    continue
                 asset_type = "voice"
                 if uid == "INTRO":
                     block_label = safe_text(entry.get("source_label") or "引言")
@@ -223,6 +290,17 @@ class LegacyImportService:
                 )
                 count += 1
         return count
+
+    def _prune_out_of_scope_assets(self, project_id: int) -> None:
+        allowed_uids = {item["uid"] for item in self.repo.products(project_id, include_removed=False)}
+        allowed_uids.update({"INTRO", "PRICE_TRANSITION", "CLOSING"})
+        placeholders = ",".join("?" for _ in allowed_uids)
+        with self.db.connect() as conn:
+            conn.execute(
+                f"DELETE FROM asset_bindings WHERE project_id=? AND uid NOT IN ({placeholders})",
+                (project_id, *sorted(allowed_uids)),
+            )
+            conn.execute("DELETE FROM asset_bindings WHERE project_id=? AND asset_type='voice' AND account_label=''", (project_id,))
 
     def _import_files_by_uid(self, project_id: int, *, root: Path, asset_type: str, category: str) -> int:
         if not root.exists():
@@ -337,6 +415,36 @@ class LegacyImportService:
 
 def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def _candidate_roots(root: Path, *, parent_category: str, category: str, include_contains: bool = False) -> list[Path]:
+    names = [category, f"{parent_category}-{category}"]
+    result: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        key = str(path).casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        if path.exists() and path.is_dir():
+            result.append(path)
+
+    for name in names:
+        add(root / name)
+    if include_contains and root.exists():
+        for child in root.iterdir():
+            if child.is_dir() and category in child.name:
+                add(child)
+    return result
+
+
+def _account_by_label(label: Any, accounts: list[dict[str, Any]]) -> dict[str, Any]:
+    label_text = safe_text(label)
+    for account in accounts:
+        if safe_text(account.get("label")) == label_text:
+            return account
+    return {}
 
 
 def _product_from_path(path: Path, products: list[dict[str, Any]]) -> dict[str, Any]:
