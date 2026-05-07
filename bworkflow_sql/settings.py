@@ -1,10 +1,23 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
 APP_ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = APP_ROOT / "data"
+CANONICAL_APP_ROOT = Path(r"G:\workspace\PC-Bilibili-workflow-sql")
+
+
+def _default_data_dir() -> Path:
+    override = os.environ.get("BWORKFLOW_SQL_DATA_DIR", "").strip()
+    if override:
+        return Path(override)
+    if APP_ROOT != CANONICAL_APP_ROOT and CANONICAL_APP_ROOT.exists():
+        return CANONICAL_APP_ROOT / "data"
+    return APP_ROOT / "data"
+
+
+DATA_DIR = _default_data_dir()
 DB_PATH = DATA_DIR / "bworkflow.db"
 
 LEGACY_PROJECT_ROOT = Path(r"G:\workspace\PC-Bilibili-workflow")

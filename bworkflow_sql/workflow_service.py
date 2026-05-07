@@ -145,6 +145,7 @@ class WorkflowService:
         intro_index: int = 1,
         product_uids: list[str] | None = None,
         output_markdown_path: str | Path | None = None,
+        display_template: str = "",
     ) -> list[str]:
         project = self.repo.project(project_id)
         if not project:
@@ -167,6 +168,8 @@ class WorkflowService:
             cmd += ["--uids", ",".join(product_uids)]
         if top_uids:
             cmd += ["--top-uids", ",".join(top_uids)]
+        if display_template:
+            cmd += ["--display-template", display_template]
         return cmd
 
     def build_jianying_command(
@@ -176,7 +179,6 @@ class WorkflowService:
         draft_name: str = "",
         spoken_markdown_path: str | Path | None = None,
         intro_video_path: str | Path | None = None,
-        display_template: str = "",
     ) -> list[str]:
         project = self.repo.project(project_id)
         if not project:
@@ -197,8 +199,6 @@ class WorkflowService:
         intro_video = safe_text(intro_video_path)
         if intro_video:
             cmd += ["--intro-video", intro_video]
-        if display_template:
-            cmd += ["--display-template", display_template]
         return cmd
 
     def run_command(self, cmd: list[str]) -> WorkflowRunResult:
@@ -266,6 +266,7 @@ class WorkflowService:
         top_uids: list[str] | None = None,
         product_uids: list[str] | None = None,
         output_markdown_path: str | Path | None = None,
+        display_template: str = "",
     ) -> WorkflowRunResult:
         project = self._required_project(project_id)
         account = self._resolve_account(account_label)
@@ -305,6 +306,7 @@ class WorkflowService:
                     assets=assets,
                     product={},
                     source_label=intro_block["block_label"],
+                    display_template=display_template,
                 )
             )
             order += 1
@@ -330,6 +332,7 @@ class WorkflowService:
                                 assets=assets,
                                 product={},
                                 source_label=f"价格过渡 {price_block['price_range_label']}",
+                                display_template=display_template,
                             )
                         )
                         order += 1
@@ -346,6 +349,7 @@ class WorkflowService:
                         assets=assets,
                         product=product,
                         source_label=block["block_label"],
+                        display_template=display_template,
                     )
                 )
                 order += 1
@@ -391,7 +395,6 @@ class WorkflowService:
         draft_name: str,
         draft_root: str | Path,
         intro_video_path: str | Path | None = None,
-        display_template: str = "",
     ) -> WorkflowRunResult:
         _project = self._required_project(project_id)
         manifest = Path(manifest_path)
@@ -401,8 +404,6 @@ class WorkflowService:
         if intro_video is not None and not intro_video.exists():
             raise ValueError(f"引言成片视频不存在：{intro_video}")
         effective_manifest = self._jianying_manifest_for_intro_video(project_id, manifest, intro_video=intro_video)
-        if display_template:
-            effective_manifest = self._patch_manifest_display_slot(effective_manifest, display_template)
         python_exe = B_WORKFLOW_SKILL_SCRIPTS.parent / ".venv" / "Scripts" / "python.exe"
         if not python_exe.exists():
             python_exe = Path(sys.executable)
@@ -431,39 +432,6 @@ class WorkflowService:
         )
         return completed
 
-    def _patch_manifest_display_slot(self, manifest_path: Path, template_name: str) -> Path:
-        """用模板坐标替换 manifest 中的 display_video_slot。"""
-        from .template_config import get_template_slot
-
-        slot = get_template_slot(template_name)
-        payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-        entries = payload.get("entries", [])
-        patched = 0
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            if not entry.get("display_video_path"):
-                continue
-            new_slot: dict[str, Any] = {
-                "x": int(slot["x"]),
-                "y": int(slot["y"]),
-                "width": int(slot["width"]),
-                "height": int(slot["height"]),
-            }
-            if "round_corner" in slot:
-                new_slot["round_corner"] = float(slot["round_corner"])
-            entry["display_video_slot"] = new_slot
-            patched += 1
-        if patched:
-            manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        self.db.log_event(
-            int(payload.get("project_id") or 0),
-            "display_template_patch",
-            "success",
-            f"展示视频模板已应用：{template_name}，已更新 {patched} 个条目",
-        )
-        return manifest_path
-
     def _run_internal(self, cmd: list[str]) -> WorkflowRunResult:
         args = self._parse_internal_args(cmd[1:])
         project_id = int(args.get("project-id") or "0")
@@ -478,6 +446,7 @@ class WorkflowService:
                 top_uids=split_csv(args.get("top-uids", "")),
                 product_uids=split_csv(args.get("uids", "")),
                 output_markdown_path=args.get("output-markdown", ""),
+                display_template=args.get("display-template", ""),
             )
         if cmd[0] == f"{INTERNAL_PREFIX}jianying":
             return self.generate_jianying_draft(
@@ -486,7 +455,6 @@ class WorkflowService:
                 draft_name=args.get("draft-name", ""),
                 draft_root=args.get("draft-root", DEFAULT_JIANYING_DRAFT_ROOT),
                 intro_video_path=args.get("intro-video", ""),
-                display_template=args.get("display-template", ""),
             )
         raise ValueError(f"未知内部任务：{cmd[0]}")
 
@@ -790,11 +758,23 @@ class WorkflowService:
         assets: list[dict[str, Any]],
         product: dict[str, Any],
         source_label: str,
+        display_template: str = "",
     ) -> dict[str, Any]:
         uid = safe_text(product.get("uid") or ("INTRO" if block["script_type"] == "intro" else "PRICE_TRANSITION"))
         voice = self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label, script_block_id=int(block["id"]), text_hash=safe_text(block["text_hash"]))
-        image = self._ready_asset(assets, asset_type="image", uid=uid) if product else None
+        template_suffix = display_template.split("-", 1)[1] if display_template and "-" in display_template else ""
+        image = self._ready_asset(assets, asset_type="image", uid=uid, account_label=account_label, path_contains=template_suffix) if product else None
         video = self._ready_asset(assets, asset_type="video", uid=uid) if product else None
+        video_slot = None
+        if video:
+            from .template_config import get_template_slot
+            if display_template:
+                try:
+                    video_slot = get_template_slot(display_template)
+                except ValueError:
+                    video_slot = DEFAULT_DISPLAY_VIDEO_SLOT
+            else:
+                video_slot = DEFAULT_DISPLAY_VIDEO_SLOT
         return {
             "type": entry_type,
             "order_index": order,
@@ -810,7 +790,7 @@ class WorkflowService:
             "image_path": safe_text(image.get("path")) if image else "",
             "video_path": safe_text(video.get("path")) if video else "",
             "display_video_path": safe_text(video.get("path")) if video else "",
-            "display_video_slot": DEFAULT_DISPLAY_VIDEO_SLOT if video else None,
+            "display_video_slot": video_slot,
             "binding_id": f"db:{block['id']}:{account_label}",
             "script_id": f"script-{block['id']}",
             "account_id": account_id,
@@ -858,6 +838,7 @@ class WorkflowService:
         account_label: str = "",
         script_block_id: int = 0,
         text_hash: str = "",
+        path_contains: str = "",
     ) -> dict[str, Any] | None:
         for asset in assets:
             if asset["asset_type"] != asset_type or asset["status"] != "ready":
@@ -865,6 +846,8 @@ class WorkflowService:
             if uid and safe_text(asset.get("uid")) != uid:
                 continue
             if account_label and safe_text(asset.get("account_label")) != account_label:
+                continue
+            if path_contains and path_contains not in safe_text(asset.get("path")):
                 continue
             asset_script_block_id = int(asset.get("script_block_id") or 0)
             if script_block_id and asset_script_block_id not in {0, script_block_id}:
