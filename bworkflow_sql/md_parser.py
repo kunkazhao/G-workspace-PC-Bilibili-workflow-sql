@@ -110,11 +110,26 @@ def parse_script_variants(lines: list[str], fallback_label: str = "正文") -> l
         body = clean_body(current_lines)
         if body:
             variants.append(ScriptVariant(label=current_label, body=body, script_id=current_script_id))
+        current_label = ""
+        current_lines = []
+        current_script_id = ""
+
+    def flush_loose() -> None:
+        nonlocal loose_lines, pending_script_id
+        body = clean_body(loose_lines)
+        if body:
+            variants.append(ScriptVariant(label=next_auto_label(), body=body, script_id=pending_script_id))
+        loose_lines = []
+        pending_script_id = ""
 
     for raw in lines:
         stripped = raw.strip()
         script_match = SCRIPT_ID_RE.match(stripped)
         if script_match:
+            if current_label and clean_body(current_lines):
+                flush()
+            elif loose_lines:
+                flush_loose()
             pending_script_id = safe_text(script_match.group("script_id"))
             continue
         if VOICE_STATUS_RE.match(stripped):
@@ -130,6 +145,8 @@ def parse_script_variants(lines: list[str], fallback_label: str = "正文") -> l
         heading4 = H4_RE.match(stripped)
         heading3 = H3_RE.match(stripped)
         if heading4:
+            if loose_lines:
+                flush_loose()
             flush()
             current_label = heading4.group(1).strip()
             current_lines = []
@@ -137,6 +154,8 @@ def parse_script_variants(lines: list[str], fallback_label: str = "正文") -> l
             pending_script_id = ""
             continue
         if not heading4 and (stripped in BLOCK_LABEL_ALIASES or stripped.startswith("来源 ") or stripped.startswith("版本")):
+            if loose_lines:
+                flush_loose()
             flush()
             current_label = stripped
             current_lines = []
@@ -146,6 +165,8 @@ def parse_script_variants(lines: list[str], fallback_label: str = "正文") -> l
         if current_label:
             current_lines.append(raw)
         elif heading3:
+            if loose_lines:
+                flush_loose()
             flush()
             current_label = heading3.group(1).strip()
             current_lines = []
@@ -154,9 +175,7 @@ def parse_script_variants(lines: list[str], fallback_label: str = "正文") -> l
         else:
             loose_lines.append(raw)
     flush()
-    loose_body = clean_body(loose_lines)
-    if loose_body:
-        variants.insert(0, ScriptVariant(label=fallback_label, body=loose_body, script_id=pending_script_id))
+    flush_loose()
     return variants
 
 
@@ -182,7 +201,12 @@ def parse_intro(lines: list[str]) -> list[ScriptVariant]:
         return []
     result: list[ScriptVariant] = []
     for index, (label, chunk_lines) in enumerate(chunks, start=1):
-        body = clean_body(chunk_lines)
+        cleaned_lines = [
+            raw
+            for raw in chunk_lines
+            if not SCRIPT_ID_RE.match(raw.strip()) and not VOICE_STATUS_RE.match(raw.strip())
+        ]
+        body = clean_body(cleaned_lines)
         if body:
             result.append(ScriptVariant(label=label or f"引言{index}", body=body))
     return result or parse_script_variants(lines, fallback_label="正文")

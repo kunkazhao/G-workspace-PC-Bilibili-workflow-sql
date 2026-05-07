@@ -105,3 +105,24 @@ def test_parse_legacy_manual_blocks_without_titles():
         ("正文", "PMGD010-manual-001", "商品第一段"),
         ("正文2", "PMGD010-manual-002", "商品第二段"),
     ]
+
+
+def test_parse_legacy_script_id_blocks_without_titles():
+    parsed = parse_markdown_text(
+        """
+## 商品文案
+
+### 狼途 LT84有线-JP015-99元
+
+<!-- script_id: jp015-body-001 -->
+第一段文案
+
+<!-- script_id: jp015-body-002 -->
+第二段文案
+""".strip()
+    )
+
+    assert [(item.label, item.script_id, item.body) for item in parsed.products[0].scripts] == [
+        ("正文", "jp015-body-001", "第一段文案"),
+        ("正文2", "jp015-body-002", "第二段文案"),
+    ]
