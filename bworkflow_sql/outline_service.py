@@ -32,13 +32,16 @@ class OutlineService:
         if not products:
             raise ValueError("当前品类项目还没有商品，请先同步 Master 方案商品。")
         target = Path(target_path) if target_path else self.default_markdown_path(project_id)
+        if path_looks_mismatched(project, target):
+            raise ValueError(
+                "商品文案 MD 文件名和当前项目名不一致，已停止更新，避免覆盖错误项目路径。\n"
+                f"当前项目：{safe_text(project.get('name'))}\n"
+                f"目标文件：{target}"
+            )
 
         existing_text = target.read_text(encoding="utf-8-sig") if target.exists() else ""
         parsed = parse_markdown_text(existing_text) if existing_text.strip() else None
         existing_products = {item.uid: item for item in parsed.products} if parsed else {}
-        existing_intro = parsed.intro_scripts if parsed else []
-        existing_transitions = parsed.price_transitions if parsed else []
-        extra_sections = parsed.extra_sections if parsed else {}
 
         added: list[dict[str, Any]] = []
         preserved: list[dict[str, Any]] = []
@@ -55,18 +58,8 @@ class OutlineService:
             "## 视频信息",
             "",
         ]
-        for section_name, section_lines in extra_sections.items():
-            if section_name == "视频信息":
-                lines.extend(section_lines)
-                lines.append("")
-                break
 
-        lines += ["## 引言文案", ""]
-        if existing_intro:
-            for block in existing_intro:
-                lines += [f"### {block.label}", block.body, ""]
-        else:
-            lines += ["### 引言1", "", ""]
+        lines += ["## 引言文案", "", "### 引言1", "", ""]
 
         lines += ["## 商品文案", ""]
         for product in products:
@@ -83,14 +76,7 @@ class OutlineService:
                 lines += ["#### 正文", ""]
             lines.append("")
 
-        lines += ["## 价格过渡文案", ""]
-        if existing_transitions:
-            for transition in existing_transitions:
-                lines += [f"### {transition.label}", ""]
-                for script in transition.scripts:
-                    lines += [f"#### {script.label}", script.body, ""]
-        else:
-            lines += ["### 0-100元", "", "", "### 100-200元", "", ""]
+        lines += ["## 价格过渡文案", "", "### 0-100元", "", "", "### 100-200元", "", ""]
 
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
@@ -107,6 +93,12 @@ class OutlineService:
             "preserved": preserved,
             "total": len(products),
         }
+
+
+def path_looks_mismatched(project: dict[str, Any], path: Path) -> bool:
+    project_name = safe_text(project.get("name")).replace(" ", "").casefold()
+    target_name = path.stem.replace(" ", "").casefold()
+    return bool(project_name and target_name and project_name != target_name)
 
 
 def format_product_heading(product: dict[str, Any]) -> str:

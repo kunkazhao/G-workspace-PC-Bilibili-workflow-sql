@@ -18,7 +18,7 @@ class NavButton(ctk.CTkButton):
             text=text,
             command=command,
             fg_color="transparent",
-            text_color=UIStyle.COLOR_TEXT_MAIN,
+            text_color=UIStyle.COLOR_TEXT_DIM,
             hover_color=UIStyle.COLOR_NAV_HOVER,
             anchor="w",
             font=UIStyle.FONT_BODY,
@@ -28,7 +28,10 @@ class NavButton(ctk.CTkButton):
         )
 
     def set_active(self, active: bool) -> None:
-        self.configure(fg_color=UIStyle.COLOR_NAV_ACTIVE if active else "transparent")
+        self.configure(
+            fg_color=UIStyle.COLOR_NAV_ACTIVE if active else "transparent",
+            text_color=UIStyle.COLOR_PRIMARY if active else UIStyle.COLOR_TEXT_DIM,
+        )
 
 
 class PrimaryButton(ctk.CTkButton):
@@ -80,7 +83,7 @@ class GhostButton(ctk.CTkButton):
             command=command,
             fg_color="transparent",
             text_color=UIStyle.COLOR_TEXT_MAIN,
-            hover_color=UIStyle.COLOR_NAV_HOVER,
+            hover_color=UIStyle.COLOR_INPUT_BG,
             border_width=1,
             border_color=UIStyle.COLOR_BORDER,
             font=UIStyle.FONT_BODY,

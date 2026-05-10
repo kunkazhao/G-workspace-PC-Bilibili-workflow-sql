@@ -18,6 +18,23 @@ VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi"}
 UID_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{1,12}\d[\w-]*)(?![A-Za-z0-9])")
 
 
+def _compact_identity(value: Any) -> str:
+    text = safe_text(value).casefold()
+    return re.sub(r"[\s_\-—/&]+", "", text)
+
+
+def _project_identity_tokens(project: dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    name = safe_text(project.get("name"))
+    if name:
+        tokens.update(_compact_identity(part) for part in re.split(r"[-_/\\]+", name) if part.strip())
+    md_path = safe_text(project.get("md_path"))
+    if md_path:
+        tokens.update(_compact_identity(part) for part in re.split(r"[-_/\\]+", Path(md_path).stem) if part.strip())
+    tokens.discard("")
+    return tokens
+
+
 class SyncService:
     def __init__(self, db: Database):
         self.db = db
@@ -37,6 +54,7 @@ class SyncService:
         if master_schemes is None:
             raise ValueError("无法加载旧项目 Master 方案模块。")
         summary = master_schemes.fetch_scheme_summary(workspace_id=workspace_id, scheme_id=scheme_id, force_refresh=force_refresh)
+        self._validate_scheme_matches_project(project, summary)
         raw_items = summary.get("items") or []
         products = []
         for index, item in enumerate(raw_items, start=1):
@@ -83,6 +101,28 @@ class SyncService:
             ],
         )
         return result
+
+    def _validate_scheme_matches_project(self, project: dict[str, Any], summary: dict[str, Any]) -> None:
+        project_category_id = safe_text(project.get("category_id"))
+        scheme_category_id = safe_text(summary.get("category_id"))
+        if project_category_id and scheme_category_id and project_category_id != scheme_category_id:
+            raise ValueError(
+                "当前项目绑定的 Master 方案和品类不一致，已停止同步，避免把商品刷串。\n"
+                f"项目品类：{project.get('category_name') or '--'}（{project_category_id}）\n"
+                f"方案品类：{summary.get('category_name') or '--'}（{scheme_category_id}）\n"
+                "请回到“品类项目”重新选择正确的二级品类和方案后再同步。"
+            )
+        category_name = safe_text(summary.get("category_name") or project.get("category_name"))
+        tokens = _project_identity_tokens(project)
+        compact_category = _compact_identity(category_name)
+        if compact_category and tokens and compact_category not in tokens:
+            raise ValueError(
+                "当前项目名称/MD 文件名和 Master 方案品类不一致，已停止同步，避免把商品刷串。\n"
+                f"项目：{project.get('name') or '--'}\n"
+                f"MD：{project.get('md_path') or '--'}\n"
+                f"方案：{summary.get('name') or project.get('scheme_name') or '--'} / {category_name}\n"
+                "请确认是否选错了 Master 品类或方案。"
+            )
 
     def sync_markdown(self, project_id: int) -> dict[str, Any]:
         project = self.repo.project(project_id)
@@ -182,6 +222,17 @@ class SyncService:
         accounts = self.repo.accounts()
         counts = {"image": 0, "video": 0, "voice": 0, "unmatched": 0}
         items: list[dict[str, Any]] = []
+        ts = now_iso()
+        active_uids = set(products)
+        all_uids = {safe_text(row["uid"]) for row in self.repo.products(project_id)}
+        stale_uids = sorted(uid for uid in all_uids if uid and uid not in active_uids)
+        if stale_uids:
+            placeholders = ", ".join("?" for _ in stale_uids)
+            with self.db.connect() as conn:
+                conn.execute(
+                    f"UPDATE asset_bindings SET status='stale', updated_at=? WHERE project_id=? AND uid IN ({placeholders})",
+                    (ts, project_id, *stale_uids),
+                )
         image_root = Path(safe_text(project.get("image_root")) or DEFAULT_IMAGE_ROOT)
         video_root = Path(safe_text(project.get("video_root")) or DEFAULT_VIDEO_ROOT)
         voice_root = Path(safe_text(project.get("voice_root")) or DEFAULT_VOICE_ROOT)

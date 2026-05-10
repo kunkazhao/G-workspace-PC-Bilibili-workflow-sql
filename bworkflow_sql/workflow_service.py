@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .db import Database
 from .repositories import Repository
@@ -26,6 +26,7 @@ from .settings import (
     INTERNAL_WORKSPACE_ROOT,
 )
 from .utils import file_metadata, now_iso, safe_text
+from .template_config import user_for_template
 
 
 DEFAULT_TTS_FIELDS = {
@@ -206,8 +207,57 @@ class WorkflowService:
             return self._run_internal(cmd)
         return run_subprocess_text(cmd)
 
-    def generate_voice(self, project_id: int, *, account_label: str = "", uids: list[str] | None = None) -> WorkflowRunResult:
+    def is_tts_service_running(self, timeout: float = 1.0) -> bool:
+        return self._api_health(JsonHttpClient(timeout=timeout)) is not None
+
+    def shutdown_tts_service(self) -> int:
+        pids = self._find_tts_service_pids()
+        if not pids:
+            return 0
+        killed = 0
+        for pid in pids:
+            completed = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                encoding="gbk",
+                errors="ignore",
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if completed.returncode == 0:
+                killed += 1
+        return killed
+
+    def voice_generation_counts(
+        self,
+        project_id: int,
+        *,
+        account_label: str = "",
+        uids: list[str] | None = None,
+    ) -> tuple[int, int, int]:
+        account = self._resolve_account(account_label)
+        if not account:
+            return 0, 0, 0
+        jobs = self._voice_jobs(project_id, uids=uids)
+        existing, pending = self._split_existing_voice_jobs(project_id, jobs, account)
+        return len(jobs), len(existing), len(pending)
+
+    def generate_voice(
+        self,
+        project_id: int,
+        *,
+        account_label: str = "",
+        uids: list[str] | None = None,
+        start_service_if_needed: bool = True,
+        progress_hook: Callable[[str], None] | None = None,
+    ) -> WorkflowRunResult:
         logs: list[str] = []
+        def emit(message: str) -> None:
+            logs.append(message)
+            if progress_hook:
+                progress_hook(message)
+
         project = self._required_project(project_id)
         account = self._resolve_account(account_label)
         if not account:
@@ -222,25 +272,25 @@ class WorkflowService:
             return WorkflowRunResult([f"{INTERNAL_PREFIX}voice"], stdout="没有需要生成配音的文案。\n")
 
         existing, pending = self._split_existing_voice_jobs(project_id, jobs, account)
-        logs.append(f"[配音任务] 文案 {len(jobs)} 条，已存在 {len(existing)} 条，待生成 {len(pending)} 条。")
+        emit(f"[配音任务] 文案 {len(jobs)} 条，已存在 {len(existing)} 条，待生成 {len(pending)} 条。")
         if not pending:
             return WorkflowRunResult([f"{INTERNAL_PREFIX}voice"], stdout="\n".join(logs) + "\n")
 
         http = JsonHttpClient(timeout=600.0)
-        self._ensure_tts_api_ready(http, logs=logs)
-        self._ensure_registered_voice(http, voice_id=voice_id, account=account, logs=logs)
+        self._ensure_tts_api_ready(http, logs=logs, start_if_needed=start_service_if_needed, progress_hook=progress_hook)
+        self._ensure_registered_voice(http, voice_id=voice_id, account=account, logs=logs, progress_hook=progress_hook)
         generated = 0
         failures: list[str] = []
         for position, job in enumerate(pending, start=1):
             try:
-                logs.append(f"[生成 {position}/{len(pending)}] {job.product_name} / {job.block['block_label']}")
+                emit(f"[生成 {position}/{len(pending)}] {job.product_name} / {job.block['block_label']}")
                 path = self._generate_one_voice(http, job=job, account=account, voice_id=voice_id, output_dir=out_dir)
                 self._upsert_voice_asset(project_id, job=job, account=account, path=path)
                 generated += 1
-                logs.append(f"[成功] {path}")
+                emit(f"[成功] {path}")
             except Exception as exc:
                 failures.append(f"{job.product_name} / {job.block['block_label']}：{exc}")
-                logs.append(f"[失败] {failures[-1]}")
+                emit(f"[失败] {failures[-1]}")
         status = "success" if not failures else "partial"
         self.db.log_event(
             project_id,
@@ -285,6 +335,13 @@ class WorkflowService:
                 intro_blocks.append(block)
             elif block["script_type"] == "price_transition":
                 price_blocks.append(block)
+
+        if not intro_blocks and not product_blocks and not price_blocks:
+            md_path = safe_text(project.get("md_path"))
+            raise ValueError(
+                "当前项目还没有同步到任何口播文案块，不能生成口播稿。\n"
+                f"请先在“同步中心”同步商品文案 MD，或检查项目绑定的商品文案路径：{md_path or '未配置'}"
+            )
 
         lines: list[str] = []
         entries: list[dict[str, Any]] = []
@@ -353,6 +410,15 @@ class WorkflowService:
                     )
                 )
                 order += 1
+
+        if order == 1:
+            md_path = safe_text(project.get("md_path"))
+            selected_text = "、".join(product_uids or top_uids or [])
+            raise ValueError(
+                "没有找到可写入正文的引言、商品文案或价格过渡文案，已停止生成，避免只输出结尾文案。\n"
+                f"当前筛选：{selected_text or '全部商品'}\n"
+                f"请先同步商品文案 MD，或检查 Top UID 是否存在于文案中。项目文案路径：{md_path or '未配置'}"
+            )
 
         self._append_spoken_paragraph(lines, DEFAULT_CLOSING_TEXT)
         entries.append(
@@ -661,11 +727,25 @@ class WorkflowService:
                 ),
             )
 
-    def _ensure_tts_api_ready(self, http: "JsonHttpClient", *, logs: list[str]) -> None:
-        logs.append(f"[服务检查] 检查 IndexTTS：{DEFAULT_TTS_API_BASE_URL}")
+    def _ensure_tts_api_ready(
+        self,
+        http: "JsonHttpClient",
+        *,
+        logs: list[str],
+        start_if_needed: bool = True,
+        progress_hook: Callable[[str], None] | None = None,
+    ) -> None:
+        def emit(message: str) -> None:
+            logs.append(message)
+            if progress_hook:
+                progress_hook(message)
+
+        emit(f"[服务检查] 检查 IndexTTS：{DEFAULT_TTS_API_BASE_URL}")
         health = self._api_health(http)
         if health is None:
-            logs.append("[服务检查] 服务未启动，正在尝试自动启动。")
+            if not start_if_needed:
+                raise ValueError("本地 IndexTTS2 服务未启动。")
+            emit("[服务检查] 服务未启动，正在尝试自动启动。")
             self._launch_tts_api()
             deadline = time.time() + 90
             while time.time() < deadline:
@@ -678,9 +758,22 @@ class WorkflowService:
         loaded = http.post(f"{DEFAULT_TTS_API_BASE_URL.rstrip('/')}/v1/model/load")
         if not isinstance(loaded, dict) or not loaded.get("loaded"):
             raise ValueError("本地配音模型预热失败。")
-        logs.append("[服务检查] 配音服务已就绪。")
+        emit("[服务检查] 配音服务已就绪。")
 
-    def _ensure_registered_voice(self, http: "JsonHttpClient", *, voice_id: str, account: dict[str, Any], logs: list[str]) -> None:
+    def _ensure_registered_voice(
+        self,
+        http: "JsonHttpClient",
+        *,
+        voice_id: str,
+        account: dict[str, Any],
+        logs: list[str],
+        progress_hook: Callable[[str], None] | None = None,
+    ) -> None:
+        def emit(message: str) -> None:
+            logs.append(message)
+            if progress_hook:
+                progress_hook(message)
+
         profile = self._voice_profile(voice_id)
         reference = Path(safe_text(profile.get("speaker_audio_path")))
         if not reference.exists():
@@ -694,7 +787,7 @@ class WorkflowService:
         result = http.post(f"{DEFAULT_TTS_API_BASE_URL.rstrip('/')}/v1/voices/register/path", json_payload=payload)
         if not isinstance(result, dict) or not safe_text(result.get("voice_id")):
             raise ValueError(f"音色注册接口返回异常：{result}")
-        logs.append(f"[音色注册] 已确认音色：{voice_id}")
+        emit(f"[音色注册] 已确认音色：{voice_id}")
 
     def _api_health(self, http: "JsonHttpClient") -> dict[str, Any] | None:
         try:
@@ -736,6 +829,30 @@ class WorkflowService:
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
 
+    def _find_tts_service_pids(self) -> list[str]:
+        completed = subprocess.run(
+            ["netstat", "-ano"],
+            capture_output=True,
+            text=True,
+            encoding="gbk",
+            errors="ignore",
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        pids: list[str] = []
+        for raw_line in completed.stdout.splitlines():
+            line = raw_line.strip()
+            if not line or f":{urllib.parse.urlparse(DEFAULT_TTS_API_BASE_URL).port}" not in line:
+                continue
+            if "LISTENING" not in line.upper():
+                continue
+            parts = line.split()
+            if parts:
+                pid = parts[-1].strip()
+                if pid.isdigit():
+                    pids.append(pid)
+        return list(dict.fromkeys(pids))
+
     def _ordered_products(self, project_id: int, *, mode: str, top_uids: list[str], product_uids: list[str]) -> list[dict[str, Any]]:
         products = self.repo.products(project_id, include_removed=False)
         selected = {uid.casefold() for uid in product_uids}
@@ -762,8 +879,19 @@ class WorkflowService:
     ) -> dict[str, Any]:
         uid = safe_text(product.get("uid") or ("INTRO" if block["script_type"] == "intro" else "PRICE_TRANSITION"))
         voice = self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label, script_block_id=int(block["id"]), text_hash=safe_text(block["text_hash"]))
+        if not voice and block["script_type"] == "product":
+            voice = self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label)
         template_suffix = display_template.split("-", 1)[1] if display_template and "-" in display_template else ""
-        image = self._ready_asset(assets, asset_type="image", uid=uid, account_label=account_label, path_contains=template_suffix) if product else None
+        display_user = user_for_template(display_template)
+        image = None
+        if product:
+            image = self._ready_asset(assets, asset_type="image", uid=uid, account_label=display_user, path_contains=template_suffix)
+            if not image:
+                image = self._ready_asset(assets, asset_type="image", uid=uid, account_label=display_user)
+            if not image:
+                image = self._ready_asset(assets, asset_type="image", uid=uid, path_contains=template_suffix)
+            if not image:
+                image = self._ready_asset(assets, asset_type="image", uid=uid)
         video = self._ready_asset(assets, asset_type="video", uid=uid) if product else None
         video_slot = None
         if video:
