@@ -184,24 +184,33 @@ def parse_intro(lines: list[str]) -> list[ScriptVariant]:
     # In intro sections, H3 headings are independent intro choices.
     if not any(H3_RE.match(raw.strip()) for raw in lines):
         return parse_script_variants(lines, fallback_label="引言")
-    chunks: list[tuple[str, list[str]]] = []
+    chunks: list[tuple[str, list[str], str]] = []
     current_label = ""
     current_lines: list[str] = []
+    current_script_id = ""
+    pending_script_id = ""
     for raw in lines:
-        match = H3_RE.match(raw.strip())
+        stripped = raw.strip()
+        script_match = SCRIPT_ID_RE.match(stripped)
+        if script_match:
+            pending_script_id = safe_text(script_match.group("script_id"))
+            continue
+        match = H3_RE.match(stripped)
         if match:
             if current_label or current_lines:
-                chunks.append((current_label or "正文", current_lines))
+                chunks.append((current_label or "正文", current_lines, current_script_id))
             current_label = match.group(1).strip()
             current_lines = []
+            current_script_id = pending_script_id
+            pending_script_id = ""
             continue
         current_lines.append(raw)
     if current_label or current_lines:
-        chunks.append((current_label or "正文", current_lines))
+        chunks.append((current_label or "正文", current_lines, current_script_id or pending_script_id))
     if not chunks:
         return []
     result: list[ScriptVariant] = []
-    for index, (label, chunk_lines) in enumerate(chunks, start=1):
+    for index, (label, chunk_lines, script_id) in enumerate(chunks, start=1):
         cleaned_lines = [
             raw
             for raw in chunk_lines
@@ -209,7 +218,7 @@ def parse_intro(lines: list[str]) -> list[ScriptVariant]:
         ]
         body = clean_body(cleaned_lines)
         if body:
-            result.append(ScriptVariant(label=label or f"引言{index}", body=body))
+            result.append(ScriptVariant(label=label or f"引言{index}", body=body, script_id=script_id))
     return result or parse_script_variants(lines, fallback_label="正文")
 
 

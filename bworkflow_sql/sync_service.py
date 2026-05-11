@@ -4,9 +4,9 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .db import Database
+from .db import Database, _script_id_slug
 from .legacy_bridge import install_legacy_paths, try_import
-from .md_parser import ParsedMarkdown, parse_markdown_file
+from .md_parser import H3_RE, H4_RE, SCRIPT_ID_RE, SECTION_RE, ParsedMarkdown, parse_markdown_file, parse_product_heading
 from .repositories import Repository
 from .settings import DEFAULT_IMAGE_ROOT, DEFAULT_VIDEO_ROOT, DEFAULT_VOICE_ROOT
 from .utils import file_metadata, now_iso, safe_text, text_hash
@@ -33,6 +33,12 @@ def _project_identity_tokens(project: dict[str, Any]) -> set[str]:
         tokens.update(_compact_identity(part) for part in re.split(r"[-_/\\]+", Path(md_path).stem) if part.strip())
     tokens.discard("")
     return tokens
+
+
+def _voice_text_label(block: dict[str, Any], length: int = 2) -> str:
+    text = re.sub(r"\s+", "", safe_text(block.get("body")))
+    text = re.sub(r"[，。！？、,.!?;；:\"“”‘’（）()【】\[\]]", "", text)
+    return text[:length]
 
 
 class SyncService:
@@ -131,8 +137,11 @@ class SyncService:
         md_path = safe_text(project.get("md_path"))
         if not md_path or not Path(md_path).exists():
             raise ValueError("当前项目没有绑定可读取的 MD 文档。")
-        parsed = parse_markdown_file(md_path)
-        return self.sync_markdown_payload(project_id, parsed)
+        path = Path(md_path)
+        parsed = parse_markdown_file(path)
+        result = self.sync_markdown_payload(project_id, parsed)
+        self._write_script_ids_to_markdown(path, parsed)
+        return result
 
     def sync_markdown_payload(self, project_id: int, parsed: ParsedMarkdown) -> dict[str, Any]:
         products = {item["uid"]: item for item in self.repo.products(project_id, include_removed=False)}
@@ -145,6 +154,8 @@ class SyncService:
         with self.db.connect() as conn:
             conn.execute("UPDATE script_blocks SET active=0, updated_at=? WHERE project_id=?", (ts, project_id))
             for index, block in enumerate(parsed.intro_scripts, start=1):
+                script_id = block.script_id or f"intro:I{index:03d}"
+                block.script_id = script_id
                 upserted += self._upsert_script_block(
                     conn,
                     project_id=project_id,
@@ -152,6 +163,7 @@ class SyncService:
                     owner_uid="",
                     price_range_label="",
                     block_label=block.label or f"引言{index}",
+                    script_id=script_id,
                     body=block.body,
                     source_anchor=f"引言文案/{block.label or index}",
                     ts=ts,
@@ -160,7 +172,9 @@ class SyncService:
                 product = md_products.get(uid)
                 if not product:
                     continue
-                for block in product.scripts:
+                for index, block in enumerate(product.scripts, start=1):
+                    script_id = block.script_id or f"product:{uid}:V{index:03d}"
+                    block.script_id = script_id
                     upserted += self._upsert_script_block(
                         conn,
                         project_id=project_id,
@@ -168,12 +182,16 @@ class SyncService:
                         owner_uid=uid,
                         price_range_label="",
                         block_label=block.label or "正文",
+                        script_id=script_id,
                         body=block.body,
                         source_anchor=f"商品文案/{product.title}-{uid}/{block.label}",
                         ts=ts,
                     )
             for price in parsed.price_transitions:
-                for block in price.scripts:
+                price_key = _script_id_slug(price.label) or f"price-{len(price.label)}"
+                for index, block in enumerate(price.scripts, start=1):
+                    script_id = block.script_id or f"price:{price_key}:V{index:03d}"
+                    block.script_id = script_id
                     upserted += self._upsert_script_block(
                         conn,
                         project_id=project_id,
@@ -181,6 +199,7 @@ class SyncService:
                         owner_uid="",
                         price_range_label=price.label,
                         block_label=block.label or "正文",
+                        script_id=script_id,
                         body=block.body,
                         source_anchor=f"价格过渡文案/{price.label}/{block.label}",
                         ts=ts,
@@ -201,26 +220,112 @@ class SyncService:
         )
         return {"upserted": upserted, "extra_md": extra_md, "missing_copy": missing_copy}
 
-    def _upsert_script_block(self, conn, *, project_id: int, script_type: str, owner_uid: str, price_range_label: str, block_label: str, body: str, source_anchor: str, ts: str) -> int:
+    def _write_script_ids_to_markdown(self, path: Path, parsed: ParsedMarkdown) -> None:
+        try:
+            original = path.read_text(encoding="utf-8-sig")
+        except UnicodeError:
+            original = path.read_text(encoding="utf-8", errors="ignore")
+        lines = original.splitlines()
+        intro_iter = iter(parsed.intro_scripts)
+        product_scripts = {item.uid: iter(item.scripts) for item in parsed.products}
+        price_scripts = {item.label: iter(item.scripts) for item in parsed.price_transitions}
+        section = ""
+        current_product_uid = ""
+        current_price_label = ""
+        pending_script_id = False
+        changed = False
+        output: list[str] = []
+
+        def append_script_id(script_id: str) -> None:
+            nonlocal changed
+            if not script_id or pending_script_id:
+                return
+            output.append(f"<!-- script_id: {script_id} -->")
+            changed = True
+
+        for raw in lines:
+            stripped = raw.strip()
+            if SCRIPT_ID_RE.match(stripped):
+                pending_script_id = True
+                output.append(raw)
+                continue
+            section_match = SECTION_RE.match(stripped)
+            if section_match:
+                section = section_match.group(1).strip()
+                current_product_uid = ""
+                current_price_label = ""
+                pending_script_id = False
+                output.append(raw)
+                continue
+            h3 = H3_RE.match(stripped)
+            h4 = H4_RE.match(stripped)
+            if h3 and section == "引言文案":
+                block = next(intro_iter, None)
+                if block:
+                    append_script_id(safe_text(block.script_id))
+                pending_script_id = False
+                output.append(raw)
+                continue
+            if h3 and section == "商品文案":
+                parsed_heading = parse_product_heading(h3.group(1).strip())
+                current_product_uid = parsed_heading[0] if parsed_heading else ""
+                pending_script_id = False
+                output.append(raw)
+                continue
+            if h3 and section == "价格过渡文案":
+                current_price_label = h3.group(1).strip()
+                pending_script_id = False
+                output.append(raw)
+                continue
+            if h4 and section == "商品文案" and current_product_uid:
+                block = next(product_scripts.get(current_product_uid, iter(())), None)
+                if block:
+                    append_script_id(safe_text(block.script_id))
+                pending_script_id = False
+                output.append(raw)
+                continue
+            if h4 and section == "价格过渡文案" and current_price_label:
+                block = next(price_scripts.get(current_price_label, iter(())), None)
+                if block:
+                    append_script_id(safe_text(block.script_id))
+                pending_script_id = False
+                output.append(raw)
+                continue
+            if stripped:
+                pending_script_id = False
+            output.append(raw)
+        if changed:
+            path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+
+    def _upsert_script_block(self, conn, *, project_id: int, script_type: str, owner_uid: str, price_range_label: str, block_label: str, script_id: str, body: str, source_anchor: str, ts: str) -> int:
         block_hash = text_hash(body)
         conn.execute(
             """
-            INSERT INTO script_blocks (project_id, script_type, owner_uid, price_range_label, block_label, body, text_hash, source_anchor, active, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            INSERT INTO script_blocks (project_id, script_type, owner_uid, price_range_label, block_label, script_id, body, text_hash, source_anchor, active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             ON CONFLICT(project_id, script_type, owner_uid, price_range_label, block_label)
-            DO UPDATE SET body=excluded.body, text_hash=excluded.text_hash, source_anchor=excluded.source_anchor, active=1, updated_at=excluded.updated_at
+            DO UPDATE SET script_id=excluded.script_id, body=excluded.body, text_hash=excluded.text_hash, source_anchor=excluded.source_anchor, active=1, updated_at=excluded.updated_at
             """,
-            (project_id, script_type, owner_uid, price_range_label, block_label, body.strip(), block_hash, source_anchor, ts, ts),
+            (project_id, script_type, owner_uid, price_range_label, block_label, script_id, body.strip(), block_hash, source_anchor, ts, ts),
         )
         return 1
 
-    def sync_assets(self, project_id: int) -> dict[str, int]:
+    def sync_assets(self, project_id: int, *, asset_type: str | None = None, root_override: str | Path | None = None) -> dict[str, Any]:
         project = self.repo.project(project_id)
         if not project:
             raise ValueError("请先创建或选择品类项目。")
+        allowed_types = {"image", "video", "voice"}
+        requested_type = asset_type
+        if requested_type and requested_type not in allowed_types:
+            raise ValueError(f"不支持的素材类型：{asset_type}")
         products = {item["uid"]: item for item in self.repo.products(project_id, include_removed=False)}
+        script_blocks = self.repo.script_blocks(project_id)
         accounts = self.repo.accounts()
         counts = {"image": 0, "video": 0, "voice": 0, "unmatched": 0}
+        matched_items: list[dict[str, Any]] = []
+        matched_uids_by_type: dict[str, set[str]] = {"image": set(), "video": set(), "voice": set()}
+        matched_voice_targets: set[tuple[str, str]] = set()
+        scanned_roots: dict[str, str] = {}
         items: list[dict[str, Any]] = []
         ts = now_iso()
         active_uids = set(products)
@@ -236,28 +341,168 @@ class SyncService:
         image_root = Path(safe_text(project.get("image_root")) or DEFAULT_IMAGE_ROOT)
         video_root = Path(safe_text(project.get("video_root")) or DEFAULT_VIDEO_ROOT)
         voice_root = Path(safe_text(project.get("voice_root")) or DEFAULT_VOICE_ROOT)
-        for asset_type, root, suffixes in [
-            ("image", image_root, IMAGE_SUFFIXES),
-            ("video", video_root, VIDEO_SUFFIXES),
-            ("voice", voice_root, AUDIO_SUFFIXES),
+        roots = {
+            "image": image_root,
+            "video": video_root,
+            "voice": voice_root,
+        }
+        if requested_type and root_override:
+            roots[requested_type] = Path(root_override)
+        for current_type, root, suffixes in [
+            ("image", roots["image"], IMAGE_SUFFIXES),
+            ("video", roots["video"], VIDEO_SUFFIXES),
+            ("voice", roots["voice"], AUDIO_SUFFIXES),
         ]:
+            if requested_type and current_type != requested_type:
+                continue
+            scanned_roots[current_type] = str(root)
             for path in self._scan_files(root, suffixes):
                 uid = self._uid_from_path(path, products)
-                account = self._account_from_path(path, accounts)
+                account = {} if current_type == "video" else self._account_from_path(path, accounts)
                 if uid:
-                    self._upsert_asset(project_id, uid=uid, asset_type=asset_type, path=path, account=account)
-                    counts[asset_type] += 1
-                else:
+                    block = self._product_voice_block_from_path(uid, path, script_blocks) if current_type == "voice" else None
+                    if block:
+                        self._upsert_voice_block_asset(project_id, uid=uid, block=block, path=path, account=account)
+                        matched_voice_targets.add(self._voice_target_key(block))
+                    else:
+                        self._upsert_asset(project_id, uid=uid, asset_type=current_type, path=path, account=account)
+                    counts[current_type] += 1
+                    matched_uids_by_type[current_type].add(uid)
+                    product = products.get(uid) or {}
+                    matched_items.append(
+                        {
+                            "asset_type": current_type,
+                            "uid": uid,
+                            "title": safe_text(product.get("title")),
+                            "account_label": safe_text(account.get("label")),
+                            "path": str(path),
+                        }
+                    )
+                elif current_type == "voice":
+                    block = self._voice_block_from_path(path, script_blocks)
+                    if not block:
+                        continue
+                    special_uid = "INTRO" if block["script_type"] == "intro" else "PRICE_TRANSITION"
+                    target_key = self._voice_target_key(block)
+                    self._upsert_voice_block_asset(project_id, uid=special_uid, block=block, path=path, account=account)
+                    counts[current_type] += 1
+                    matched_voice_targets.add(target_key)
+                    matched_items.append(
+                        {
+                            "asset_type": current_type,
+                            "uid": special_uid,
+                            "title": self._voice_block_title(block),
+                            "account_label": safe_text(account.get("label")),
+                            "path": str(path),
+                        }
+                    )
+        checked_types = [requested_type] if requested_type else ["image", "video", "voice"]
+        for current_type in checked_types:
+            if not current_type:
+                continue
+            if current_type == "voice":
+                for block in script_blocks:
+                    target_key = self._voice_target_key(block)
+                    if target_key in matched_voice_targets:
+                        continue
                     counts["unmatched"] += 1
-                    items.append({"item_kind": "file", "status": "unmatched", "message": "文件名未识别出当前方案 UID", "path": str(path)})
+                    items.append(
+                        {
+                            "item_kind": "script_block",
+                            "uid": self._voice_block_uid(block),
+                            "title": self._voice_block_title(block),
+                            "status": "missing_asset",
+                            "message": "当前文案块缺少配音素材",
+                            "path": "",
+                            "asset_type": current_type,
+                        }
+                    )
+                continue
+            for uid, product in products.items():
+                if uid in matched_uids_by_type[current_type]:
+                    continue
+                counts["unmatched"] += 1
+                items.append(
+                    {
+                        "item_kind": "product",
+                        "uid": uid,
+                        "title": safe_text(product.get("title")),
+                        "status": "missing_asset",
+                        "message": f"当前方案商品缺少{self._asset_type_label(current_type)}素材",
+                        "path": "",
+                        "asset_type": current_type,
+                    }
+                )
         self.db.log_event(
             project_id,
-            "asset_sync",
+            f"asset_sync_{requested_type}" if requested_type else "asset_sync",
             "partial" if counts["unmatched"] else "success",
-            f"素材同步完成：图片 {counts['image']}，视频 {counts['video']}，配音 {counts['voice']}，未识别 {counts['unmatched']}",
+            f"素材同步完成：图片 {counts['image']}，视频 {counts['video']}，配音 {counts['voice']}，缺素材 {counts['unmatched']}",
             items[:200],
         )
-        return counts
+        return {**counts, "matched_items": matched_items, "unmatched_items": items, "scanned_roots": scanned_roots}
+
+    def _asset_type_label(self, asset_type: str) -> str:
+        return {"image": "图片", "video": "视频", "voice": "配音"}.get(asset_type, "素材")
+
+    def _voice_block_from_path(self, path: Path, blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
+        text = _compact_identity(path.stem)
+        intro_blocks = [block for block in blocks if block["script_type"] == "intro"]
+        price_blocks = [block for block in blocks if block["script_type"] == "price_transition"]
+        if "引言" in path.stem:
+            for block in intro_blocks:
+                if self._voice_block_matches_path(block, text):
+                    return block
+            return intro_blocks[0] if len(intro_blocks) == 1 else None
+        if "价格" in path.stem:
+            matched_ranges = [
+                block
+                for block in price_blocks
+                if safe_text(block.get("price_range_label")) and _compact_identity(block.get("price_range_label")) in text
+            ]
+            for block in matched_ranges:
+                if self._voice_block_matches_path(block, text, include_price=False):
+                    return block
+            return matched_ranges[0] if len(matched_ranges) == 1 else None
+        return None
+
+    def _product_voice_block_from_path(self, uid: str, path: Path, blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
+        text = _compact_identity(path.stem)
+        product_blocks = [
+            block for block in blocks
+            if block["script_type"] == "product" and safe_text(block.get("owner_uid")).casefold() == uid.casefold()
+        ]
+        for block in product_blocks:
+            if self._voice_block_matches_path(block, text):
+                return block
+        return product_blocks[0] if len(product_blocks) == 1 else None
+
+    def _voice_block_matches_path(self, block: dict[str, Any], compact_stem: str, *, include_price: bool = True) -> bool:
+        candidates = [
+            safe_text(block.get("script_id")),
+            safe_text(block.get("block_label")),
+            _voice_text_label(block),
+        ]
+        if include_price:
+            candidates.append(safe_text(block.get("price_range_label")))
+        return any(candidate and _compact_identity(candidate) in compact_stem for candidate in candidates)
+
+    def _voice_target_key(self, block: dict[str, Any]) -> tuple[str, str]:
+        return (safe_text(block.get("script_type")), safe_text(block.get("script_id")) or str(block.get("id")))
+
+    def _voice_block_title(self, block: dict[str, Any]) -> str:
+        if block["script_type"] == "intro":
+            return f"引言 {safe_text(block.get('block_label'))}".strip()
+        if block["script_type"] == "price_transition":
+            return f"价格过渡 {safe_text(block.get('price_range_label'))}".strip()
+        return f"{safe_text(block.get('owner_uid'))} {safe_text(block.get('block_label'))}".strip()
+
+    def _voice_block_uid(self, block: dict[str, Any]) -> str:
+        if block["script_type"] == "intro":
+            return "INTRO"
+        if block["script_type"] == "price_transition":
+            return "PRICE_TRANSITION"
+        return safe_text(block.get("owner_uid"))
 
     def _scan_files(self, root: Path, suffixes: set[str]) -> list[Path]:
         if not root.exists():
@@ -328,6 +573,38 @@ class SyncService:
                     account_id,
                     path_text,
                     "ready" if meta["exists"] else "path_invalid",
+                    meta["file_size"],
+                    meta["file_mtime"],
+                    ts,
+                    ts,
+                ),
+            )
+
+    def _upsert_voice_block_asset(self, project_id: int, *, uid: str, block: dict[str, Any], path: Path, account: dict[str, Any]) -> None:
+        meta = file_metadata(path)
+        ts = now_iso()
+        account_label = safe_text(account.get("label"))
+        account_id = safe_text(account.get("account_id"))
+        block_label = safe_text(block.get("price_range_label")) if block["script_type"] == "price_transition" else safe_text(block.get("block_label"))
+        with self.db.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO asset_bindings
+                    (project_id, uid, script_block_id, asset_type, account_label, account_id, block_label, script_id, text_hash, path, status, source_kind, file_size, file_mtime, confirmed, created_at, updated_at)
+                VALUES (?, ?, ?, 'voice', ?, ?, ?, ?, ?, ?, 'ready', 'scan', ?, ?, 0, ?, ?)
+                ON CONFLICT(project_id, uid, script_block_id, asset_type, account_label, block_label, path)
+                DO UPDATE SET account_id=excluded.account_id, text_hash=excluded.text_hash, status='ready', file_size=excluded.file_size, file_mtime=excluded.file_mtime, updated_at=excluded.updated_at
+                """,
+                (
+                    project_id,
+                    uid,
+                    block["id"],
+                    account_label,
+                    account_id,
+                    block_label,
+                    safe_text(block.get("script_id")) or f"script-{block['id']}",
+                    safe_text(block.get("text_hash")),
+                    str(path),
                     meta["file_size"],
                     meta["file_mtime"],
                     ts,

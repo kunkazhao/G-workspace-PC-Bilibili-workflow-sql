@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import locale
+import math
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -11,6 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -44,6 +47,10 @@ DEFAULT_TTS_FIELDS = {
     "max_mel_tokens": 1800,
     "verbose": False,
 }
+DEFAULT_SILENCE_THRESHOLD_DB = -45.0
+DEFAULT_MIN_SILENCE_MS = 280
+DEFAULT_KEEP_SILENCE_MS = 120
+DEFAULT_SILENCE_CHUNK_MS = 10
 INTERNAL_PREFIX = "internal:"
 DEFAULT_DISPLAY_VIDEO_SLOT = {
     "x": 1100,
@@ -74,6 +81,144 @@ class VoiceJob:
     price_range_label: str = ""
 
 
+def seconds_to_frames(seconds: float, frame_rate: int) -> int:
+    return max(0, int(round(seconds * frame_rate)))
+
+
+def dbfs_for_chunk(chunk: bytes, sample_width: int) -> float:
+    if not chunk:
+        return -math.inf
+    sample_count = len(chunk) // sample_width
+    if sample_count <= 0:
+        return -math.inf
+    total_square = 0
+    for offset in range(0, sample_count * sample_width, sample_width):
+        sample = chunk[offset : offset + sample_width]
+        if sample_width == 1:
+            value = sample[0] - 128
+        else:
+            value = int.from_bytes(sample, byteorder="little", signed=True)
+        total_square += value * value
+    rms = math.sqrt(total_square / sample_count)
+    if rms <= 0:
+        return -math.inf
+    peak = float(128 if sample_width == 1 else (1 << (8 * sample_width - 1)) - 1)
+    if peak <= 0:
+        return -math.inf
+    return 20.0 * math.log10(rms / peak)
+
+
+def compress_internal_silence(
+    audio_path: Path,
+    *,
+    threshold_db: float = DEFAULT_SILENCE_THRESHOLD_DB,
+    min_silence_ms: int = DEFAULT_MIN_SILENCE_MS,
+    keep_silence_ms: int = DEFAULT_KEEP_SILENCE_MS,
+    chunk_ms: int = DEFAULT_SILENCE_CHUNK_MS,
+) -> dict[str, Any]:
+    if min_silence_ms <= keep_silence_ms:
+        return {"enabled": True, "changed": False, "reason": "min_silence_ms <= keep_silence_ms"}
+    if chunk_ms <= 0:
+        raise ValueError("静音修音参数错误：chunk_ms 必须大于 0。")
+
+    with wave.open(str(audio_path), "rb") as reader:
+        params = reader.getparams()
+        frame_rate = reader.getframerate()
+        frame_count = reader.getnframes()
+        channel_count = reader.getnchannels()
+        sample_width = reader.getsampwidth()
+        raw_audio = reader.readframes(frame_count)
+
+    if frame_rate <= 0 or frame_count <= 0:
+        return {"enabled": True, "changed": False, "reason": "empty audio"}
+    if sample_width not in {1, 2, 3, 4}:
+        return {"enabled": True, "changed": False, "reason": f"unsupported sample width {sample_width}"}
+
+    bytes_per_frame = channel_count * sample_width
+    chunk_frames = max(1, seconds_to_frames(chunk_ms / 1000.0, frame_rate))
+    min_silence_frames = seconds_to_frames(min_silence_ms / 1000.0, frame_rate)
+    keep_silence_frames = seconds_to_frames(keep_silence_ms / 1000.0, frame_rate)
+    chunks: list[tuple[int, int, bool]] = []
+
+    start_frame = 0
+    while start_frame < frame_count:
+        end_frame = min(frame_count, start_frame + chunk_frames)
+        start_byte = start_frame * bytes_per_frame
+        end_byte = end_frame * bytes_per_frame
+        chunk = raw_audio[start_byte:end_byte]
+        chunks.append((start_frame, end_frame, dbfs_for_chunk(chunk, sample_width) <= threshold_db))
+        start_frame = end_frame
+
+    if not chunks:
+        return {"enabled": True, "changed": False, "reason": "no chunks"}
+
+    ranges: list[tuple[int, int, bool]] = []
+    current_start, current_end, current_silence = chunks[0]
+    for chunk_start, chunk_end, is_silence in chunks[1:]:
+        if is_silence == current_silence:
+            current_end = chunk_end
+            continue
+        ranges.append((current_start, current_end, current_silence))
+        current_start, current_end, current_silence = chunk_start, chunk_end, is_silence
+    ranges.append((current_start, current_end, current_silence))
+
+    output_parts: list[bytes] = []
+    compressed: list[dict[str, Any]] = []
+    last_index = len(ranges) - 1
+    for index, (start, end, is_silence) in enumerate(ranges):
+        duration_frames = end - start
+        keep_frames = duration_frames
+        if is_silence and 0 < index < last_index and duration_frames >= min_silence_frames:
+            keep_frames = min(duration_frames, keep_silence_frames)
+            compressed.append(
+                {
+                    "start_seconds": round(start / frame_rate, 3),
+                    "original_ms": round(duration_frames * 1000 / frame_rate),
+                    "kept_ms": round(keep_frames * 1000 / frame_rate),
+                }
+            )
+        start_byte = start * bytes_per_frame
+        end_byte = (start + keep_frames) * bytes_per_frame
+        output_parts.append(raw_audio[start_byte:end_byte])
+
+    if not compressed:
+        return {
+            "enabled": True,
+            "changed": False,
+            "threshold_db": threshold_db,
+            "min_silence_ms": min_silence_ms,
+            "keep_silence_ms": keep_silence_ms,
+            "compressed_count": 0,
+        }
+
+    fixed_audio = b"".join(output_parts)
+    temp_path = audio_path.with_name(f"{audio_path.stem}.silencefix.tmp{audio_path.suffix}")
+    try:
+        with wave.open(str(temp_path), "wb") as writer:
+            writer.setparams(params)
+            writer.writeframes(fixed_audio)
+        temp_path.replace(audio_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+    original_ms = round(frame_count * 1000 / frame_rate)
+    fixed_frames = len(fixed_audio) // bytes_per_frame
+    fixed_ms = round(fixed_frames * 1000 / frame_rate)
+    return {
+        "enabled": True,
+        "changed": True,
+        "threshold_db": threshold_db,
+        "min_silence_ms": min_silence_ms,
+        "keep_silence_ms": keep_silence_ms,
+        "compressed_count": len(compressed),
+        "compressed": compressed,
+        "original_ms": original_ms,
+        "fixed_ms": fixed_ms,
+        "removed_ms": original_ms - fixed_ms,
+    }
+
+
 class WorkflowService:
     def __init__(self, db: Database):
         self.db = db
@@ -100,7 +245,8 @@ class WorkflowService:
         lines: list[str] = []
         lines += ["## 引言文案", ""]
         for block in by_type.get("intro", []):
-            lines += [f"### {block['block_label']}", block["body"], ""]
+            script_id = safe_text(block.get("script_id")) or f"script-{block['id']}"
+            lines += [f"<!-- script_id: {script_id} -->", f"### {block['block_label']}", block["body"], ""]
         lines += ["## 商品文案", ""]
         product_blocks: dict[str, list[dict[str, Any]]] = {}
         for block in by_type.get("product", []):
@@ -108,7 +254,8 @@ class WorkflowService:
         for product in products:
             lines += [f"### {product['price_label']}-{product['uid']}-{product['title']}", ""]
             for block in product_blocks.get(product["uid"], []):
-                lines += [f"#### {block['block_label']}", block["body"], ""]
+                script_id = safe_text(block.get("script_id")) or f"script-{block['id']}"
+                lines += [f"<!-- script_id: {script_id} -->", f"#### {block['block_label']}", block["body"], ""]
             lines += [
                 f"图片：{asset_paths.get((product['uid'], 'image'), '')}",
                 f"视频：{asset_paths.get((product['uid'], 'video'), '')}",
@@ -121,19 +268,28 @@ class WorkflowService:
         for label, group in price_groups.items():
             lines += [f"### {label}", ""]
             for block in group:
-                lines += [f"#### {block['block_label']}", block["body"], ""]
+                script_id = safe_text(block.get("script_id")) or f"script-{block['id']}"
+                lines += [f"<!-- script_id: {script_id} -->", f"#### {block['block_label']}", block["body"], ""]
         lines += ["## 商品顺序", ""]
         for index, product in enumerate(products, start=1):
             lines.append(f"{index}. {product['uid']} {product['title']}")
         target.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         return target
 
-    def build_voice_command(self, project_id: int, account_label: str = "", uids: list[str] | None = None) -> list[str]:
+    def build_voice_command(
+        self,
+        project_id: int,
+        account_label: str = "",
+        uids: list[str] | None = None,
+        script_ids: list[str] | None = None,
+    ) -> list[str]:
         cmd = [f"{INTERNAL_PREFIX}voice", "--project-id", str(project_id)]
         if account_label:
             cmd += ["--account-label", account_label]
         if uids:
             cmd += ["--uids", ",".join(uids)]
+        if script_ids:
+            cmd += ["--script-ids", ",".join(script_ids)]
         return cmd
 
     def build_assembly_command(
@@ -235,11 +391,12 @@ class WorkflowService:
         *,
         account_label: str = "",
         uids: list[str] | None = None,
+        script_ids: list[str] | None = None,
     ) -> tuple[int, int, int]:
         account = self._resolve_account(account_label)
         if not account:
             return 0, 0, 0
-        jobs = self._voice_jobs(project_id, uids=uids)
+        jobs = self._voice_jobs(project_id, uids=uids, script_ids=script_ids)
         existing, pending = self._split_existing_voice_jobs(project_id, jobs, account)
         return len(jobs), len(existing), len(pending)
 
@@ -249,6 +406,7 @@ class WorkflowService:
         *,
         account_label: str = "",
         uids: list[str] | None = None,
+        script_ids: list[str] | None = None,
         start_service_if_needed: bool = True,
         progress_hook: Callable[[str], None] | None = None,
     ) -> WorkflowRunResult:
@@ -267,7 +425,7 @@ class WorkflowService:
             raise ValueError(f"用户“{account.get('label') or account_label}”缺少音色标识。")
         out_dir = self._voice_output_dir(project, account=account, account_label=account_label)
         out_dir.mkdir(parents=True, exist_ok=True)
-        jobs = self._voice_jobs(project_id, uids=uids)
+        jobs = self._voice_jobs(project_id, uids=uids, script_ids=script_ids)
         if not jobs:
             return WorkflowRunResult([f"{INTERNAL_PREFIX}voice"], stdout="没有需要生成配音的文案。\n")
 
@@ -373,7 +531,8 @@ class WorkflowService:
         for product in products:
             is_top_product = product["uid"].casefold() in top_set
             if not is_top_product:
-                for price_block in self._matching_price_blocks(product, price_blocks):
+                price_block = self._matching_price_block_for_assets(product, price_blocks, assets, account_label=account_label)
+                if price_block:
                     price_key = safe_text(price_block.get("price_range_label")) or str(price_block["id"])
                     if price_key not in used_price_labels:
                         used_price_labels.add(price_key)
@@ -393,23 +552,26 @@ class WorkflowService:
                             )
                         )
                         order += 1
-            for block in product_blocks.get(product["uid"], []):
-                self._append_spoken_paragraph(lines, block["body"])
-                entries.append(
-                    self._manifest_entry(
-                        order=order,
-                        entry_type="product",
-                        section="top" if is_top_product else "product",
-                        block=block,
-                        account_label=account_label,
-                        account_id=account_id,
-                        assets=assets,
-                        product=product,
-                        source_label=block["block_label"],
-                        display_template=display_template,
-                    )
+            versions = product_blocks.get(product["uid"], [])
+            if not versions:
+                continue
+            block = self._choose_voice_ready_block(versions, assets, uid=product["uid"], account_label=account_label) or random.choice(versions)
+            self._append_spoken_paragraph(lines, block["body"])
+            entries.append(
+                self._manifest_entry(
+                    order=order,
+                    entry_type="product",
+                    section="top" if is_top_product else "product",
+                    block=block,
+                    account_label=account_label,
+                    account_id=account_id,
+                    assets=assets,
+                    product=product,
+                    source_label=block["block_label"],
+                    display_template=display_template,
                 )
-                order += 1
+            )
+            order += 1
 
         if order == 1:
             md_path = safe_text(project.get("md_path"))
@@ -502,7 +664,12 @@ class WorkflowService:
         args = self._parse_internal_args(cmd[1:])
         project_id = int(args.get("project-id") or "0")
         if cmd[0] == f"{INTERNAL_PREFIX}voice":
-            return self.generate_voice(project_id, account_label=args.get("account-label", ""), uids=split_csv(args.get("uids", "")) or None)
+            return self.generate_voice(
+                project_id,
+                account_label=args.get("account-label", ""),
+                uids=split_csv(args.get("uids", "")) or None,
+                script_ids=split_csv(args.get("script-ids", "")) or None,
+            )
         if cmd[0] == f"{INTERNAL_PREFIX}assembly":
             return self.assemble_spoken_script(
                 project_id,
@@ -600,12 +767,21 @@ class WorkflowService:
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _voice_jobs(self, project_id: int, *, uids: list[str] | None = None) -> list[VoiceJob]:
+    def _voice_jobs(
+        self,
+        project_id: int,
+        *,
+        uids: list[str] | None = None,
+        script_ids: list[str] | None = None,
+    ) -> list[VoiceJob]:
         products = {item["uid"]: item for item in self.repo.products(project_id, include_removed=False)}
         selected = {uid.casefold() for uid in (uids or [])}
+        selected_scripts = {script_id.casefold() for script_id in (script_ids or [])}
         jobs: list[VoiceJob] = []
         product_index = 0
         for block in self.repo.script_blocks(project_id):
+            if selected_scripts and safe_text(block.get("script_id")).casefold() not in selected_scripts:
+                continue
             if block["script_type"] == "product":
                 uid = block["owner_uid"]
                 if selected and uid.casefold() not in selected:
@@ -680,13 +856,27 @@ class WorkflowService:
         output_dir.mkdir(parents=True, exist_ok=True)
         if generated_path.resolve() != final_path.resolve():
             shutil.move(str(generated_path), str(final_path))
+        compress_internal_silence(final_path)
         return final_path
 
     def _voice_filename(self, job: VoiceJob) -> str:
-        prefix = f"{job.index:02d}" if job.kind == "product" else job.kind
         label = extract_label(safe_text(job.block.get("body")))
-        parts = [prefix, job.uid, job.product_name, label]
+        if job.kind == "product":
+            price = self._voice_price_label(job.price_label)
+            parts = [price, job.uid, job.product_name, label]
+        elif job.kind == "intro":
+            parts = ["0", "引言", job.product_name, label]
+        elif job.kind == "price_transition":
+            parts = ["0", "价格", job.price_range_label or job.product_name, label]
+        else:
+            parts = [job.kind, job.uid, job.product_name, label]
         return safe_path_component("-".join(part for part in parts if part)) + ".wav"
+
+    def _voice_price_label(self, value: str) -> str:
+        number = first_number(value)
+        if number is None:
+            return safe_text(value)
+        return str(int(number)) if number.is_integer() else str(number)
 
     def _upsert_voice_asset(self, project_id: int, *, job: VoiceJob, account: dict[str, Any], path: Path) -> None:
         meta = file_metadata(path)
@@ -716,8 +906,8 @@ class WorkflowService:
                     job.block["id"],
                     account_label,
                     account_id,
-                    safe_text(job.block.get("block_label")),
-                    f"script-{job.block['id']}",
+                    safe_text(job.block.get("price_range_label")) if job.kind == "price_transition" else safe_text(job.block.get("block_label")),
+                    safe_text(job.block.get("script_id")) or f"script-{job.block['id']}",
                     safe_text(job.block.get("text_hash")),
                     str(path),
                     meta["file_size"],
@@ -920,7 +1110,7 @@ class WorkflowService:
             "display_video_path": safe_text(video.get("path")) if video else "",
             "display_video_slot": video_slot,
             "binding_id": f"db:{block['id']}:{account_label}",
-            "script_id": f"script-{block['id']}",
+            "script_id": safe_text(block.get("script_id")) or f"script-{block['id']}",
             "account_id": account_id,
             "account_label": account_label,
             "text_hash": safe_text(block.get("text_hash")),
@@ -991,7 +1181,87 @@ class WorkflowService:
         if price is None:
             return []
         matched = [block for block in blocks if price_in_range(price, safe_text(block.get("price_range_label")))]
-        return matched[:1]
+        return [random.choice(matched)] if matched else []
+
+    def _voice_ready_for_block(
+        self,
+        assets: list[dict[str, Any]],
+        *,
+        uid: str,
+        block: dict[str, Any],
+        account_label: str,
+        block_label: str = "",
+    ) -> bool:
+        exact = self._ready_asset(
+            assets,
+            asset_type="voice",
+            uid=uid,
+            account_label=account_label,
+            script_block_id=int(block.get("id") or 0),
+            text_hash=safe_text(block.get("text_hash")),
+        )
+        if exact:
+            return True
+        if uid not in {"INTRO", "PRICE_TRANSITION"}:
+            return bool(self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label))
+        return bool(
+            block_label
+            and any(
+                asset["asset_type"] == "voice"
+                and asset["status"] == "ready"
+                and safe_text(asset.get("uid")) == uid
+                and (not account_label or safe_text(asset.get("account_label")) == account_label)
+                and safe_text(asset.get("block_label")) == block_label
+                and safe_text(asset.get("text_hash")) == safe_text(block.get("text_hash"))
+                and Path(safe_text(asset.get("path"))).exists()
+                for asset in assets
+            )
+        )
+
+    def _choose_voice_ready_block(
+        self,
+        blocks: list[dict[str, Any]],
+        assets: list[dict[str, Any]],
+        *,
+        uid: str,
+        account_label: str,
+        block_label: str = "",
+    ) -> dict[str, Any] | None:
+        if not blocks:
+            return None
+        ready = [
+            block
+            for block in blocks
+            if self._voice_ready_for_block(
+                assets,
+                uid=uid,
+                block=block,
+                account_label=account_label,
+                block_label=block_label,
+            )
+        ]
+        return random.choice(ready or blocks)
+
+    def _matching_price_block_for_assets(
+        self,
+        product: dict[str, Any],
+        blocks: list[dict[str, Any]],
+        assets: list[dict[str, Any]],
+        *,
+        account_label: str,
+    ) -> dict[str, Any] | None:
+        price = first_number(safe_text(product.get("price_label")))
+        if price is None:
+            return None
+        matched = [block for block in blocks if price_in_range(price, safe_text(block.get("price_range_label")))]
+        label = safe_text(matched[0].get("price_range_label")) if matched else ""
+        return self._choose_voice_ready_block(
+            matched,
+            assets,
+            uid="PRICE_TRANSITION",
+            account_label=account_label,
+            block_label=label,
+        )
 
     def _append_spoken_paragraph(self, lines: list[str], text: str) -> None:
         body = safe_text(text).strip()
@@ -1079,7 +1349,7 @@ def safe_path_component(value: str) -> str:
 def unique_path(path: Path) -> Path:
     if not path.exists():
         return path
-    for index in range(2, 1000):
+    for index in range(1, 1000):
         candidate = path.with_name(f"{path.stem}-{index}{path.suffix}")
         if not candidate.exists():
             return candidate

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
@@ -56,6 +57,7 @@ CREATE TABLE IF NOT EXISTS script_blocks (
     owner_uid TEXT NOT NULL DEFAULT '',
     price_range_label TEXT NOT NULL DEFAULT '',
     block_label TEXT NOT NULL DEFAULT '正文',
+    script_id TEXT NOT NULL DEFAULT '',
     body TEXT NOT NULL DEFAULT '',
     text_hash TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL DEFAULT 'markdown',
@@ -142,6 +144,15 @@ CREATE TABLE IF NOT EXISTS app_settings (
 """
 
 
+def _script_id_slug(value: Any) -> str:
+    text = safe_text(value).casefold()
+    text = text.replace("元以下", "-under").replace("以下", "-under")
+    text = text.replace("元以上", "-over").replace("以上", "-over")
+    text = text.replace("元", "")
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    return text
+
+
 class Database:
     def __init__(self, path: Path = DB_PATH):
         ensure_data_dir()
@@ -178,7 +189,11 @@ class Database:
         }.items():
             if column not in asset_columns:
                 conn.execute(f"ALTER TABLE asset_bindings ADD COLUMN {column} {ddl}")
+        script_columns = {row[1] for row in conn.execute("PRAGMA table_info(script_blocks)").fetchall()}
+        if "script_id" not in script_columns:
+            conn.execute("ALTER TABLE script_blocks ADD COLUMN script_id TEXT NOT NULL DEFAULT ''")
         self._migrate_script_hashes(conn)
+        self._migrate_script_ids(conn)
 
     def _migrate_script_hashes(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute("SELECT id, body, text_hash FROM script_blocks").fetchall()
@@ -187,6 +202,37 @@ class Database:
             if current and len(current) != 64:
                 continue
             conn.execute("UPDATE script_blocks SET text_hash=? WHERE id=?", (text_hash(row[1]), row[0]))
+
+    def _migrate_script_ids(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            """
+            SELECT id, project_id, script_type, owner_uid, price_range_label, block_label, script_id
+            FROM script_blocks
+            ORDER BY project_id,
+                     CASE script_type WHEN 'intro' THEN 1 WHEN 'product' THEN 2 ELSE 3 END,
+                     owner_uid, price_range_label, block_label, id
+            """
+        ).fetchall()
+        counters: dict[tuple[Any, ...], int] = {}
+        for row in rows:
+            if safe_text(row[6]):
+                continue
+            script_type = safe_text(row[2])
+            if script_type == "intro":
+                key = (row[1], "intro")
+                counters[key] = counters.get(key, 0) + 1
+                script_id = f"intro:I{counters[key]:03d}"
+            elif script_type == "price_transition":
+                price_key = _script_id_slug(row[4]) or "price"
+                key = (row[1], "price_transition", row[4])
+                counters[key] = counters.get(key, 0) + 1
+                script_id = f"price:{price_key}:V{counters[key]:03d}"
+            else:
+                uid = safe_text(row[3]) or "UNKNOWN"
+                key = (row[1], "product", uid)
+                counters[key] = counters.get(key, 0) + 1
+                script_id = f"product:{uid}:V{counters[key]:03d}"
+            conn.execute("UPDATE script_blocks SET script_id=? WHERE id=?", (script_id, row[0]))
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> None:
         with self.connect() as conn:

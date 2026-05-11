@@ -59,6 +59,13 @@ def parse_uid_list(value: str) -> list[str]:
     return [item.strip() for item in re.split(r"[,，]+", value or "") if item.strip()]
 
 
+def parse_voice_targets(value: str) -> tuple[list[str], list[str]]:
+    tokens = parse_uid_list(value)
+    script_ids = [item for item in tokens if ":" in item]
+    uids = [item for item in tokens if ":" not in item]
+    return uids, script_ids
+
+
 def open_path(path: str | Path | None) -> None:
     text = safe_text(path)
     if not text:
@@ -159,10 +166,16 @@ def voice_state(assets: list[dict[str, Any]], *, uid: str, account_label: str, h
     ]
     if not matching_uid:
         return "missing"
-    if hashes and any(safe_text(asset.get("text_hash")) in hashes for asset in matching_uid):
-        return "ready"
-    if any(safe_text(asset.get("text_hash")) for asset in matching_uid):
-        return "expired"
+    if hashes:
+        # 有文案 hash 可对比：必须 hash 匹配才算 ready
+        if any(safe_text(asset.get("text_hash")) in hashes for asset in matching_uid):
+            return "ready"
+        if any(not safe_text(asset.get("text_hash")) for asset in matching_uid):
+            return "ready"
+        # 存在 ready 记录但 hash 都不匹配文案 → 过期
+        if any(safe_text(asset.get("text_hash")) for asset in matching_uid):
+            return "expired"
+    # 没有文案 hash 可对比（旧数据），有 ready 记录就算可用
     return "ready"
 
 
@@ -202,9 +215,11 @@ def _asset_common_dir(
     fallback: str = "",
     category_hint: str = "",
 ) -> str:
+    scoped_by_user = asset_type in {"image", "voice"} and selected_user != "全部"
+
     def display_dir(path_text: str) -> str:
         path = Path(path_text)
-        if asset_type == "image" and selected_user != "全部":
+        if scoped_by_user:
             parts = path.parts
             if selected_user in parts:
                 return str(Path(*parts[: parts.index(selected_user) + 1]))
@@ -216,23 +231,32 @@ def _asset_common_dir(
         if asset.get("asset_type") == asset_type
         and asset.get("status") == "ready"
         and safe_text(asset.get("path"))
-        and (selected_user == "全部" or safe_text(asset.get("account_label")) == selected_user)
+        and (not scoped_by_user or safe_text(asset.get("account_label")) == selected_user)
     ]
+    base = Path(fallback) if fallback else Path()
+    if scoped_by_user and category_hint:
+        expected = base / category_hint / selected_user
+        if expected.exists() or any(str(Path(path)).casefold().startswith(str(expected).casefold()) for path in filtered):
+            return str(expected)
+    if scoped_by_user:
+        expected = base / selected_user
+        if expected.exists() or any(str(Path(path)).casefold().startswith(str(expected).casefold()) for path in filtered):
+            return str(expected)
     common = _path_common_dir([display_dir(path) for path in filtered])
     if common:
         return common
-    base = Path(fallback) if fallback else Path()
-    if selected_user != "全部" and category_hint:
+    if scoped_by_user and category_hint:
         return str(base / category_hint / selected_user)
-    if selected_user != "全部":
+    if scoped_by_user:
         return str(base / selected_user)
     if category_hint:
         return str(base / category_hint)
     return safe_text(fallback)
 
 
-def format_asset_folder_summary(project: dict[str, Any], assets: list[dict[str, Any]], selected_user: str) -> str:
+def asset_folder_paths(project: dict[str, Any], assets: list[dict[str, Any]], selected_user: str) -> dict[str, str]:
     category_hint = safe_text(project.get("name"))
+    category_name = safe_text(project.get("category_name")) or category_hint.split("-", 1)[-1]
     image_dir = _asset_common_dir(
         assets,
         asset_type="image",
@@ -240,29 +264,25 @@ def format_asset_folder_summary(project: dict[str, Any], assets: list[dict[str, 
         fallback=safe_text(project.get("image_root")),
         category_hint=category_hint,
     )
-    video_dir = _asset_common_dir(
-        assets,
-        asset_type="video",
-        selected_user=selected_user,
-        fallback=safe_text(project.get("video_root")),
-        category_hint=category_hint,
-    )
-    voice_dir = _asset_common_dir(
-        assets,
-        asset_type="voice",
-        selected_user=selected_user,
-        fallback=safe_text(project.get("voice_root")),
-        category_hint=category_hint,
-    )
+    video_root = safe_text(project.get("video_root"))
+    video_dir = str(Path(video_root) / category_hint) if video_root and category_hint else video_root
+    voice_root = safe_text(project.get("voice_root"))
+    voice_dir = ""
+    if selected_user != "全部" and voice_root:
+        voice_expected = Path(voice_root) / f"{selected_user}-{category_name}"
+        if voice_expected.exists():
+            voice_dir = str(voice_expected)
+    if not voice_dir:
+        voice_dir = _asset_common_dir(
+            assets,
+            asset_type="voice",
+            selected_user=selected_user,
+            fallback=voice_root,
+            category_hint=category_hint,
+        )
     if selected_user == "全部" and not voice_dir:
         voice_dir = safe_text(project.get("voice_root"))
-    return "\n".join(
-        [
-            f"图片：{compact_path(image_dir, 68) or '--'}",
-            f"视频：{compact_path(video_dir, 68) or '--'}",
-            f"配音：{compact_path(voice_dir, 68) or '--'}",
-        ]
-    )
+    return {"image": image_dir, "video": video_dir, "voice": voice_dir}
 
 
 def preview_lines(items: list[str], limit: int = 18) -> list[str]:
@@ -326,6 +346,29 @@ def show_precheck_dialog(parent: tk.Widget, title: str, message: str, *, can_con
     dialog.protocol("WM_DELETE_WINDOW", lambda: close(False))
     dialog.wait_window()
     return result["ok"]
+
+
+def show_text_dialog(parent: tk.Widget, title: str, message: str) -> None:
+    dialog = ctk.CTkToplevel(parent)
+    dialog.title(title)
+    dialog.geometry("860x560")
+    dialog.minsize(680, 420)
+    dialog.transient(parent.winfo_toplevel())
+    dialog.rowconfigure(1, weight=1)
+    dialog.columnconfigure(0, weight=1)
+    ctk.CTkLabel(dialog, text=title, font=UIStyle.FONT_H2).grid(
+        row=0, column=0, sticky="w", padx=UIStyle.PAD_LG, pady=(UIStyle.PAD_LG, UIStyle.PAD_SM)
+    )
+    text = ctk.CTkTextbox(dialog, wrap="none")
+    text.grid(row=1, column=0, sticky="nsew", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_MD))
+    text.insert("1.0", message)
+    text.configure(state="disabled")
+    buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+    buttons.grid(row=2, column=0, sticky="ew", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_LG))
+    buttons.columnconfigure(0, weight=1)
+    GhostButton(buttons, text="关闭", command=dialog.destroy).grid(row=0, column=1)
+    dialog.lift()
+    dialog.focus_set()
 
 
 class TaskProgressDialog(ctk.CTkToplevel):
@@ -1115,7 +1158,7 @@ class CopyPage(BasePage):
         for proj in projects:
             if proj["category_name"] != selected:
                 continue
-            pmap = {item["uid"]: item["title"] for item in self.repo.products(proj["id"], include_removed=True)}
+            pmap = {item["uid"]: item["title"] for item in self.repo.products(proj["id"], include_removed=False)}
             cat = proj["category_name"] or ""
             blocks = list(self.repo.script_blocks(proj["id"]))
             blocks.sort(key=lambda b: (block_order.get(b["script_type"], 99), b.get("owner_uid", ""), b.get("price_range_label", ""), b.get("block_label", "")))
@@ -1135,80 +1178,88 @@ CopyPageColumns = ("品类", "类型", "对象UID", "产品名称", "标签", "�
 class AssetPage(BasePage):
     def __init__(self, master, app: App):
         super().__init__(master, "资产中心", app)
-        self.category_var = ctk.StringVar(value="")
+        self.category_var = ctk.StringVar(value="全部")
         self.status_var = ctk.StringVar(value="全部")
         self._default_user_selection_applied = False
+        self._default_category_applied = False
         self._refreshing_user_list = False
+        self.user_vars: dict[str, ctk.BooleanVar] = {}
+        self.user_checks: dict[str, ctk.CTkCheckBox] = {}
+        self.stat_value_labels: dict[str, ctk.CTkLabel] = {}
+        self.stat_hint_labels: dict[str, ctk.CTkLabel] = {}
 
-        # Filters
-        filters = ctk.CTkFrame(self.content, fg_color=UIStyle.COLOR_CARD_BG, corner_radius=UIStyle.RADIUS_LG)
-        filters.pack(fill="x", pady=(0, UIStyle.PAD_SM))
-        filters.columnconfigure(1, weight=0)
-        filters.columnconfigure(3, weight=1)
-        filters.columnconfigure(5, weight=0)
-
-        ctk.CTkLabel(filters, text="品类", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
-            row=0, column=0, sticky="w", padx=(UIStyle.PAD_LG, UIStyle.PAD_SM), pady=UIStyle.PAD_MD
+        filters = ctk.CTkFrame(
+            self.content,
+            fg_color=UIStyle.COLOR_CARD_BG,
+            corner_radius=UIStyle.RADIUS_LG,
+            border_width=1,
+            border_color=UIStyle.COLOR_BORDER,
         )
-        self.category_combo = AppComboBox(filters, width=180, variable=self.category_var)
-        self.category_combo.grid(row=0, column=1, sticky="w", pady=UIStyle.PAD_MD)
-        self.category_combo.configure(command=lambda _=None: self.refresh())
+        filters.pack(fill="x", pady=(0, UIStyle.PAD_MD))
+        filters.grid_columnconfigure(1, weight=0)
+        filters.grid_columnconfigure(3, weight=0)
 
         ctk.CTkLabel(filters, text="用户", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
-            row=0, column=2, sticky="nw", padx=(UIStyle.PAD_LG, UIStyle.PAD_SM), pady=UIStyle.PAD_MD
+            row=0, column=0, sticky="w", padx=(UIStyle.PAD_LG, UIStyle.PAD_SM), pady=(UIStyle.PAD_LG, UIStyle.PAD_XS)
         )
-        user_box = ctk.CTkFrame(
-            filters,
-            fg_color=UIStyle.COLOR_INPUT_BG,
-            border_color=UIStyle.COLOR_BORDER,
-            border_width=1,
-            corner_radius=UIStyle.RADIUS_MD,
+        self.user_checks_frame = ctk.CTkFrame(filters, fg_color="transparent")
+        self.user_checks_frame.grid(row=0, column=1, columnspan=3, sticky="w", padx=(0, UIStyle.PAD_LG), pady=(UIStyle.PAD_LG, UIStyle.PAD_SM))
+
+        ctk.CTkLabel(filters, text="品类", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
+            row=1, column=0, sticky="w", padx=(UIStyle.PAD_LG, UIStyle.PAD_SM), pady=(0, UIStyle.PAD_LG)
         )
-        user_box.grid(row=0, column=3, sticky="ew", padx=(0, UIStyle.PAD_LG), pady=UIStyle.PAD_MD)
-        user_box.columnconfigure(0, weight=1)
-        self.user_listbox = tk.Listbox(
-            user_box,
-            selectmode=tk.MULTIPLE,
-            height=4,
-            exportselection=False,
-            activestyle="none",
-            bg=UIStyle.COLOR_INPUT_BG,
-            fg=UIStyle.COLOR_TEXT_MAIN,
-            selectbackground=UIStyle.COLOR_PRIMARY,
-            selectforeground="white",
-            font=UIStyle.FONT_BODY,
-            borderwidth=0,
-            highlightthickness=0,
-            relief="flat",
-        )
-        self.user_listbox.grid(row=0, column=0, sticky="ew", padx=UIStyle.PAD_SM, pady=(UIStyle.PAD_SM, UIStyle.PAD_XS))
-        ctk.CTkLabel(
-            user_box,
-            text="可多选；默认显示小歪、小燃/小然",
-            font=UIStyle.FONT_SMALL,
-            text_color=UIStyle.COLOR_TEXT_DIM,
-        ).grid(row=1, column=0, sticky="w", padx=UIStyle.PAD_SM, pady=(0, UIStyle.PAD_SM))
-        self.user_listbox.bind("<<ListboxSelect>>", self._on_user_selection_changed)
+        self.category_combo = AppComboBox(filters, width=180, variable=self.category_var)
+        self.category_combo.grid(row=1, column=1, sticky="w", padx=(0, UIStyle.PAD_LG), pady=(0, UIStyle.PAD_LG))
+        self.category_combo.configure(command=lambda _=None: self.refresh())
 
         ctk.CTkLabel(filters, text="筛选", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
-            row=0, column=4, sticky="w", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_MD
+            row=1, column=2, sticky="w", padx=(0, UIStyle.PAD_SM), pady=(0, UIStyle.PAD_LG)
         )
-        self.status_combo = AppComboBox(filters, width=140, variable=self.status_var, values=["全部", "缺文案", "缺图片", "缺视频", "缺配音", "配音过期"])
-        self.status_combo.grid(row=0, column=5, sticky="w", padx=(0, UIStyle.PAD_LG), pady=UIStyle.PAD_MD)
+        self.status_combo = AppComboBox(filters, width=160, variable=self.status_var, values=["全部", "缺文案", "缺图片", "缺视频", "缺配音", "配音过期"])
+        self.status_combo.grid(row=1, column=3, sticky="w", padx=(0, UIStyle.PAD_LG), pady=(0, UIStyle.PAD_LG))
         self.status_combo.configure(command=lambda _=None: self.refresh())
 
-        self.summary_label = ctk.CTkLabel(self.content, text="", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM)
-        self.summary_label.pack(fill="x", pady=(0, UIStyle.PAD_SM))
+        stats = ctk.CTkFrame(
+            self.content,
+            fg_color=UIStyle.COLOR_CARD_BG,
+            corner_radius=UIStyle.RADIUS_LG,
+            border_width=1,
+            border_color=UIStyle.COLOR_BORDER,
+        )
+        stats.pack(fill="x", pady=(0, UIStyle.PAD_MD))
+        for column in range(5):
+            stats.grid_columnconfigure(column, weight=1)
+        stat_specs = [
+            ("copy", "文案", UIStyle.COLOR_INFO),
+            ("image", "图片", UIStyle.COLOR_SUCCESS),
+            ("video", "视频", "#8B5CF6"),
+            ("voice", "配音", UIStyle.COLOR_WARNING),
+            ("issue", "问题", UIStyle.COLOR_ERROR),
+        ]
+        for column, (key, title, _accent) in enumerate(stat_specs):
+            card = ctk.CTkFrame(stats, fg_color=UIStyle.COLOR_SURFACE_SOFT, corner_radius=UIStyle.RADIUS_MD)
+            card.grid(row=0, column=column, sticky="ew", padx=(UIStyle.PAD_LG if column == 0 else 0, UIStyle.PAD_LG), pady=UIStyle.PAD_LG)
+            ctk.CTkLabel(card, text=title, font=("Microsoft YaHei", 14, "bold"), text_color=UIStyle.COLOR_TEXT_MAIN).pack(
+                anchor="center", pady=(UIStyle.PAD_MD, 2)
+            )
+            value = ctk.CTkLabel(card, text="0", font=("Microsoft YaHei", 24, "bold"), text_color=UIStyle.COLOR_TEXT_MAIN)
+            value.pack(anchor="center", pady=(0, UIStyle.PAD_MD))
+            self.stat_value_labels[key] = value
+            self.stat_hint_labels[key] = ctk.CTkLabel(card, text="", font=UIStyle.FONT_SMALL, text_color=UIStyle.COLOR_TEXT_DIM)
 
-        outer = ctk.CTkFrame(self.content, fg_color=UIStyle.COLOR_CARD_BG, corner_radius=UIStyle.RADIUS_LG)
+        outer = ctk.CTkFrame(
+            self.content,
+            fg_color=UIStyle.COLOR_CARD_BG,
+            corner_radius=UIStyle.RADIUS_LG,
+            border_width=1,
+            border_color=UIStyle.COLOR_BORDER,
+        )
         outer.pack(fill="both", expand=True)
         outer.grid_columnconfigure(0, weight=1)
         outer.grid_rowconfigure(0, weight=1)
 
         self.tree = _build_table(outer, AssetPageColumns, row=0)
-        style = ttk.Style()
-        style.configure("AssetIssue.Treeview", background=UIStyle.COLOR_ISSUE_BG, foreground=UIStyle.COLOR_TEXT_MAIN, fieldbackground=UIStyle.COLOR_ISSUE_BG)
-        self.tree.tag_configure("has_issues", background=UIStyle.COLOR_ISSUE_BG)
+        self._configure_asset_tree()
 
     def refresh(self) -> None:
         projects = self.repo.projects()
@@ -1217,40 +1268,43 @@ class AssetPage(BasePage):
             return
         cats = ["全部"] + sorted({p["category_name"] for p in projects if p["category_name"]})
         self.category_combo.configure(values=cats)
-        if self.category_var.get() not in cats:
-            self.category_var.set("全部")
+        if not self._default_category_applied:
+            self.category_var.set("键盘" if "键盘" in cats else cats[0])
+            self._default_category_applied = True
+        elif self.category_var.get() not in cats:
+            self.category_var.set("键盘" if "键盘" in cats else cats[0])
+        if self.status_var.get() not in ["全部", "缺文案", "缺图片", "缺视频", "缺配音", "配音过期"]:
+            self.status_var.set("全部")
         self._refresh_user_choices()
 
         selected_cat = self.category_var.get()
-        selected_users = [self.user_listbox.get(i) for i in self.user_listbox.curselection()]
-        rows = []
-        summary = {"copy": 0, "missing_copy": 0, "image": 0, "missing_image": 0, "video": 0, "missing_video": 0, "voice": 0, "missing_voice": 0}
+        selected_users = self._selected_users()
+        rows: list[tuple[Any, ...]] = []
+        summary = {"copy": 0, "image_paths": set(), "video_paths": set(), "voice_paths": set(), "issue": 0}
         for proj in projects:
             if selected_cat != "全部" and proj["category_name"] != selected_cat:
                 continue
-            pr, ps = self._rows_for_project(proj, selected_users=selected_users)
-            rows.extend(pr)
-            for k, v in ps.items():
-                summary[k] += v
-        rows = [r for r in rows if self._row_matches_filter(r)]
-        self.summary_label.configure(
-            text=f"文案 {summary['copy']} / 缺 {summary['missing_copy']}  |  "
-                 f"图片 {summary['image']} / 缺 {summary['missing_image']}  |  "
-                 f"视频 {summary['video']} / 缺 {summary['missing_video']}  |  "
-                 f"配音 {summary['voice']} / 缺 {summary['missing_voice']}"
-        )
-        self.tree.delete(*self.tree.get_children())
-        for row in rows:
-            tags = ("has_issues",) if row[-1] else ()
-            self.tree.insert("", "end", values=row, tags=tags)
+            project_rows, project_summary = self._rows_for_project(proj, selected_users=selected_users)
+            rows.extend(project_rows)
+            summary["copy"] += project_summary["copy"]
+            summary["image_paths"].update(project_summary["image_paths"])
+            summary["video_paths"].update(project_summary["video_paths"])
+            summary["voice_paths"].update(project_summary["voice_paths"])
+            summary["issue"] += project_summary["issue"]
+        rows = [row for row in rows if self._row_matches_filter(row)]
+        self._update_stat_cards(summary, rows)
 
-    def _on_user_selection_changed(self, _event: tk.Event | None = None) -> None:
-        if self._refreshing_user_list:
-            return
-        self.refresh()
+        self.tree.delete(*self.tree.get_children())
+        for index, row in enumerate(rows):
+            issue_text = str(row[-1] or "").strip()
+            parity = "odd" if index % 2 else "even"
+            tags = [parity]
+            if issue_text and issue_text != "—":
+                tags.append(f"{parity}_issue")
+            self.tree.insert("", "end", values=row, tags=tuple(tags))
 
     def _refresh_user_choices(self) -> None:
-        current = [self.user_listbox.get(i) for i in self.user_listbox.curselection()]
+        current = self._selected_users()
         labels = [item["label"] for item in self.repo.accounts()]
         if not self._default_user_selection_applied and not current:
             defaults = {"小歪", "小燃", "小然"}
@@ -1259,103 +1313,220 @@ class AssetPage(BasePage):
 
         self._refreshing_user_list = True
         try:
-            self.user_listbox.delete(0, "end")
+            for widget in self.user_checks.values():
+                widget.destroy()
+            self.user_checks.clear()
+            old_vars = self.user_vars
+            self.user_vars = {}
             for index, label in enumerate(labels):
-                self.user_listbox.insert("end", label)
-                if label in current:
-                    self.user_listbox.selection_set(index)
+                var = old_vars.get(label) or ctk.BooleanVar(value=label in current)
+                self.user_vars[label] = var
+                check = ctk.CTkCheckBox(
+                    self.user_checks_frame,
+                    text=label,
+                    variable=var,
+                    checkbox_width=16,
+                    checkbox_height=16,
+                    corner_radius=4,
+                    border_width=1,
+                    fg_color=UIStyle.COLOR_PRIMARY,
+                    hover_color=UIStyle.COLOR_PRIMARY_HOVER,
+                    border_color=UIStyle.COLOR_BORDER,
+                    text_color=UIStyle.COLOR_TEXT_MAIN,
+                    font=UIStyle.FONT_BODY,
+                    command=self.refresh,
+                )
+                check.grid(row=0, column=index, sticky="w", padx=(0, UIStyle.PAD_MD), pady=0)
+                self.user_checks[label] = check
         finally:
             self._refreshing_user_list = False
 
-    def _rows_for_project(self, project: dict[str, Any], *, selected_users: list[str]) -> tuple[list[tuple[Any, ...]], dict[str, int]]:
+    def _rows_for_project(self, project: dict[str, Any], *, selected_users: list[str]) -> tuple[list[tuple[Any, ...]], dict[str, Any]]:
         blocks = self.repo.script_blocks(project["id"])
         assets = self.repo.asset_bindings(project["id"])
-        products = self.repo.products(project["id"], include_removed=True)
+        products = self.repo.products(project["id"], include_removed=False)
         accounts = self.repo.accounts()
         if selected_users:
-            accounts = [a for a in accounts if a["label"] in selected_users]
+            accounts = [account for account in accounts if account["label"] in selected_users]
         if not accounts:
-            accounts = [{"label": "未设置", "account_id": "", "media_identity": ""}]
-        summary = {"copy": 0, "missing_copy": 0, "image": 0, "missing_image": 0, "video": 0, "missing_video": 0, "voice": 0, "missing_voice": 0}
+            return [], {"copy": 0, "image_paths": set(), "video_paths": set(), "voice_paths": set(), "issue": 0}
+
         rows: list[tuple[Any, ...]] = []
-        block_counts: dict[tuple[str, str], int] = {}
-        block_hashes: dict[tuple[str, str], set[str]] = {}
-        for block in blocks:
-            if block["script_type"] == "product":
-                block_counts[("product", block["owner_uid"])] = block_counts.get(("product", block["owner_uid"]), 0) + 1
-                block_hashes.setdefault(("product", block["owner_uid"]), set()).add(block["text_hash"])
-            elif block["script_type"] == "intro":
-                block_counts[("intro", "INTRO")] = block_counts.get(("intro", "INTRO"), 0) + 1
-                block_hashes.setdefault(("intro", "INTRO"), set()).add(block["text_hash"])
+        summary = {"copy": 0, "image_paths": set(), "video_paths": set(), "voice_paths": set(), "issue": 0}
         for account in accounts:
-            rows.extend(self._shared_rows(project, account, assets, block_counts, block_hashes, summary))
-            for product in products:
-                rows.append(self._product_row(project, account, product, assets, block_counts, block_hashes, summary))
+            detail_rows, issue_count = self._script_block_rows(project, account, products, blocks, assets)
+            rows.extend(detail_rows)
+            summary["copy"] += len(detail_rows)
+            summary["issue"] += issue_count
+            summary["image_paths"].update(
+                safe_text(asset.get("path"))
+                for asset in assets
+                if asset["asset_type"] == "image"
+                and asset["status"] == "ready"
+                and safe_text(asset.get("account_label")) == account["label"]
+                and safe_text(asset.get("path"))
+            )
+            summary["voice_paths"].update(
+                safe_text(asset.get("path"))
+                for asset in assets
+                if asset["asset_type"] == "voice"
+                and asset["status"] == "ready"
+                and safe_text(asset.get("account_label")) == account["label"]
+                and safe_text(asset.get("path"))
+            )
+        summary["video_paths"].update(
+            safe_text(asset.get("path"))
+            for asset in assets
+            if asset["asset_type"] == "video" and asset["status"] == "ready" and safe_text(asset.get("path"))
+        )
         return rows, summary
 
-    def _shared_rows(self, project, account, assets, block_counts, block_hashes, summary):
+    def _script_block_rows(self, project, account, products, blocks, assets):
         rows = []
-        for uid, obj_label, copy_type, script_type, block_key, asset_block_label in [("INTRO", "引言文案", "引言文案", "intro", "INTRO", "")]:
-            copy_count = block_counts.get((script_type, block_key), 0)
-            voice_count = self._asset_count(assets, uid=uid, asset_type="voice", account_label=account["label"], block_label=asset_block_label)
-            issues = []
-            if copy_count:
-                summary["copy"] += 1
+        issue_count = 0
+        products_by_uid = {product["uid"]: product for product in products}
+        ordered_blocks = sorted(
+            blocks,
+            key=lambda block: (
+                0 if block["script_type"] == "product" else 1 if block["script_type"] == "intro" else 2,
+                safe_text(block.get("owner_uid")),
+                safe_text(block.get("price_range_label")),
+                safe_text(block.get("block_label")),
+            ),
+        )
+        for block in ordered_blocks:
+            script_type = block["script_type"]
+            uid = safe_text(block.get("owner_uid"))
+            script_id = safe_text(block.get("script_id")) or f"script-{block['id']}"
+            if script_type == "product":
+                product = products_by_uid.get(uid, {})
+                obj = f"{safe_text(product.get('price_label'))} / {uid} / {safe_text(product.get('title'))} / {script_id}"
+                voice_uid = uid
+                block_label = safe_text(block.get("block_label"))
+                image_count = self._asset_count(assets, uid=uid, asset_type="image", account_label=account["label"])
+                video_count = self._asset_count(assets, uid=uid, asset_type="video")
+                copy_type = "商品文案"
+                issues = []
+                if image_count == 0:
+                    issues.append("缺图片")
+                if video_count == 0:
+                    issues.append("缺视频")
+            elif script_type == "intro":
+                obj = f"引言 / {safe_text(block.get('block_label'))} / {script_id}"
+                voice_uid = "INTRO"
+                block_label = safe_text(block.get("block_label"))
+                image_count = "—"
+                video_count = "—"
+                copy_type = "引言文案"
+                issues = []
+            elif script_type == "price_transition":
+                obj = f"价格过渡 / {safe_text(block.get('price_range_label'))} / {safe_text(block.get('block_label'))} / {script_id}"
+                voice_uid = "PRICE_TRANSITION"
+                block_label = safe_text(block.get("price_range_label"))
+                image_count = "—"
+                video_count = "—"
+                copy_type = "价格过渡"
+                issues = []
             else:
-                summary["missing_copy"] += 1
-                issues.append("缺文案")
-            if voice_count:
-                summary["voice"] += 1
-            else:
-                summary["missing_voice"] += 1
-                issues.append("缺配音")
-            if self._has_expired_voice(assets, uid=uid, account_label=account["label"], hashes=block_hashes.get((script_type, block_key), set()), block_label=asset_block_label):
+                continue
+            state = voice_state(
+                assets,
+                uid=voice_uid,
+                account_label=account["label"],
+                hashes={safe_text(block.get("text_hash"))},
+                block_label=block_label,
+            )
+            if state == "expired":
                 issues.append("配音过期")
-            rows.append((project["category_name"], account["label"], obj_label, copy_type, copy_count, "--", "--", voice_count, "，".join(issues)))
-        return rows
-
-    def _product_row(self, project, account, product, assets, block_counts, block_hashes, summary):
-        uid = product["uid"]
-        copy_count = block_counts.get(("product", uid), 0)
-        image_count = self._asset_count(assets, uid=uid, asset_type="image", account_label=account["label"])
-        video_count = self._asset_count(assets, uid=uid, asset_type="video")
-        voice_count = self._asset_count(assets, uid=uid, asset_type="voice", account_label=account["label"])
-        issues = []
-        for key, count, label in [("copy", copy_count, "缺文案"), ("image", image_count, "缺图片"), ("video", video_count, "缺视频"), ("voice", voice_count, "缺配音")]:
-            if count:
-                summary[key] += 1
-            else:
-                summary[f"missing_{key}"] += 1
-                issues.append(label)
-        if int(product["removed_from_master"]):
-            issues.append("已从 Master 移除")
-        if self._has_expired_voice(assets, uid=uid, account_label=account["label"], hashes=block_hashes.get(("product", uid), set())):
-            issues.append("配音过期")
-        return (project["category_name"], account["label"], f"{product['price_label']} / {uid} / {product['title']}", "商品文案", copy_count, image_count, video_count, voice_count, "，".join(issues))
+            elif state != "ready":
+                issues.append("缺配音")
+            issue = "，".join(issues) if issues else "—"
+            if issues:
+                issue_count += 1
+            voice_count = 1 if state == "ready" else 0
+            rows.append((project["category_name"], account["label"], obj, copy_type, "1", str(image_count), str(video_count), str(voice_count), issue))
+        return rows, issue_count
 
     def _asset_count(self, assets, *, uid, asset_type, account_label="", block_label="") -> int:
-        return sum(1 for a in assets if a["uid"] == uid and a["asset_type"] == asset_type and a["status"] == "ready"
-                   and (not account_label or a["account_label"] == account_label or not a["account_label"])
-                   and (not block_label or a["block_label"] == block_label))
-
-    def _has_expired_voice(self, assets, *, uid, account_label, hashes, block_label="") -> bool:
-        if not hashes:
-            return False
-        for a in assets:
-            if a["uid"] != uid or a["asset_type"] != "voice" or a["status"] != "ready":
-                continue
-            if account_label and a["account_label"] != account_label:
-                continue
-            if block_label and a["block_label"] != block_label:
-                continue
-            if safe_text(a.get("text_hash")) and safe_text(a.get("text_hash")) not in hashes:
-                return True
-        return False
+        return sum(
+            1
+            for asset in assets
+            if asset["uid"] == uid
+            and asset["asset_type"] == asset_type
+            and asset["status"] == "ready"
+            and (not account_label or asset["account_label"] == account_label or not asset["account_label"])
+            and (not block_label or asset["block_label"] == block_label)
+        )
 
     def _row_matches_filter(self, row: tuple[Any, ...]) -> bool:
         issue = str(row[-1] or "")
-        v = self.status_var.get()
-        return True if v == "全部" else v in issue
+        selected = self.status_var.get()
+        return True if selected == "全部" else selected in issue
+
+    def _selected_users(self) -> list[str]:
+        return [label for label, var in self.user_vars.items() if bool(var.get())]
+
+    def _update_stat_cards(self, summary: dict[str, Any], rows: list[tuple[Any, ...]]) -> None:
+        self.stat_value_labels["copy"].configure(text=str(len(rows)))
+        self.stat_value_labels["image"].configure(text=str(len(summary["image_paths"])))
+        self.stat_value_labels["video"].configure(text=str(len(summary["video_paths"])))
+        self.stat_value_labels["voice"].configure(text=str(len(summary["voice_paths"])))
+        self.stat_value_labels["issue"].configure(text=str(sum(1 for row in rows if str(row[-1]).strip() and str(row[-1]).strip() != "—")))
+        for label in self.stat_hint_labels.values():
+            label.configure(text="")
+
+    def _configure_asset_tree(self) -> None:
+        style = ttk.Style()
+        style.configure(
+            "CTreeview",
+            rowheight=38,
+            background="#131D2B",
+            foreground="#E8EEF8",
+            fieldbackground="#131D2B",
+            borderwidth=0,
+            relief="flat",
+            font=UIStyle.FONT_TABLE,
+            bordercolor=UIStyle.COLOR_BORDER,
+            lightcolor=UIStyle.COLOR_BORDER,
+            darkcolor=UIStyle.COLOR_BORDER,
+        )
+        style.configure(
+            "CTreeview.Heading",
+            background="#111927",
+            foreground="#D6DFEC",
+            borderwidth=0,
+            relief="flat",
+            font=("Microsoft YaHei", 12, "bold"),
+            bordercolor=UIStyle.COLOR_BORDER,
+            lightcolor=UIStyle.COLOR_BORDER,
+            darkcolor=UIStyle.COLOR_BORDER,
+        )
+        style.map("CTreeview", background=[("selected", "#233247")], foreground=[("selected", "#F7FAFF")])
+        style.map("CTreeview.Heading", background=[("active", "#162233")], foreground=[("active", "#F7FAFF")])
+        self.tree.tag_configure("even", background="#131D2B", foreground="#E8EEF8")
+        self.tree.tag_configure("odd", background="#162233", foreground="#E8EEF8")
+        self.tree.tag_configure("even_issue", background="#3A2426", foreground="#F7D7D9")
+        self.tree.tag_configure("odd_issue", background="#43292C", foreground="#F7D7D9")
+        widths = {
+            "品类": 88,
+            "用户": 84,
+            "对象": 430,
+            "文案类型": 122,
+            "文案": 54,
+            "图片": 54,
+            "视频": 54,
+            "配音": 54,
+            "问题": 240,
+        }
+        for column, width in widths.items():
+            anchor = "center" if column in {"文案", "图片", "视频", "配音"} else "w"
+            self.tree.column(column, width=width, minwidth=width, anchor=anchor, stretch=column in {"对象", "问题"})
+        self.tree.configure(selectmode="browse")
+        try:
+            self.tree.configure(padding=0)
+        except tk.TclError:
+            pass
+        self.tree["show"] = "headings"
 
 
 AssetPageColumns = ("品类", "用户", "对象", "文案类型", "文案", "图片", "视频", "配音", "问题")
@@ -1391,22 +1562,60 @@ class SyncStatusCard(ctk.CTkFrame):
             text_color=UIStyle.COLOR_TEXT_DIM,
             wraplength=520,
         )
-        self.body_label.pack(fill="both", expand=True, padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_SM))
+        self.body_label.pack(fill="x", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_SM))
 
+        self.asset_rows_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.metric_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.metric_frame.pack(fill="x", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_SM))
 
         self.button_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.button_frame.pack(fill="x", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_LG))
-        for text, cmd in buttons:
-            GhostButton(self.button_frame, text=text, command=cmd, height=32).pack(side="left", padx=(0, UIStyle.PAD_SM), pady=2)
+        if buttons:
+            self.button_frame.pack(fill="x", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_LG))
+            for text, cmd in buttons:
+                GhostButton(self.button_frame, text=text, command=cmd, height=32).pack(side="left", padx=(0, UIStyle.PAD_SM), pady=2)
 
     def set_body(self, text: str) -> None:
         self.body_label.configure(text=text)
 
+    def set_asset_rows(self, rows: list) -> None:
+        """rows: (label, path, open_cmd, sync_cmd) 或 (label, path, open_cmd, sync_cmd, voice_check_cmd)"""
+        for child in self.asset_rows_frame.winfo_children():
+            child.destroy()
+        if rows:
+            if not self.asset_rows_frame.winfo_ismapped():
+                self.asset_rows_frame.pack(fill="x", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_SM))
+            if self.body_label.winfo_ismapped():
+                self.body_label.pack_forget()
+        else:
+            if self.asset_rows_frame.winfo_ismapped():
+                self.asset_rows_frame.pack_forget()
+            need_body = (self.body_label.cget("text") != "等待刷新" and (not self.metric_frame.winfo_ismapped()))
+            if need_body and not self.body_label.winfo_ismapped():
+                self.body_label.pack(fill="x", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_SM))
+        for item in rows:
+            label, path, open_cmd, sync_cmd, *extra = item
+            voice_check_cmd = extra[0] if extra else None
+            row = ctk.CTkFrame(self.asset_rows_frame, fg_color="transparent")
+            row.pack(fill="x", pady=(0, UIStyle.PAD_SM))
+            ctk.CTkLabel(row, text=label, width=34, font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_MAIN, anchor="w").pack(side="left")
+            path_box = ctk.CTkFrame(row, fg_color=UIStyle.COLOR_INPUT_BG, corner_radius=UIStyle.RADIUS_MD, border_width=1, border_color=UIStyle.COLOR_BORDER)
+            path_box.pack(side="left", fill="x", expand=True, padx=(0, UIStyle.PAD_SM))
+            ctk.CTkLabel(path_box, text=compact_path(path, 52) or "--", font=UIStyle.FONT_SMALL, text_color=UIStyle.COLOR_TEXT_DIM, anchor="w").pack(fill="x", padx=UIStyle.PAD_SM, pady=UIStyle.PAD_SM)
+            GhostButton(row, text="打开目录", command=open_cmd, height=34, width=78).pack(side="left", padx=(0, UIStyle.PAD_SM))
+            if voice_check_cmd:
+                GhostButton(row, text="检查配音", command=voice_check_cmd, height=34, width=78).pack(side="left")
+            else:
+                GhostButton(row, text="同步素材", command=sync_cmd, height=34, width=78).pack(side="left")
+
     def set_metrics(self, items: list[tuple[str, int]], *, warn_labels: set[str] | None = None) -> None:
         for child in self.metric_frame.winfo_children():
             child.destroy()
+        if items:
+            if not self.metric_frame.winfo_ismapped():
+                self.metric_frame.pack(fill="x", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_SM))
+        else:
+            if self.metric_frame.winfo_ismapped():
+                self.metric_frame.pack_forget()
+            return
         warn_labels = warn_labels or set()
         for label, value in items:
             chip = ctk.CTkFrame(
@@ -1426,7 +1635,8 @@ class SyncPage(BasePage):
     def __init__(self, master, app: App):
         super().__init__(master, "同步中心", app)
         self.project_var = ctk.StringVar()
-        self.user_var = ctk.StringVar(value="全部")
+        self.user_var = ctk.StringVar(value="小燃")
+        self.asset_paths: dict[str, str] = {}
         self._build()
 
     def _build(self) -> None:
@@ -1449,12 +1659,12 @@ class SyncPage(BasePage):
         grid.columnconfigure(0, weight=1, uniform="sync")
         grid.columnconfigure(1, weight=1, uniform="sync")
         grid.rowconfigure(0, weight=0)
-        grid.rowconfigure(1, weight=1)
+        grid.rowconfigure(1, weight=0)
 
         self.master_card = self._status_card(grid, "Master 方案商品", 0, 0, [("同步 Master", self._sync_master)])
         self.md_card = self._status_card(grid, "MD 文案", 0, 1, [("打开所在文件夹", self._open_md_folder), ("同步 MD", self._sync_md)])
-        self.folder_card = self._status_card(grid, "素材文件夹", 1, 0, [("打开图片目录", lambda: self._open_path("image_root")), ("打开视频目录", lambda: self._open_path("video_root")), ("打开配音目录", lambda: self._open_path("voice_root")), ("扫描素材", self._sync_assets)], min_height=310)
-        self.mapping_card = self._status_card(grid, "映射关系与缺口", 1, 1, [])
+        self.folder_card = self._status_card(grid, "素材文件夹", 1, 0, [], min_height=236)
+        self.mapping_card = self._status_card(grid, "映射关系与缺口", 1, 1, [], min_height=236)
 
         # Sync log (默认折叠，置于底部)
         self._log_expanded = False
@@ -1492,8 +1702,8 @@ class SyncPage(BasePage):
             self._log_header.configure(text="▶ 最近同步记录")
 
     def _status_card(self, parent, title: str, row: int, col: int, buttons: list[tuple[str, Callable]], *, min_height: int | None = None) -> SyncStatusCard:
-        card = SyncStatusCard(parent, title, buttons, min_height=min_height or (164 if row == 0 else 310))
-        card.grid(row=row, column=col, sticky="nsew", padx=(0, UIStyle.PAD_SM) if col == 0 else (UIStyle.PAD_SM, 0), pady=(0, UIStyle.PAD_MD))
+        card = SyncStatusCard(parent, title, buttons, min_height=min_height or (144 if row == 0 else 236))
+        card.grid(row=row, column=col, sticky="nsew", padx=(0, UIStyle.PAD_MD) if col == 0 else (UIStyle.PAD_MD, 0), pady=(0, UIStyle.PAD_MD))
         return card
 
     def refresh(self) -> None:
@@ -1531,6 +1741,7 @@ class SyncPage(BasePage):
         if not project:
             for card in (self.master_card, self.md_card, self.folder_card, self.mapping_card):
                 card.set_body("请先创建或选择品类项目。")
+                card.set_asset_rows([])
                 card.set_metrics([])
             return
         products = self.repo.products(project["id"], include_removed=False)
@@ -1545,16 +1756,23 @@ class SyncPage(BasePage):
             "voice": sum(1 for a in assets if a["asset_type"] == "voice" and a["status"] == "ready"),
         }
         issues = build_project_issue_summary(project, products, blocks, assets, self.repo.accounts(), selected_user=self.user_var.get())
-        last_master = self._last_event(project["id"], "master_scheme_sync")
-        last_md = self._last_event(project["id"], "markdown_sync")
-        last_asset = self._last_event(project["id"], "asset_sync")
-        self.master_card.set_body(f"方案：{project['scheme_name'] or '--'}\n商品：{len(products)} 个\n上次同步：{last_master or '未同步'}")
+        self.master_card.set_asset_rows([])
+        self.master_card.set_body(f"方案：{project['scheme_name'] or '--'}\n商品：{len(products)} 个")
         self.master_card.set_metrics([])
-        self.md_card.set_body(f"MD：{compact_path(project['md_path'], 58) or '--'}\n引言 {intro_count}，商品文案 {product_block_count}，价格过渡 {price_count}\n上次同步：{last_md or '未同步'}")
+        self.md_card.set_asset_rows([])
+        self.md_card.set_body(f"MD：{compact_path(project['md_path'], 58) or '--'}\n引言 {intro_count}，商品文案 {product_block_count}，价格过渡 {price_count}")
         self.md_card.set_metrics([])
-        folder_summary = format_asset_folder_summary(project, assets, self.user_var.get())
-        self.folder_card.set_body(f"{folder_summary}\n上次扫描：{last_asset or '未扫描'}")
-        self.folder_card.set_metrics([("图片", asset_counts["image"]), ("视频", asset_counts["video"]), ("配音", asset_counts["voice"])])
+        self.asset_paths = asset_folder_paths(project, assets, self.user_var.get())
+        self.folder_card.set_body("")
+        self.folder_card.set_asset_rows(
+            [
+                ("图片", self.asset_paths.get("image", ""), lambda: self._open_asset_path("image"), lambda: self._sync_asset_type("image")),
+                ("视频", self.asset_paths.get("video", ""), lambda: self._open_asset_path("video"), lambda: self._sync_asset_type("video")),
+                ("配音", self.asset_paths.get("voice", ""), lambda: self._open_asset_path("voice"), None, self._check_voice_status),
+            ]
+        )
+        self.folder_card.set_metrics([("图片", asset_counts["image"]), ("视频", asset_counts["video"]), ("配音", asset_counts["voice"]), ("素材总数", sum(asset_counts.values()))])
+        self.mapping_card.set_asset_rows([])
         self.mapping_card.set_body(f"筛选用户：{self.user_var.get()}\n{format_issue_preview(issues, limit=3)}")
         self.mapping_card.set_metrics(
             [
@@ -1634,9 +1852,149 @@ class SyncPage(BasePage):
         project = self._current_project_or_warn()
         if not project:
             return
-        self.app.run_background("扫描素材", lambda: self.sync.sync_assets(project["id"]),
-                                on_success=lambda r: (self.toast(f"素材扫描完成：图片 {r['image']}，视频 {r['video']}，配音 {r['voice']}，未识别 {r['unmatched']}"), self.refresh()),
+        def task():
+            img = self.sync.sync_assets(project["id"], asset_type="image")
+            vid = self.sync.sync_assets(project["id"], asset_type="video")
+            return {"image": img["image"], "video": vid["video"], "unmatched": img["unmatched"] + vid["unmatched"], "voice": 0}
+        self.app.run_background("扫描素材", task,
+                                on_success=lambda r: self._finish_asset_sync("全部", r),
                                 show_success_toast=False)
+
+    def _sync_asset_type(self, asset_type: str) -> None:
+        project = self._current_project_or_warn()
+        if not project:
+            return
+        labels = {"image": "图片", "video": "视频", "voice": "配音"}
+        path = self.asset_paths.get(asset_type) or safe_text(project.get(f"{asset_type}_root"))
+        label = labels.get(asset_type, "素材")
+        self.app.run_background(
+            f"同步{label}素材",
+            lambda: self.sync.sync_assets(project["id"], asset_type=asset_type, root_override=path),
+            on_success=lambda r: self._finish_asset_sync(label, r, focus_type=asset_type),
+            show_success_toast=False,
+        )
+
+    def _check_voice_status(self) -> None:
+        project = self._current_project_or_warn()
+        if not project:
+            return
+        account_label = self.user_var.get().strip()
+        if not account_label or account_label == "全部":
+            account_label = "小燃"
+        blocks = self.repo.script_blocks(project["id"])
+        assets = self.repo.asset_bindings(project["id"])
+        intro_blocks = [b for b in blocks if b["script_type"] == "intro"]
+        product_blocks = [b for b in blocks if b["script_type"] == "product"]
+        price_blocks = [b for b in blocks if b["script_type"] == "price_transition"]
+
+        missing_voice = []
+        expired_voice = []
+
+        for block in intro_blocks:
+            state = voice_state(assets, uid="INTRO", account_label=account_label,
+                                hashes={safe_text(block.get("text_hash"))},
+                                block_label=safe_text(block.get("block_label")))
+            label = f"引言 {safe_text(block.get('block_label'))}"
+            if state == "missing":
+                missing_voice.append(label)
+            elif state == "expired":
+                expired_voice.append(label)
+
+        for block in product_blocks:
+            uid = safe_text(block.get("owner_uid"))
+            state = voice_state(assets, uid=uid, account_label=account_label,
+                                hashes={safe_text(block.get("text_hash"))})
+            label = f"{uid} {safe_text(block.get('block_label'))}"
+            if state == "missing":
+                missing_voice.append(label)
+            elif state == "expired":
+                expired_voice.append(label)
+
+        for block in price_blocks:
+            state = voice_state(assets, uid="PRICE_TRANSITION", account_label=account_label,
+                                hashes={safe_text(block.get("text_hash"))},
+                                block_label=safe_text(block.get("price_range_label")))
+            label = f"价格过渡 {safe_text(block.get('price_range_label'))}"
+            if state == "missing":
+                missing_voice.append(label)
+            elif state == "expired":
+                expired_voice.append(label)
+
+        all_blocks = len(intro_blocks) + len(product_blocks) + len(price_blocks)
+        ready_count = all_blocks - len(missing_voice) - len(expired_voice)
+        lines = [
+            f"配音检查结果（用户：{account_label}）",
+            "",
+            f"配音块总数：{all_blocks}",
+            f"已就绪：{ready_count}",
+            f"缺配音：{len(missing_voice)}",
+            f"配音过期：{len(expired_voice)}",
+        ]
+        if missing_voice:
+            lines += ["", "缺配音列表"]
+            for item in missing_voice[:15]:
+                lines.append(f"  - {item}")
+            if len(missing_voice) > 15:
+                lines.append(f"  ... 另有 {len(missing_voice) - 15} 个")
+        if expired_voice:
+            lines += ["", "配音过期列表"]
+            for item in expired_voice[:15]:
+                lines.append(f"  - {item}")
+            if len(expired_voice) > 15:
+                lines.append(f"  ... 另有 {len(expired_voice) - 15} 个")
+        show_text_dialog(self, "配音检查结果", "\n".join(lines))
+
+    def _finish_asset_sync(self, label: str, result: dict[str, Any], *, focus_type: str = "") -> None:
+        if focus_type:
+            count_text = f"{label} {result.get(focus_type, 0)}"
+        else:
+            count_text = f"图片 {result.get('image', 0)}，视频 {result.get('video', 0)}，配音 {result.get('voice', 0)}"
+        self.toast(f"{label}素材同步完成：{count_text}，缺素材 {result.get('unmatched', 0)}")
+        self.refresh()
+        show_text_dialog(self, f"{label}素材同步结果", self._format_asset_sync_result(label, result, focus_type=focus_type))
+
+    def _format_asset_sync_result(self, label: str, result: dict[str, Any], *, focus_type: str = "") -> str:
+        type_labels = {"image": "图片", "video": "视频", "voice": "配音"}
+        lines = [
+            f"{label}素材同步结果",
+            "",
+            f"匹配成功：图片 {result.get('image', 0)}，视频 {result.get('video', 0)}，配音 {result.get('voice', 0)}",
+            f"缺素材商品：{result.get('unmatched', 0)}",
+        ]
+        scanned_roots = result.get("scanned_roots") or {}
+        if scanned_roots:
+            lines += ["", "扫描目录"]
+            for key, path in scanned_roots.items():
+                lines.append(f"- {type_labels.get(key, key)}：{path}")
+        matched_items = result.get("matched_items") or []
+        if focus_type:
+            matched_items = [item for item in matched_items if item.get("asset_type") == focus_type]
+        lines += ["", f"匹配成功明细（{len(matched_items)}）"]
+        if matched_items:
+            for index, item in enumerate(matched_items, start=1):
+                account = safe_text(item.get("account_label")) or "全局"
+                title = safe_text(item.get("title"))
+                title_part = f" {title}" if title else ""
+                lines.append(f"{index}. [{type_labels.get(item.get('asset_type'), item.get('asset_type'))}] {item.get('uid')}{title_part} / {account}")
+                lines.append(f"   {item.get('path')}")
+        else:
+            lines.append("无")
+        unmatched_items = result.get("unmatched_items") or []
+        if focus_type:
+            unmatched_items = [item for item in unmatched_items if item.get("asset_type") == focus_type]
+        lines += ["", f"缺素材商品（{len(unmatched_items)}）"]
+        if unmatched_items:
+            for index, item in enumerate(unmatched_items, start=1):
+                uid = safe_text(item.get("uid"))
+                title = safe_text(item.get("title"))
+                asset_name = type_labels.get(item.get("asset_type"), item.get("asset_type"))
+                lines.append(f"{index}. [{asset_name}] {uid} {title}".strip())
+                message = safe_text(item.get("message"))
+                if message:
+                    lines.append(f"   {message}")
+        else:
+            lines.append("无")
+        return "\n".join(lines)
 
     def _sync_all(self) -> None:
         project = self._current_project_or_warn()
@@ -1647,19 +2005,34 @@ class SyncPage(BasePage):
             "一键同步会依次执行：\n"
             "1. 从 Master 方案刷新当前品类商品列表；\n"
             "2. 读取绑定的 MD 文案并更新文案块；\n"
-            "3. 扫描图片、视频、配音素材并刷新映射。\n\n"
+            "3. 扫描图片和视频素材并刷新映射。\n\n"
             "这个操作会更新当前项目的商品、文案和素材状态。是否继续？",
             parent=self,
         ):
             return
-        self.app.run_background("一键同步",
-                                lambda: (self.sync.sync_master_scheme(project["id"], apply_changes=True), self.sync.sync_markdown(project["id"]), self.sync.sync_assets(project["id"])),
+        def sync_all_task():
+            self.sync.sync_master_scheme(project["id"], apply_changes=True)
+            self.sync.sync_markdown(project["id"])
+            self.sync.sync_assets(project["id"], asset_type="image")
+            self.sync.sync_assets(project["id"], asset_type="video")
+            return {}
+        self.app.run_background("一键同步", sync_all_task,
                                 on_success=lambda r: (self.toast(f"一键同步完成", duration=4500), self.refresh()), show_success_toast=False)
 
     def _open_path(self, key: str) -> None:
         p = self._current_project_or_warn()
         if p:
             open_path(p.get(key))
+
+    def _open_asset_path(self, asset_type: str) -> None:
+        path = self.asset_paths.get(asset_type)
+        if path:
+            open_path(path)
+            return
+        p = self._current_project_or_warn()
+        if p:
+            root_key = {"image": "image_root", "video": "video_root", "voice": "voice_root"}.get(asset_type, "")
+            open_path(p.get(root_key))
 
     def _open_md_folder(self) -> None:
         p = self._current_project_or_warn()
@@ -1757,8 +2130,13 @@ class WorkflowPage(BasePage):
         if not project:
             return []
         if isinstance(self, VoicePage):
-            uids = parse_uid_list(self.uid_var.get())
-            return self.workflow.build_voice_command(project["id"], account_label=self.account_var.get().strip(), uids=uids or None)
+            uids, script_ids = parse_voice_targets(self.uid_var.get())
+            return self.workflow.build_voice_command(
+                project["id"],
+                account_label=self.account_var.get().strip(),
+                uids=uids or None,
+                script_ids=script_ids or None,
+            )
         if isinstance(self, AssemblePage):
             top_uids = parse_uid_list(self.uid_var.get())
             mode = "top" if self.mode_var.get().strip().startswith("Top") else "standard"
@@ -1887,22 +2265,25 @@ class WorkflowPage(BasePage):
             return
 
         account_label = self.account_var.get().strip()
-        uids = parse_uid_list(self.uid_var.get())
+        uids, script_ids = parse_voice_targets(self.uid_var.get())
         total_jobs, existing_jobs, pending_jobs = self.workflow.voice_generation_counts(
             project["id"],
             account_label=account_label,
             uids=uids or None,
+            script_ids=script_ids or None,
         )
-        service_running_before = True
-        should_start_service = pending_jobs > 0
-        if should_start_service:
-            service_running_before = self.workflow.is_tts_service_running(timeout=0.8)
-        if not service_running_before:
-            should_start = messagebox.askyesno(
-                "启动配音服务",
-                "检测到本地配音服务尚未启动。\n\n生成配音前需要先启动并预热服务，是否现在启动并继续？",
-            )
-            if not should_start:
+        if pending_jobs == 0:
+            self.toast("所有文案已有 OK 配音，无需生成。", kind="info", duration=3000)
+            return
+
+        # 检查 TTS 服务状态，弹窗询问
+        service_ok = self.workflow.is_tts_service_running(timeout=0.8)
+        if service_ok:
+            if not messagebox.askyesno("配音服务已就绪", "检测到本地配音服务正在运行，是否继续生成配音？"):
+                self.toast("已取消本次配音生成。", kind="warning")
+                return
+        else:
+            if not messagebox.askyesno("配音服务未启动", "检测到本地配音服务尚未启动。\n\n生成配音前需要先启动并预热服务，是否现在启动并继续？"):
                 self.toast("已取消本次配音生成。", kind="warning")
                 return
 
@@ -1910,7 +2291,8 @@ class WorkflowPage(BasePage):
         progress_dialog.append("配音参数：")
         progress_dialog.append(f"品类项目：{project['name']}")
         progress_dialog.append(f"配音用户：{account_label}")
-        progress_dialog.append(f"商品范围：{'全部文案' if not uids else '、'.join(uids)}")
+        target_text = "全部文案" if not uids and not script_ids else "、".join(uids + script_ids)
+        progress_dialog.append(f"生成范围：{target_text}")
         progress_dialog.append(f"本次文案：{total_jobs} 条；已有跳过：{existing_jobs} 条；待生成：{pending_jobs} 条")
         progress_dialog.append("")
 
@@ -1936,23 +2318,17 @@ class WorkflowPage(BasePage):
                 project["id"],
                 account_label=account_label,
                 uids=uids or None,
+                script_ids=script_ids or None,
                 start_service_if_needed=True,
                 progress_hook=progress_hook,
             )
 
-        def maybe_close_service() -> None:
-            if service_running_before:
-                return
+        def close_service() -> None:
             if not self.workflow.is_tts_service_running(timeout=0.8):
-                return
-            should_close = messagebox.askyesno("关闭配音服务", "本次配音已结束，是否关闭刚启动的配音服务？")
-            if not should_close:
                 return
             killed = self.workflow.shutdown_tts_service()
             if killed > 0:
-                self.toast(f"已关闭配音服务（{killed} 个进程）。")
-            else:
-                self.toast("未找到可关闭的配音服务进程。", kind="warning")
+                messagebox.showinfo("配音服务已关闭", f"配音已完成，已自动关闭配音服务（{killed} 个进程）。")
 
         def on_success(result: Any) -> None:
             self.log(result.stdout or "")
@@ -1969,13 +2345,13 @@ class WorkflowPage(BasePage):
             else:
                 progress_dialog.finish(f"配音结束，退出码：{result.returncode}", kind="warning")
                 self.toast(f"配音结束，退出码：{result.returncode}", kind="warning", duration=4500)
-            maybe_close_service()
+            close_service()
 
         def on_error(exc: Exception, tb: str) -> None:
             progress_dialog.append(tb or str(exc))
             progress_dialog.finish(f"执行失败：{exc}", kind="error")
             messagebox.showerror("执行失败", str(exc))
-            maybe_close_service()
+            close_service()
 
         self.app.run_background("生成配音", work, on_success=on_success, on_error=on_error, show_success_toast=False)
 
@@ -2014,31 +2390,51 @@ class WorkflowPage(BasePage):
 
     def _voice_precheck(self, project: dict[str, Any]) -> tuple[str, bool]:
         account_label = self.account_var.get().strip()
-        selected_uids = parse_uid_list(self.uid_var.get())
+        selected_uids, selected_script_ids = parse_voice_targets(self.uid_var.get())
         products = {a["uid"]: a for a in self.repo.products(project["id"], include_removed=False)}
         blocks = self.repo.script_blocks(project["id"])
         assets = self.repo.asset_bindings(project["id"])
         selected = set(selected_uids)
+        selected_scripts = {item.casefold() for item in selected_script_ids}
         unknown = [u for u in selected_uids if u not in products]
-        product_blocks = [b for b in blocks if b["script_type"] == "product" and (not selected or b["owner_uid"] in selected)]
-        shared_blocks = [] if selected else [b for b in blocks if b["script_type"] in {"intro", "price_transition"}]
+        unknown_scripts = [
+            script_id
+            for script_id in selected_script_ids
+            if script_id.casefold() not in {safe_text(block.get("script_id")).casefold() for block in blocks}
+        ]
+        product_blocks = [
+            b for b in blocks
+            if b["script_type"] == "product"
+            and (not selected or b["owner_uid"] in selected)
+            and (not selected_scripts or safe_text(b.get("script_id")).casefold() in selected_scripts)
+        ]
+        shared_blocks = [
+            b for b in blocks
+            if b["script_type"] in {"intro", "price_transition"}
+            and not selected
+            and (not selected_scripts or safe_text(b.get("script_id")).casefold() in selected_scripts)
+        ]
         pending, skipped, blocked = [], [], []
         for uid in selected_uids:
             if uid in products and not any(b["owner_uid"] == uid for b in product_blocks):
                 blocked.append(f"{uid} {products[uid]['title']}：缺文案")
         for uid in unknown:
             blocked.append(f"{uid}：当前品类项目中没有这个商品")
+        for script_id in unknown_scripts:
+            blocked.append(f"{script_id}：当前品类项目中没有这个文案版本 ID")
         for b in product_blocks:
             prod = products.get(b["owner_uid"], {})
-            display = f"{b['owner_uid']} {safe_text(prod.get('title'))} / {b['block_label']}"
-            state = voice_state(assets, uid=b["owner_uid"], account_label=account_label, hashes={b["text_hash"]})
+            display = f"{safe_text(b.get('script_id'))} / {b['owner_uid']} {safe_text(prod.get('title'))} / {b['block_label']}"
+            state = voice_state(assets, uid=b["owner_uid"], account_label=account_label, hashes={b["text_hash"]}, block_label=safe_text(b.get("block_label")))
             (pending if state != "ready" else skipped).append(f"{display}：{'配音过期，将重生成' if state == 'expired' else '缺配音，将生成'}" if state != "ready" else f"{display}：已有配音")
         for b in shared_blocks:
             uid = "INTRO" if b["script_type"] == "intro" else "PRICE_TRANSITION"
-            display = f"{'引言文案' if uid == 'INTRO' else f'价格过渡 {b["price_range_label"]}'} / {b['block_label']}"
-            state = voice_state(assets, uid=uid, account_label=account_label, hashes={b["text_hash"]}, block_label=b.get("price_range_label", ""))
+            label = safe_text(b.get("block_label")) if uid == "INTRO" else safe_text(b.get("price_range_label"))
+            kind_label = "引言文案" if uid == "INTRO" else f"价格过渡 {safe_text(b.get('price_range_label'))}"
+            display = f"{safe_text(b.get('script_id'))} / {kind_label} / {b['block_label']}"
+            state = voice_state(assets, uid=uid, account_label=account_label, hashes={b["text_hash"]}, block_label=label)
             (pending if state != "ready" else skipped).append(f"{display}：{'配音过期，将重生成' if state == 'expired' else '缺配音，将生成'}" if state != "ready" else f"{display}：已有配音")
-        selected_text = "全部文案" if not selected_uids else "、".join(selected_uids)
+        selected_text = "全部文案" if not selected_uids and not selected_script_ids else "、".join(selected_uids + selected_script_ids)
         lines = [
             "本次配音生成预览", "",
             f"品类：{project['name']}", f"用户：{account_label or '未选择'}", f"范围：{selected_text}", "",
@@ -2072,12 +2468,15 @@ class WorkflowPage(BasePage):
             uid = safe_text(product.get("uid"))
             is_top_product = uid.casefold() in top_set
             if not is_top_product:
-                for price_block in self.workflow._matching_price_blocks(product, price_blocks):
+                price_block = self.workflow._matching_price_block_for_assets(product, price_blocks, assets, account_label=account_label)
+                if price_block:
                     price_key = safe_text(price_block.get("price_range_label")) or str(price_block["id"])
                     if price_key not in used_price_labels:
                         used_price_labels.add(price_key)
                         used_price_blocks.append(price_block)
-            for block in product_blocks_by_uid.get(uid, []):
+            versions = product_blocks_by_uid.get(uid, [])
+            if versions:
+                block = self.workflow._choose_voice_ready_block(versions, assets, uid=uid, account_label=account_label) or versions[0]
                 ordered_blocks.append((block, product, is_top_product))
         top_product_blocks = [item for item in ordered_blocks if item[2]]
         other_product_blocks = [item for item in ordered_blocks if not item[2]]
@@ -2095,9 +2494,18 @@ class WorkflowPage(BasePage):
                 missing_image.append(label)
             if not has_ready_asset(assets, uid=uid, asset_type="video"):
                 missing_video.append(label)
-        selected_intro = intro_blocks[:1]
+        selected_intro = []
+        if intro_blocks:
+            intro_index = max(1, int(self.intro_var.get() or "1"))
+            selected_intro = [intro_blocks[min(intro_index, len(intro_blocks)) - 1]]
         for block in selected_intro:
-            if voice_state(assets, uid="INTRO", account_label=account_label, hashes={safe_text(block.get("text_hash"))}) != "ready":
+            if voice_state(
+                assets,
+                uid="INTRO",
+                account_label=account_label,
+                hashes={safe_text(block.get("text_hash"))},
+                block_label=safe_text(block.get("block_label")),
+            ) != "ready":
                 missing_voice.append("引言文案")
         for block in used_price_blocks:
             if voice_state(
@@ -2316,7 +2724,7 @@ class VoicePage(WorkflowPage):
         self.account_input = AppComboBox(form, width=180, variable=self.account_var)
         self.account_input.grid(row=0, column=1, sticky="w", pady=(UIStyle.PAD_LG, UIStyle.PAD_SM))
 
-        ctk.CTkLabel(form, text="商品UID（可不填）", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
+        ctk.CTkLabel(form, text="商品UID / 文案ID（可不填）", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
             row=0, column=2, sticky="w", padx=(UIStyle.PAD_LG, UIStyle.PAD_SM), pady=(UIStyle.PAD_LG, UIStyle.PAD_SM)
         )
         AppEntry(form, textvariable=self.uid_var).grid(
@@ -2325,7 +2733,7 @@ class VoicePage(WorkflowPage):
 
         ctk.CTkLabel(
             form,
-            text="留空会处理当前品类下全部文案；多个 UID 用中文或英文逗号分隔。",
+            text="留空处理全部文案；填商品 UID 会处理该商品全部版本；填 script_id 只处理指定文案版本，多个值用逗号分隔。",
             font=UIStyle.FONT_SMALL,
             text_color=UIStyle.COLOR_TEXT_DIM,
         ).grid(row=1, column=3, sticky="w", padx=(0, UIStyle.PAD_LG), pady=(0, UIStyle.PAD_MD))

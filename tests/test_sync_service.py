@@ -62,6 +62,74 @@ def test_script_hash_matches_legacy_voice_registry_format(tmp_path: Path):
     assert len(row["text_hash"]) == 40
 
 
+def test_markdown_sync_preserves_and_generates_script_ids(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    project_id = db.upsert_project({"name": "script-id-test"})
+    repo.upsert_products_from_master(
+        project_id,
+        [{"uid": "JP071", "title": "狼蛛F87ProV2超神版", "price_label": "359元"}],
+    )
+    parsed = parse_markdown_text(
+        """
+## 引言文案
+
+<!-- script_id: intro:I009 -->
+### 引言9
+这是引言。
+
+## 商品文案
+
+### 359元-JP071-狼蛛F87ProV2超神版
+<!-- script_id: product:JP071:V009 -->
+#### 正文9
+这是商品文案。
+#### 正文10
+这是第二版商品文案。
+
+## 价格过渡文案
+
+### 200元以下
+<!-- script_id: price:200-under:V009 -->
+#### 正文9
+这是价格过渡。
+""".strip()
+    )
+
+    SyncService(db).sync_markdown_payload(project_id, parsed)
+    rows = repo.script_blocks(project_id)
+
+    assert any(row["block_label"] == "引言9" and row["script_id"] == "intro:I009" for row in rows)
+    assert any(row["owner_uid"] == "JP071" and row["block_label"] == "正文9" and row["script_id"] == "product:JP071:V009" for row in rows)
+    assert any(row["owner_uid"] == "JP071" and row["block_label"] == "正文10" and row["script_id"] == "product:JP071:V002" for row in rows)
+    assert any(row["price_range_label"] == "200元以下" and row["script_id"] == "price:200-under:V009" for row in rows)
+
+
+def test_sync_markdown_writes_missing_script_id_comments(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    md_path = tmp_path / "copy.md"
+    md_path.write_text(
+        """
+## 商品文案
+
+### 359元-JP071-狼蛛F87ProV2超神版
+#### 正文
+这是商品文案。
+""".strip(),
+        encoding="utf-8",
+    )
+    project_id = db.upsert_project({"name": "script-id-writeback", "md_path": str(md_path)})
+    repo.upsert_products_from_master(
+        project_id,
+        [{"uid": "JP071", "title": "狼蛛F87ProV2超神版", "price_label": "359元"}],
+    )
+
+    SyncService(db).sync_markdown(project_id)
+
+    assert "<!-- script_id: product:JP071:V001 -->" in md_path.read_text(encoding="utf-8")
+
+
 def test_master_sync_forces_fresh_scheme_summary(tmp_path: Path, monkeypatch):
     db = Database(tmp_path / "test.db")
     project_id = db.upsert_project(
@@ -92,3 +160,80 @@ def test_master_sync_forces_fresh_scheme_summary(tmp_path: Path, monkeypatch):
 
     assert calls == [{"workspace_id": "workspace-1", "scheme_id": "scheme-1", "force_refresh": True}]
     assert result["added"] == [{"uid": "JP096", "title": "狼蛛F75Max 客制化", "price_label": "279元", "master_item_id": "", "sort_order": 1}]
+
+
+def test_asset_sync_ignores_extra_files_and_reports_missing_scheme_products(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    image_root = tmp_path / "images"
+    image_root.mkdir()
+    matched = image_root / "1-JP096-狼蛛F75Max.png"
+    extra = image_root / "2-JP999-额外商品.png"
+    matched.write_bytes(b"image")
+    extra.write_bytes(b"image")
+    project_id = db.upsert_project({"name": "keyboard", "image_root": str(image_root)})
+    repo.upsert_products_from_master(
+        project_id,
+        [
+            {"uid": "JP096", "title": "狼蛛F75Max", "price_label": "279元"},
+            {"uid": "JP097", "title": "京东京造JZ990Pro", "price_label": "399元"},
+        ],
+    )
+
+    result = SyncService(db).sync_assets(project_id, asset_type="image", root_override=image_root)
+
+    assert result["image"] == 1
+    assert result["unmatched"] == 1
+    assert result["scanned_roots"] == {"image": str(image_root)}
+    assert result["matched_items"][0]["uid"] == "JP096"
+    assert result["matched_items"][0]["title"] == "狼蛛F75Max"
+    assert result["matched_items"][0]["path"] == str(matched)
+    assert result["unmatched_items"][0]["uid"] == "JP097"
+    assert result["unmatched_items"][0]["title"] == "京东京造JZ990Pro"
+    assert result["unmatched_items"][0]["asset_type"] == "image"
+
+
+def test_voice_asset_sync_includes_intro_and_price_transition_blocks(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    voice_root = tmp_path / "voice"
+    voice_root.mkdir()
+    intro = voice_root / "0-引言-引言2-今天.wav"
+    price = voice_root / "0-价格-200元以下-这个.wav"
+    intro.write_bytes(b"voice")
+    price.write_bytes(b"voice")
+    project_id = db.upsert_project({"name": "keyboard", "voice_root": str(voice_root)})
+    parsed = parse_markdown_text(
+        """
+## 引言文案
+
+### 引言1
+第一段
+
+### 引言2
+第二段
+
+## 价格过渡文案
+
+### 200元以下
+这个价位
+""".strip()
+    )
+    SyncService(db).sync_markdown_payload(project_id, parsed)
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO accounts (label, account_id, created_at, updated_at)
+            VALUES ('小燃', 'xiaoran', 'now', 'now')
+            """
+        )
+
+    result = SyncService(db).sync_assets(project_id, asset_type="voice", root_override=voice_root)
+
+    assert result["voice"] == 2
+    assert result["unmatched"] == 1
+    assert {item["uid"] for item in result["matched_items"]} == {"INTRO", "PRICE_TRANSITION"}
+    assert result["unmatched_items"][0]["title"] == "引言 引言1"
+    assets = repo.asset_bindings(project_id)
+    assert any(asset["uid"] == "INTRO" and asset["block_label"] == "引言2" for asset in assets)
+    assert any(asset["uid"] == "PRICE_TRANSITION" and asset["block_label"] == "200元以下" for asset in assets)
