@@ -68,6 +68,15 @@ Output rules:
 - Internal generated files are kept under `data/workspace`.
 - Jianying drafts are written to `E:\剪辑-剪映\草稿\JianyingPro Drafts`.
 
+## Jianying Draft Notes
+
+- Draft generation is delegated to `C:\Users\zhaoer\.codex\skills\b-workflow\scripts\generate_jianying_draft.py`.
+- Product images remain on the main media track. Product videos are also written as `display_video_path` and placed on the separate `display_video` track.
+- Voice clips use a `100ms` timeline gap between adjacent clips.
+- Template slots normally use 1920x1080 canvas rectangle coordinates: `x`, `y`, `width`, and `height`.
+- `小燃-模板1` uses Jianying position-panel coordinates instead: `x=-830`, `y=-77`, `width=970`, `height=590`, with `coordinate_mode="clip_transform_pixels"`.
+- For fast alignment checks, regenerate `data/tmp_jianying_probe/xiaoran1-three-products.manifest.json` and run `data/tmp_jianying_probe/run_xiaoran1_three_product_draft.py`. The smoke draft contains 3 products and skips subtitles.
+
 ## Markdown Contract
 
 The parser uses fixed headings instead of guessing:
