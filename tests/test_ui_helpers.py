@@ -1,5 +1,117 @@
 from bworkflow_sql.settings import DEFAULT_SPOKEN_MD_ROOT
-from bworkflow_sql.ui import asset_folder_paths, manifest_account_label, manifest_product_video_gaps, parse_uid_list, voice_state
+from bworkflow_sql.ui import (
+    ProjectEditorState,
+    ProjectPageDialog,
+    asset_folder_paths,
+    manifest_account_label,
+    manifest_missing_assets,
+    manifest_product_video_gaps,
+    parse_uid_list,
+    voice_state,
+)
+
+
+class FakeVar:
+    def __init__(self, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+class FakeCombo:
+    def __init__(self):
+        self.values = None
+
+    def configure(self, **kwargs):
+        if "values" in kwargs:
+            self.values = kwargs["values"]
+
+
+class FakeDialog:
+    def winfo_exists(self):
+        return True
+
+
+def _editor_state() -> ProjectEditorState:
+    fields = {
+        key: FakeVar()
+        for key in [
+            "name",
+            "workspace_id",
+            "workspace_name",
+            "category_parent_id",
+            "category_parent_name",
+            "category_id",
+            "category_name",
+            "scheme_id",
+            "scheme_name",
+        ]
+    }
+    return ProjectEditorState(
+        dialog=FakeDialog(),
+        mode="new",
+        project_id=0,
+        fields=fields,
+        workspace_var=FakeVar(),
+        parent_category_var=FakeVar(),
+        child_category_var=FakeVar(),
+        scheme_var=FakeVar(),
+        parent_combo=FakeCombo(),
+        child_combo=FakeCombo(),
+        scheme_combo=FakeCombo(),
+    )
+
+
+def test_project_dialog_master_combos_receive_candidate_values(monkeypatch):
+    page = ProjectPageDialog.__new__(ProjectPageDialog)
+    page.category_tree = [
+        {"id": "p1", "name": "Digital", "children": [{"id": "c1", "name": "Mouse"}, {"id": "c2", "name": "Keyboard"}]},
+        {"id": "p2", "name": "Home", "children": []},
+    ]
+    page.log = lambda _text: None
+    state = _editor_state()
+    monkeypatch.setattr(page, "_editor_on_child_selected", lambda *_args, **_kwargs: None)
+
+    page._apply_category_tree_to_editor(state, page.category_tree, source="test", keep_existing=False)
+
+    assert state.parent_combo.values == ["Digital", "Home"]
+    assert state.child_combo.values == ["Mouse", "Keyboard"]
+    assert state.scheme_combo.values == []
+
+
+def test_project_dialog_scheme_combo_receives_loaded_values():
+    class FakeApp:
+        def run_background(self, _title, work, *, on_success=None, **_kwargs):
+            if on_success:
+                on_success(work())
+
+    class FakeMasterData:
+        def fetch_schemes(self, *, workspace_id, category_id):
+            assert workspace_id == "w1"
+            assert category_id == "c1"
+            return ([{"id": "s1", "name": "Main"}, {"id": "s2", "name": "Backup"}], "test")
+
+    page = ProjectPageDialog.__new__(ProjectPageDialog)
+    page.app = FakeApp()
+    page.master_data = FakeMasterData()
+    page.workspaces = [{"id": "w1", "name": "Zhaoer"}]
+    page.category_tree = [{"id": "p1", "name": "Digital", "children": [{"id": "c1", "name": "Mouse"}]}]
+    page.schemes = []
+    page.log = lambda _text: None
+    state = _editor_state()
+    state.workspace_var.set("Zhaoer")
+    state.parent_category_var.set("Digital")
+    state.child_category_var.set("Mouse")
+
+    page._editor_on_child_selected(state)
+
+    assert state.scheme_combo.values == ["Main", "Backup"]
+    assert state.scheme_var.get() == "Main"
+    assert state.fields["scheme_id"].get() == "s1"
 
 
 def test_parse_uid_list_accepts_chinese_and_english_commas_only():
@@ -32,13 +144,32 @@ def test_manifest_product_video_gaps_reports_products_without_video():
     assert manifest_product_video_gaps(payload) == ["A1 Alpha"]
 
 
+def test_manifest_missing_assets_reports_selected_copy_without_audio():
+    payload = {
+        "entries": [
+            {
+                "type": "transition",
+                "order_index": 2,
+                "product_uid": "PRICE_TRANSITION",
+                "product_name": "价格过渡 200元以下",
+                "source_label": "价格过渡 200元以下",
+                "audio_path": "",
+            }
+        ]
+    }
+
+    missing = manifest_missing_assets(payload)
+
+    assert missing["audio"] == ["#2 transition PRICE_TRANSITION 价格过渡 200元以下 价格过渡 200元以下：路径为空"]
+
+
 def test_asset_folder_paths_prefer_current_category_user_and_global_video(tmp_path):
     image_root = tmp_path / "images"
     video_root = tmp_path / "videos"
     voice_root = tmp_path / "voices"
     current = image_root / "数码-键盘" / "小燃"
     old = image_root / "键盘" / "小燃"
-    voice_dir = voice_root / "小燃-键盘"
+    voice_dir = voice_root / "数码-键盘" / "小燃"
     current.mkdir(parents=True)
     old.mkdir(parents=True)
     voice_dir.mkdir(parents=True)
@@ -62,10 +193,10 @@ def test_asset_folder_paths_prefer_current_category_user_and_global_video(tmp_pa
     assert paths["voice"] == str(voice_dir)
 
 
-def test_voice_state_treats_scanned_voice_without_hash_as_ready():
+def test_voice_state_marks_stale_hash_as_expired_even_with_unhashed_scan():
     assets = [
         {"uid": "JP071", "asset_type": "voice", "status": "ready", "account_label": "小燃", "text_hash": "old"},
         {"uid": "JP071", "asset_type": "voice", "status": "ready", "account_label": "小燃", "text_hash": ""},
     ]
 
-    assert voice_state(assets, uid="JP071", account_label="小燃", hashes={"new"}) == "ready"
+    assert voice_state(assets, uid="JP071", account_label="小燃", hashes={"new"}) == "expired"

@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .asset_paths import legacy_voice_user_dir, path_is_under, voice_user_dir
 from .db import Database, _script_id_slug
 from .legacy_bridge import install_legacy_paths, try_import
 from .md_parser import H3_RE, H4_RE, SCRIPT_ID_RE, SECTION_RE, ParsedMarkdown, parse_markdown_file, parse_product_heading
@@ -17,6 +18,9 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi"}
 UID_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{1,12}\d[\w-]*)(?![A-Za-z0-9])")
 
+
+def _intro_label(index: int) -> str:
+    return f"版本{index}"
 
 def _compact_identity(value: Any) -> str:
     text = safe_text(value).casefold()
@@ -154,18 +158,19 @@ class SyncService:
         with self.db.connect() as conn:
             conn.execute("UPDATE script_blocks SET active=0, updated_at=? WHERE project_id=?", (ts, project_id))
             for index, block in enumerate(parsed.intro_scripts, start=1):
-                script_id = block.script_id or f"intro:I{index:03d}"
+                script_id = block.script_id or f"intro:V{index:03d}"
                 block.script_id = script_id
+                intro_label = block.label or _intro_label(index)
                 upserted += self._upsert_script_block(
                     conn,
                     project_id=project_id,
                     script_type="intro",
                     owner_uid="",
                     price_range_label="",
-                    block_label=block.label or f"引言{index}",
+                    block_label=intro_label,
                     script_id=script_id,
                     body=block.body,
-                    source_anchor=f"引言文案/{block.label or index}",
+                    source_anchor=f"引言文案/{intro_label}",
                     ts=ts,
                 )
             for uid in allowed_uids:
@@ -323,11 +328,19 @@ class SyncService:
         accounts = self.repo.accounts()
         counts = {"image": 0, "video": 0, "voice": 0, "unmatched": 0}
         matched_items: list[dict[str, Any]] = []
+        matched_keys: set[tuple[str, str, int, str, str, str]] = set()
         matched_uids_by_type: dict[str, set[str]] = {"image": set(), "video": set(), "voice": set()}
         matched_voice_targets: set[tuple[str, str]] = set()
         scanned_roots: dict[str, str] = {}
         items: list[dict[str, Any]] = []
         ts = now_iso()
+        checked_types = [requested_type] if requested_type else ["image", "video", "voice"]
+        before_assets = [
+            item
+            for item in self.repo.asset_bindings(project_id)
+            if item.get("asset_type") in checked_types and safe_text(item.get("status")) == "ready"
+        ]
+        before_keys = {self._asset_binding_key(item): item for item in before_assets}
         active_uids = set(products)
         all_uids = {safe_text(row["uid"]) for row in self.repo.products(project_id)}
         stale_uids = sorted(uid for uid in all_uids if uid and uid not in active_uids)
@@ -359,13 +372,18 @@ class SyncService:
             for path in self._scan_files(root, suffixes):
                 uid = self._uid_from_path(path, products)
                 account = {} if current_type == "video" else self._account_from_path(path, accounts)
+                if current_type == "voice" and not self._voice_path_in_project_scope(path, project, account):
+                    continue
                 if uid:
                     block = self._product_voice_block_from_path(uid, path, script_blocks) if current_type == "voice" else None
                     if block:
                         self._upsert_voice_block_asset(project_id, uid=uid, block=block, path=path, account=account)
                         matched_voice_targets.add(self._voice_target_key(block))
+                        block_label = safe_text(block.get("price_range_label")) if block["script_type"] == "price_transition" else safe_text(block.get("block_label"))
+                        matched_keys.add((current_type, uid, int(block["id"]), safe_text(account.get("label")), block_label, str(path)))
                     else:
                         self._upsert_asset(project_id, uid=uid, asset_type=current_type, path=path, account=account)
+                        matched_keys.add((current_type, uid, 0, safe_text(account.get("label")), "", str(path)))
                     counts[current_type] += 1
                     matched_uids_by_type[current_type].add(uid)
                     product = products.get(uid) or {}
@@ -375,6 +393,8 @@ class SyncService:
                             "uid": uid,
                             "title": safe_text(product.get("title")),
                             "account_label": safe_text(account.get("label")),
+                            "script_block_id": int(block["id"]) if block else 0,
+                            "block_label": block_label if block else "",
                             "path": str(path),
                         }
                     )
@@ -387,16 +407,19 @@ class SyncService:
                     self._upsert_voice_block_asset(project_id, uid=special_uid, block=block, path=path, account=account)
                     counts[current_type] += 1
                     matched_voice_targets.add(target_key)
+                    block_label = safe_text(block.get("price_range_label")) if block["script_type"] == "price_transition" else safe_text(block.get("block_label"))
+                    matched_keys.add((current_type, special_uid, int(block["id"]), safe_text(account.get("label")), block_label, str(path)))
                     matched_items.append(
                         {
                             "asset_type": current_type,
                             "uid": special_uid,
                             "title": self._voice_block_title(block),
                             "account_label": safe_text(account.get("label")),
+                            "script_block_id": int(block["id"]),
+                            "block_label": block_label,
                             "path": str(path),
                         }
                     )
-        checked_types = [requested_type] if requested_type else ["image", "video", "voice"]
         for current_type in checked_types:
             if not current_type:
                 continue
@@ -433,6 +456,30 @@ class SyncService:
                         "asset_type": current_type,
                     }
                 )
+        added_items = [item for item in matched_items if self._asset_item_key(item) not in before_keys]
+        removed_items = [
+            self._asset_item_from_binding(item)
+            for key, item in before_keys.items()
+            if key not in matched_keys and self._asset_is_in_scanned_scope(item, scanned_roots)
+        ]
+        if removed_items:
+            removed_paths = [safe_text(item.get("path")) for item in removed_items if safe_text(item.get("path"))]
+            if removed_paths:
+                placeholders = ", ".join("?" for _ in removed_paths)
+                with self.db.connect() as conn:
+                    conn.execute(
+                        f"UPDATE asset_bindings SET status='stale', updated_at=? WHERE project_id=? AND path IN ({placeholders})",
+                        (ts, project_id, *removed_paths),
+                    )
+        current_assets = [
+            self._asset_item_from_binding(item)
+            for item in self.repo.asset_bindings(project_id)
+            if item.get("asset_type") in checked_types and safe_text(item.get("status")) == "ready"
+        ]
+        for item in current_assets:
+            product = products.get(safe_text(item.get("uid"))) or {}
+            if product:
+                item["title"] = safe_text(product.get("title"))
         self.db.log_event(
             project_id,
             f"asset_sync_{requested_type}" if requested_type else "asset_sync",
@@ -440,10 +487,63 @@ class SyncService:
             f"素材同步完成：图片 {counts['image']}，视频 {counts['video']}，配音 {counts['voice']}，缺素材 {counts['unmatched']}",
             items[:200],
         )
-        return {**counts, "matched_items": matched_items, "unmatched_items": items, "scanned_roots": scanned_roots}
+        return {
+            **counts,
+            "matched_items": matched_items,
+            "added_items": added_items,
+            "removed_items": removed_items,
+            "current_items": current_assets,
+            "unmatched_items": items,
+            "scanned_roots": scanned_roots,
+        }
 
     def _asset_type_label(self, asset_type: str) -> str:
         return {"image": "图片", "video": "视频", "voice": "配音"}.get(asset_type, "素材")
+
+    def _asset_binding_key(self, item: dict[str, Any]) -> tuple[str, str, int, str, str, str]:
+        return (
+            safe_text(item.get("asset_type")),
+            safe_text(item.get("uid")),
+            int(item.get("script_block_id") or 0),
+            safe_text(item.get("account_label")),
+            safe_text(item.get("block_label")),
+            safe_text(item.get("path")),
+        )
+
+    def _asset_item_key(self, item: dict[str, Any]) -> tuple[str, str, int, str, str, str]:
+        return (
+            safe_text(item.get("asset_type")),
+            safe_text(item.get("uid")),
+            int(item.get("script_block_id") or 0),
+            safe_text(item.get("account_label")),
+            safe_text(item.get("block_label")),
+            safe_text(item.get("path")),
+        )
+
+    def _asset_item_from_binding(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "asset_type": safe_text(item.get("asset_type")),
+            "uid": safe_text(item.get("uid")),
+            "title": safe_text(item.get("title")),
+            "account_label": safe_text(item.get("account_label")),
+            "block_label": safe_text(item.get("block_label")),
+            "script_block_id": int(item.get("script_block_id") or 0),
+            "path": safe_text(item.get("path")),
+            "status": safe_text(item.get("status")),
+        }
+
+    def _asset_is_in_scanned_scope(self, item: dict[str, Any], scanned_roots: dict[str, str]) -> bool:
+        asset_type = safe_text(item.get("asset_type"))
+        root_text = safe_text(scanned_roots.get(asset_type))
+        path_text = safe_text(item.get("path"))
+        if not root_text or not path_text:
+            return False
+        path = Path(path_text)
+        try:
+            path.resolve().relative_to(Path(root_text).resolve())
+            return True
+        except ValueError:
+            return False
 
     def _voice_block_from_path(self, path: Path, blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
         text = _compact_identity(path.stem)
@@ -468,10 +568,18 @@ class SyncService:
 
     def _product_voice_block_from_path(self, uid: str, path: Path, blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
         text = _compact_identity(path.stem)
+        # 从原始文件名提取各段落（按分隔符拆分），用于精确匹配 block_label
+        stem_segments = {_compact_identity(p) for p in re.split(r"[\s_\-—/&]+", path.stem) if p.strip()}
         product_blocks = [
             block for block in blocks
             if block["script_type"] == "product" and safe_text(block.get("owner_uid")).casefold() == uid.casefold()
         ]
+        # 优先按 block_label 精确匹配（文件名中的独立段落）
+        for block in product_blocks:
+            bl = _compact_identity(safe_text(block.get("block_label")))
+            if bl and bl in stem_segments:
+                return block
+        # 其次用原有模糊匹配
         for block in product_blocks:
             if self._voice_block_matches_path(block, text):
                 return block
@@ -503,6 +611,17 @@ class SyncService:
         if block["script_type"] == "price_transition":
             return "PRICE_TRANSITION"
         return safe_text(block.get("owner_uid"))
+
+    def _voice_path_in_project_scope(self, path: Path, project: dict[str, Any], account: dict[str, Any]) -> bool:
+        account_label = safe_text(account.get("label"))
+        voice_root = safe_text(project.get("voice_root")) or DEFAULT_VOICE_ROOT
+        if not account_label:
+            return True
+        current_dir = voice_user_dir(voice_root, project, account_label)
+        if path_is_under(path, current_dir):
+            return True
+        legacy_dir = legacy_voice_user_dir(voice_root, project, account_label)
+        return path_is_under(path, legacy_dir)
 
     def _scan_files(self, root: Path, suffixes: set[str]) -> list[Path]:
         if not root.exists():

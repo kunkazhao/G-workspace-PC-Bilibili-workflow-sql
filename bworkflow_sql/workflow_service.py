@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from .asset_paths import voice_user_dir
 from .db import Database
 from .repositories import Repository
 from .settings import (
@@ -51,6 +52,7 @@ DEFAULT_SILENCE_THRESHOLD_DB = -45.0
 DEFAULT_MIN_SILENCE_MS = 280
 DEFAULT_KEEP_SILENCE_MS = 120
 DEFAULT_SILENCE_CHUNK_MS = 10
+DEFAULT_LEADING_SILENCE_MS = 100
 INTERNAL_PREFIX = "internal:"
 DEFAULT_DISPLAY_VIDEO_SLOT = {
     "x": 1100,
@@ -216,6 +218,43 @@ def compress_internal_silence(
         "original_ms": original_ms,
         "fixed_ms": fixed_ms,
         "removed_ms": original_ms - fixed_ms,
+    }
+
+
+def prepend_silence(audio_path: Path, *, silence_ms: int = DEFAULT_LEADING_SILENCE_MS) -> dict[str, Any]:
+    if silence_ms <= 0:
+        return {"enabled": True, "changed": False, "reason": "silence_ms <= 0"}
+
+    with wave.open(str(audio_path), "rb") as reader:
+        params = reader.getparams()
+        frame_rate = reader.getframerate()
+        frame_count = reader.getnframes()
+        channel_count = reader.getnchannels()
+        sample_width = reader.getsampwidth()
+        raw_audio = reader.readframes(frame_count)
+
+    if frame_rate <= 0 or channel_count <= 0 or sample_width <= 0:
+        return {"enabled": True, "changed": False, "reason": "invalid wav params"}
+
+    silence_frames = seconds_to_frames(silence_ms / 1000.0, frame_rate)
+    if silence_frames <= 0:
+        return {"enabled": True, "changed": False, "reason": "silence too short"}
+
+    silent_prefix = b"\x00" * silence_frames * channel_count * sample_width
+    temp_path = audio_path.with_name(f"{audio_path.stem}.leadingsilence.tmp{audio_path.suffix}")
+    try:
+        with wave.open(str(temp_path), "wb") as writer:
+            writer.setparams(params)
+            writer.writeframes(silent_prefix + raw_audio)
+        temp_path.replace(audio_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+    return {
+        "enabled": True,
+        "changed": True,
+        "silence_ms": round(silence_frames * 1000 / frame_rate),
     }
 
 
@@ -506,6 +545,7 @@ class WorkflowService:
         order = 1
         account_label = safe_text(account.get("label") or account_label)
         account_id = safe_text(account.get("account_id"))
+        voice_scope = self._voice_scope_fragment(project, account_label)
 
         if intro_blocks:
             intro_block = intro_blocks[min(max(1, intro_index), len(intro_blocks)) - 1]
@@ -522,6 +562,7 @@ class WorkflowService:
                     product={},
                     source_label=intro_block["block_label"],
                     display_template=display_template,
+                    preferred_voice_path_contains=voice_scope,
                 )
             )
             order += 1
@@ -549,6 +590,7 @@ class WorkflowService:
                                 product={},
                                 source_label=f"价格过渡 {price_block['price_range_label']}",
                                 display_template=display_template,
+                                preferred_voice_path_contains=voice_scope,
                             )
                         )
                         order += 1
@@ -569,6 +611,7 @@ class WorkflowService:
                     product=product,
                     source_label=block["block_label"],
                     display_template=display_template,
+                    preferred_voice_path_contains=voice_scope,
                 )
             )
             order += 1
@@ -648,6 +691,7 @@ class WorkflowService:
             "--draft-root",
             str(draft_root),
             "--allow-replace",
+            "--skip-subtitles",
         ]
         if intro_video is not None:
             cmd += ["--intro-video", str(intro_video)]
@@ -753,9 +797,13 @@ class WorkflowService:
 
     def _voice_output_dir(self, project: dict[str, Any], *, account: dict[str, Any], account_label: str = "") -> Path:
         label = safe_text(account.get("label") or account_label or "voice")
-        category = safe_text(project.get("category_name"))
-        folder = f"{label}-{category}" if category and label != "voice" else label
-        return Path(safe_text(project.get("voice_root")) or DEFAULT_OUTPUT_ROOT) / folder
+        root = safe_text(project.get("voice_root")) or DEFAULT_OUTPUT_ROOT
+        return voice_user_dir(root, project, "" if label == "voice" else label)
+
+    def expected_voice_output_dir(self, project_id: int, *, account_label: str = "") -> Path:
+        project = self._required_project(project_id)
+        account = self._resolve_account(account_label)
+        return self._voice_output_dir(project, account=account, account_label=account_label)
 
     def _spoken_markdown_path(self, project: dict[str, Any], explicit_path: str | Path | None = None) -> Path:
         path_text = safe_text(explicit_path) or safe_text(project.get("spoken_md_path"))
@@ -857,10 +905,14 @@ class WorkflowService:
         if generated_path.resolve() != final_path.resolve():
             shutil.move(str(generated_path), str(final_path))
         compress_internal_silence(final_path)
+        prepend_silence(final_path)
         return final_path
 
     def _voice_filename(self, job: VoiceJob) -> str:
-        label = extract_label(safe_text(job.block.get("body")))
+        if job.kind == "product":
+            label = extract_label(safe_text(job.block.get("body"))) or safe_text(job.block.get("block_label"))
+        else:
+            label = safe_text(job.block.get("block_label")) or extract_label(safe_text(job.block.get("body")))
         if job.kind == "product":
             price = self._voice_price_label(job.price_label)
             parts = [price, job.uid, job.product_name, label]
@@ -1053,6 +1105,10 @@ class WorkflowService:
         rank = {uid.casefold(): index for index, uid in enumerate(top_uids)}
         return sorted(products, key=lambda item: (0, rank[item["uid"].casefold()]) if item["uid"].casefold() in rank else (1, item["sort_order"]))
 
+    def _voice_scope_fragment(self, project: dict[str, Any], account_label: str) -> str:
+        root = safe_text(project.get("voice_root")) or DEFAULT_OUTPUT_ROOT
+        return str(voice_user_dir(root, project, account_label)) if safe_text(account_label) else ""
+
     def _manifest_entry(
         self,
         *,
@@ -1066,11 +1122,27 @@ class WorkflowService:
         product: dict[str, Any],
         source_label: str,
         display_template: str = "",
+        preferred_voice_path_contains: str = "",
     ) -> dict[str, Any]:
         uid = safe_text(product.get("uid") or ("INTRO" if block["script_type"] == "intro" else "PRICE_TRANSITION"))
-        voice = self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label, script_block_id=int(block["id"]), text_hash=safe_text(block["text_hash"]))
+        voice = None
+        if preferred_voice_path_contains:
+            voice = self._ready_asset(
+                assets,
+                asset_type="voice",
+                uid=uid,
+                account_label=account_label,
+                script_block_id=int(block["id"]),
+                text_hash=safe_text(block["text_hash"]),
+                path_contains=preferred_voice_path_contains,
+            )
+        if not voice:
+            voice = self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label, script_block_id=int(block["id"]), text_hash=safe_text(block["text_hash"]))
         if not voice and block["script_type"] == "product":
-            voice = self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label)
+            if preferred_voice_path_contains:
+                voice = self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label, path_contains=preferred_voice_path_contains)
+            if not voice:
+                voice = self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label)
         template_suffix = display_template.split("-", 1)[1] if display_template and "-" in display_template else ""
         display_user = user_for_template(display_template)
         image = None

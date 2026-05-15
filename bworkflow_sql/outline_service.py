@@ -59,7 +59,12 @@ class OutlineService:
             "",
         ]
 
-        lines += ["## 引言文案", "", "### 引言1", "", ""]
+        lines += ["## 引言文案", ""]
+        if parsed and parsed.intro_scripts:
+            for block in parsed.intro_scripts:
+                lines += [f"### {block.label or '版本一'}", block.body.strip(), ""]
+        else:
+            lines += ["### 版本一", "", ""]
 
         lines += ["## 商品文案", ""]
         for product in products:

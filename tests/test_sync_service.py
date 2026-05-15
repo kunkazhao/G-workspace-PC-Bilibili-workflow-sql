@@ -193,6 +193,36 @@ def test_asset_sync_ignores_extra_files_and_reports_missing_scheme_products(tmp_
     assert result["unmatched_items"][0]["asset_type"] == "image"
 
 
+def test_asset_sync_reports_added_removed_and_current_items(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    image_root = tmp_path / "images"
+    image_root.mkdir()
+    matched = image_root / "1-AB001-Keyboard.png"
+    matched.write_bytes(b"image")
+    project_id = db.upsert_project({"name": "keyboard", "image_root": str(image_root)})
+    repo.upsert_products_from_master(
+        project_id,
+        [{"uid": "AB001", "title": "Keyboard", "price_label": "199"}],
+    )
+
+    first = SyncService(db).sync_assets(project_id, asset_type="image", root_override=image_root)
+    second = SyncService(db).sync_assets(project_id, asset_type="image", root_override=image_root)
+    matched.unlink()
+    third = SyncService(db).sync_assets(project_id, asset_type="image", root_override=image_root)
+
+    assert [item["uid"] for item in first["added_items"]] == ["AB001"]
+    assert first["removed_items"] == []
+    assert [item["uid"] for item in first["current_items"]] == ["AB001"]
+    assert second["added_items"] == []
+    assert second["removed_items"] == []
+    assert [item["uid"] for item in second["current_items"]] == ["AB001"]
+    assert third["added_items"] == []
+    assert [item["uid"] for item in third["removed_items"]] == ["AB001"]
+    assert third["current_items"] == []
+    assert repo.asset_bindings(project_id)[0]["status"] == "stale"
+
+
 def test_voice_asset_sync_includes_intro_and_price_transition_blocks(tmp_path: Path):
     db = Database(tmp_path / "test.db")
     repo = Repository(db)
@@ -237,3 +267,39 @@ def test_voice_asset_sync_includes_intro_and_price_transition_blocks(tmp_path: P
     assets = repo.asset_bindings(project_id)
     assert any(asset["uid"] == "INTRO" and asset["block_label"] == "引言2" for asset in assets)
     assert any(asset["uid"] == "PRICE_TRANSITION" and asset["block_label"] == "200元以下" for asset in assets)
+
+
+def test_voice_asset_sync_ignores_other_category_account_folders(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    voice_root = tmp_path / "voice"
+    right = voice_root / "数码-键盘" / "小燃" / "0-价格-300-500元.wav"
+    wrong = voice_root / "数码-有线耳机" / "小燃" / "0-价格-300-500元.wav"
+    right.parent.mkdir(parents=True)
+    wrong.parent.mkdir(parents=True)
+    right.write_bytes(b"right")
+    wrong.write_bytes(b"wrong")
+    project_id = db.upsert_project({"name": "数码-键盘", "category_name": "键盘", "voice_root": str(voice_root)})
+    parsed = parse_markdown_text(
+        """
+## 价格过渡文案
+
+### 300-500元
+这个价位
+""".strip()
+    )
+    SyncService(db).sync_markdown_payload(project_id, parsed)
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO accounts (label, account_id, created_at, updated_at)
+            VALUES ('小燃', 'xiaoran', 'now', 'now')
+            """
+        )
+
+    result = SyncService(db).sync_assets(project_id, asset_type="voice", root_override=voice_root)
+
+    assert result["voice"] == 1
+    assert result["matched_items"][0]["path"] == str(right)
+    assets = repo.asset_bindings(project_id)
+    assert [asset["path"] for asset in assets if asset["asset_type"] == "voice"] == [str(right)]

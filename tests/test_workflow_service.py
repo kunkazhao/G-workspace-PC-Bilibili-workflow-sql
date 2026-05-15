@@ -11,7 +11,14 @@ from bworkflow_sql.settings import INTERNAL_WORKSPACE_ROOT
 from bworkflow_sql.sync_service import SyncService
 from bworkflow_sql.utils import now_iso, text_hash
 import bworkflow_sql.workflow_service as workflow_service_module
-from bworkflow_sql.workflow_service import DEFAULT_CLOSING_TEXT, VoiceJob, WorkflowService, compress_internal_silence, unique_path
+from bworkflow_sql.workflow_service import (
+    DEFAULT_CLOSING_TEXT,
+    VoiceJob,
+    WorkflowService,
+    compress_internal_silence,
+    prepend_silence,
+    unique_path,
+)
 
 
 def seed_project(tmp_path: Path):
@@ -75,6 +82,17 @@ def write_test_wav(path: Path, segments: list[tuple[float, float]], *, frame_rat
         writer.setsampwidth(2)
         writer.setframerate(frame_rate)
         writer.writeframes(b"".join(struct.pack("<h", sample) for sample in samples))
+
+
+def test_expected_voice_output_dir_matches_account_and_category(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    repo = Repository(db)
+    project = repo.project(project_id)
+    account = repo.accounts()[0]
+
+    output_dir = WorkflowService(db).expected_voice_output_dir(project_id, account_label=account["label"])
+
+    assert output_dir == Path(project["voice_root"]) / project["name"] / account["label"]
 
 
 def test_workflow_commands_use_internal_tasks(tmp_path: Path):
@@ -142,7 +160,7 @@ def test_voice_filename_uses_price_uid_title_and_duplicate_suffix(tmp_path: Path
     )
 
     assert service._voice_filename(job) == "229-JP097-京东京造JZ990Pro-这是.wav"
-    existing = Path(project["voice_root"]) / "小燃-有线耳机" / service._voice_filename(job)
+    existing = Path(project["voice_root"]) / project["name"] / "小燃" / service._voice_filename(job)
     existing.parent.mkdir(parents=True)
     existing.write_bytes(b"voice")
     assert unique_path(existing).name == "229-JP097-京东京造JZ990Pro-这是-1.wav"
@@ -185,7 +203,7 @@ def test_assembly_generates_spoken_markdown_and_internal_manifest_from_database(
     project = repo.project(project_id)
     image_path = Path(project["image_root"]) / "59-YXEJ002-竹林鸟夜莺Z1.png"
     video_path = Path(project["video_root"]) / "59-YXEJ002-竹林鸟夜莺Z1.mp4"
-    voice_path = Path(project["voice_root"]) / "小燃-有线耳机" / "01-YXEJ002-竹林鸟夜莺Z1.wav"
+    voice_path = Path(project["voice_root"]) / project["name"] / "小燃" / "01-YXEJ002-竹林鸟夜莺Z1.wav"
     image_path.parent.mkdir(parents=True)
     video_path.parent.mkdir(parents=True)
     voice_path.parent.mkdir(parents=True)
@@ -236,6 +254,53 @@ def test_assembly_generates_spoken_markdown_and_internal_manifest_from_database(
     intro_entry = next(entry for entry in payload["entries"] if entry["section"] == "intro")
     assert intro_entry["image_path"] == ""
     assert intro_entry["video_path"] == ""
+
+
+def test_assembly_prefers_current_category_voice_for_shared_price_transition(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    repo = Repository(db)
+    service = WorkflowService(db)
+    repo.upsert_products_from_master(project_id, [{"uid": "JP071", "title": "狼蛛F87ProV2超神版", "price_label": "359元"}])
+    with db.connect() as conn:
+        conn.execute("UPDATE projects SET name='数码-键盘', category_name='键盘' WHERE id=?", (project_id,))
+        conn.execute(
+            """
+            INSERT INTO script_blocks
+                (project_id, script_type, owner_uid, price_range_label, block_label, script_id, body, text_hash, source, source_anchor, created_at, updated_at)
+            VALUES (?, 'price_transition', '', '300-500元', '正文', 'price:300-500:V001', ?, ?, 'test', '', 'now', 'now')
+            """,
+            (project_id, "300到500元值得重点看。", text_hash("300到500元值得重点看。")),
+        )
+    price_block = next(
+        block
+        for block in repo.script_blocks(project_id)
+        if block["script_type"] == "price_transition" and block["price_range_label"] == "300-500元"
+    )
+    wrong_voice = tmp_path / "voice" / "数码-有线耳机" / "小燃" / "0-价格-300-500元.wav"
+    right_voice = tmp_path / "voice" / "数码-键盘" / "小燃" / "0-价格-300-500元.wav"
+    wrong_voice.parent.mkdir(parents=True)
+    right_voice.parent.mkdir(parents=True)
+    wrong_voice.write_bytes(b"wrong")
+    right_voice.write_bytes(b"right")
+    with db.connect() as conn:
+        for path in (wrong_voice, right_voice):
+            conn.execute(
+                """
+                INSERT INTO asset_bindings
+                    (project_id, uid, script_block_id, asset_type, account_label, account_id, block_label, script_id, text_hash, path, status, source_kind, created_at, updated_at)
+                VALUES (?, 'PRICE_TRANSITION', ?, 'voice', '小燃', 'xiaoran', '300-500元', 'price:300-500:V001', ?, ?, 'ready', 'test', 'now', 'now')
+                """,
+                (project_id, price_block["id"], price_block["text_hash"], str(path)),
+            )
+
+    result = service.assemble_spoken_script(project_id, account_label="小燃", product_uids=["JP071"])
+
+    assert result.returncode == 0
+    spoken_path = Path(repo.project(project_id)["spoken_md_path"])
+    manifest_path = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "manifests" / f"{spoken_path.stem}.manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    transition = next(entry for entry in payload["entries"] if entry["price_range_label"] == "300-500元")
+    assert transition["audio_path"] == str(right_voice)
 
 
 def test_assembly_writes_reader_friendly_spoken_markdown_without_repeated_price_sections(tmp_path: Path):
@@ -318,7 +383,7 @@ def test_assembly_matches_imported_voice_by_uid_account_and_hash_without_script_
     repo = Repository(db)
     service = WorkflowService(db)
     project = repo.project(project_id)
-    voice_path = Path(project["voice_root"]) / "小燃-有线耳机" / "59-YXEJ002-竹林鸟夜莺Z1.wav"
+    voice_path = Path(project["voice_root"]) / project["name"] / "小燃" / "59-YXEJ002-竹林鸟夜莺Z1.wav"
     voice_path.parent.mkdir(parents=True)
     voice_path.write_bytes(b"voice")
     product_block = next(block for block in repo.script_blocks(project_id) if block["script_type"] == "product")
@@ -364,6 +429,33 @@ def test_jianying_intro_video_filters_intro_manifest_entries(tmp_path: Path):
     assert payload["intro_video_path"] == str(intro_video)
     assert all(entry.get("section") != "intro" for entry in payload["entries"])
     assert any(entry.get("type") == "product" for entry in payload["entries"])
+
+
+def test_jianying_generation_skips_subtitles_by_default(tmp_path: Path, monkeypatch):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    project = Repository(db).project(project_id)
+    result = service.run_command(service.build_assembly_command(project_id, account_label="小燃"))
+    assert result.returncode == 0
+    spoken_path = Path(project["spoken_md_path"])
+    manifest_path = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "manifests" / f"{spoken_path.stem}.manifest.json"
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd: list[str]):
+        captured["cmd"] = cmd
+        return workflow_service_module.WorkflowRunResult(cmd, returncode=0, stdout="ok\n")
+
+    monkeypatch.setattr(workflow_service_module, "run_subprocess_text", fake_run)
+
+    draft = service.generate_jianying_draft(
+        project_id,
+        manifest_path=manifest_path,
+        draft_name="test-draft",
+        draft_root=tmp_path / "drafts",
+    )
+
+    assert draft.returncode == 0
+    assert "--skip-subtitles" in captured["cmd"]
 
 
 def test_top_mode_writes_top_products_before_price_transitions_and_adds_closing(tmp_path: Path):
@@ -466,6 +558,22 @@ def test_compress_internal_silence_shortens_only_internal_long_pauses(tmp_path: 
     assert result["removed_ms"] == 380
 
 
+def test_prepend_silence_adds_100ms_to_wav_start(tmp_path: Path):
+    audio_path = tmp_path / "voice.wav"
+    write_test_wav(audio_path, [(0.2, 0.6)], frame_rate=1000)
+
+    result = prepend_silence(audio_path)
+
+    assert result["changed"] is True
+    assert result["silence_ms"] == 100
+    with wave.open(str(audio_path), "rb") as reader:
+        assert reader.getnframes() == 300
+        first_frames = reader.readframes(100)
+        next_frames = reader.readframes(2)
+    assert first_frames == b"\x00" * 100 * 2
+    assert next_frames != b"\x00" * 2 * 2
+
+
 def test_generate_one_voice_runs_new_project_audio_postprocess(tmp_path: Path, monkeypatch):
     db, project_id = seed_project(tmp_path)
     service = WorkflowService(db)
@@ -504,3 +612,5 @@ def test_generate_one_voice_runs_new_project_audio_postprocess(tmp_path: Path, m
 
     assert output_path.exists()
     assert called["path"] == output_path
+    with wave.open(str(output_path), "rb") as reader:
+        assert round(reader.getnframes() * 1000 / reader.getframerate()) == 1000

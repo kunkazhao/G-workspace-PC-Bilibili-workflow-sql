@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .asset_paths import legacy_voice_user_dir, voice_user_dir
 from .db import Database
 from .master_data import MasterDataService, display_name
 from .repositories import Repository
@@ -125,7 +126,7 @@ class LegacyImportService:
         media_index_counts = self._import_media_index_assets(project_id, parent_category=parent_category, category=category)
         image_count = self._import_images(project_id, parent_category=parent_category, category=category)
         video_count = self._import_videos(project_id, parent_category=parent_category, category=category)
-        voice_asset_count = self._import_voice_assets(project_id, category=category)
+        voice_asset_count = self._import_voice_assets(project_id, parent_category=parent_category, category=category)
         return {
             "project_id": project_id,
             "accounts": account_count,
@@ -250,12 +251,27 @@ class LegacyImportService:
                     counts["video"] += 1
         return counts
 
-    def _import_voice_assets(self, project_id: int, *, category: str) -> int:
+    def _import_voice_assets(self, project_id: int, *, parent_category: str, category: str) -> int:
         root = DEFAULT_VOICE_ROOT
         accounts = {item["account_id"]: item for item in self.repo.accounts()}
         allowed_uids = {item["uid"] for item in self.repo.products(project_id, include_removed=False)}
+        project = {"name": f"{parent_category}-{category}", "category_parent_name": parent_category, "category_name": category}
         count = 0
-        for registry_path in root.glob(f"*{category}/audio_segment_registry.json"):
+        registry_paths: list[Path] = []
+        seen: set[str] = set()
+        for account in accounts.values():
+            for candidate in (
+                voice_user_dir(root, project, safe_text(account.get("label"))),
+                legacy_voice_user_dir(root, project, safe_text(account.get("label"))),
+            ):
+                registry_path = candidate / "audio_segment_registry.json"
+                key = str(registry_path).casefold()
+                if key not in seen and registry_path.exists():
+                    seen.add(key)
+                    registry_paths.append(registry_path)
+        if not registry_paths:
+            registry_paths = list(root.glob(f"*{category}/audio_segment_registry.json"))
+        for registry_path in registry_paths:
             payload = _read_json(registry_path)
             entries = payload.get("entries") if isinstance(payload, dict) else []
             for entry in entries if isinstance(entries, list) else []:
