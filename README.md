@@ -45,6 +45,10 @@ Workflow:
 - 组合口播稿
 - 生成剪映草稿
 
+Tools:
+
+- 单独配音：directly synthesize pasted text or a whole MD document without binding the result to a category project.
+
 The UI is intentionally direct and database-first. JSON/Markdown support is compatibility and import/export, not the primary app state.
 
 ## Recommended Flow
@@ -67,6 +71,21 @@ Output rules:
 - The spoken script manifest is an internal task file under `data/workspace/project-<id>/manifests/`.
 - Internal generated files are kept under `data/workspace`.
 - Jianying drafts are written to `E:\剪辑-剪映\草稿\JianyingPro Drafts`.
+- Standalone voice files default to `G:\2026项目-b站` and do not write `asset_bindings`.
+
+## Voice Generation Notes
+
+- Project voice generation writes SQLite asset bindings for matched script blocks.
+- Standalone voice generation accepts either a configured user voice or one uploaded reference audio file. The two voice sources are mutually exclusive.
+- Standalone MD input supports `.md` files only and sends the whole cleaned document as one dubbing job.
+- Generated WAV files go through a conservative silence cleanup pass:
+  - leading silence over `300ms` is trimmed to `120ms`;
+  - leading silence shorter than `100ms` is padded to `100ms`;
+  - trailing silence over `500ms` is trimmed to `200ms`;
+  - internal silence up to `300ms` is left untouched;
+  - internal silence from `300ms` to `800ms` is trimmed to `220ms`;
+  - internal silence over `800ms` is trimmed to `350ms`.
+- Fine-grained word-internal pause correction is intentionally left for a later ASR-alignment tool instead of aggressive automatic trimming during generation.
 
 ## Jianying Draft Notes
 
