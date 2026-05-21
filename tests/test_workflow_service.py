@@ -16,6 +16,9 @@ from bworkflow_sql.workflow_service import (
     VoiceJob,
     WorkflowService,
     compress_internal_silence,
+    markdown_file_to_voice_text,
+    markdown_to_voice_text,
+    normalize_generated_voice_silence,
     prepend_silence,
     unique_path,
 )
@@ -159,11 +162,11 @@ def test_voice_filename_uses_price_uid_title_and_duplicate_suffix(tmp_path: Path
         kind="product",
     )
 
-    assert service._voice_filename(job) == "229-JP097-京东京造JZ990Pro-这是.wav"
+    assert service._voice_filename(job) == "229-JP097-京东京造JZ990Pro-正文.wav"
     existing = Path(project["voice_root"]) / project["name"] / "小燃" / service._voice_filename(job)
     existing.parent.mkdir(parents=True)
     existing.write_bytes(b"voice")
-    assert unique_path(existing).name == "229-JP097-京东京造JZ990Pro-这是-1.wav"
+    assert unique_path(existing).name == "229-JP097-京东京造JZ990Pro-正文-1.wav"
 
 
 def test_export_markdown_uses_database_asset_bindings_and_asset_sync_dedupes(tmp_path: Path):
@@ -458,6 +461,108 @@ def test_jianying_generation_skips_subtitles_by_default(tmp_path: Path, monkeypa
     assert "--skip-subtitles" in captured["cmd"]
 
 
+def test_export_subtitle_srt_from_manifest_text_and_audio(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    intro_audio = tmp_path / "intro.wav"
+    product_audio = tmp_path / "product.wav"
+    write_test_wav(intro_audio, [(1.0, 0.5)])
+    write_test_wav(product_audio, [(2.0, 0.5)])
+    manifest = tmp_path / "口播稿.manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "type": "transition",
+                        "order_index": 1,
+                        "section": "intro",
+                        "product_uid": "INTRO",
+                        "product_name": "引言",
+                        "text": "今天聊有线耳机。",
+                        "audio_path": str(intro_audio),
+                    },
+                    {
+                        "type": "product",
+                        "order_index": 2,
+                        "section": "product",
+                        "product_uid": "YXEJ002",
+                        "product_name": "竹林鸟夜莺Z1",
+                        "text": "这是第一句。这里是第二句。",
+                        "audio_path": str(product_audio),
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "out.srt"
+
+    result = service.export_subtitle_srt(project_id, manifest_path=manifest, output_path=output)
+
+    assert result.returncode == 0
+    text = output.read_text(encoding="utf-8-sig")
+    assert "00:00:00,000 -->" in text
+    assert "今天聊有线耳机。" in text
+    assert "这是第一句。这里是第二句。" in text
+    assert "00:00:03,000" in text
+
+
+def test_export_subtitle_srt_offsets_when_intro_video_is_selected(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    intro_audio = tmp_path / "intro.wav"
+    product_audio = tmp_path / "product.wav"
+    intro_video = tmp_path / "intro-video.wav"
+    write_test_wav(intro_audio, [(1.0, 0.5)])
+    write_test_wav(product_audio, [(2.0, 0.5)])
+    write_test_wav(intro_video, [(1.5, 0.5)])
+    manifest = tmp_path / "口播稿.manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "type": "transition",
+                        "order_index": 1,
+                        "section": "intro",
+                        "product_uid": "INTRO",
+                        "product_name": "引言",
+                        "text": "这段引言来自 manifest。",
+                        "audio_path": str(intro_audio),
+                    },
+                    {
+                        "type": "product",
+                        "order_index": 2,
+                        "section": "product",
+                        "product_uid": "YXEJ002",
+                        "product_name": "竹林鸟夜莺Z1",
+                        "text": "商品字幕从引言视频后开始。",
+                        "audio_path": str(product_audio),
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "out.srt"
+
+    result = service.export_subtitle_srt(
+        project_id,
+        manifest_path=manifest,
+        output_path=output,
+        intro_video_path=intro_video,
+    )
+
+    assert result.returncode == 0
+    text = output.read_text(encoding="utf-8-sig")
+    assert "这段引言来自 manifest。" not in text
+    assert "00:00:01,500 -->" in text
+    assert "商品字幕从引言视频后开始。" in text
+
+
 def test_top_mode_writes_top_products_before_price_transitions_and_adds_closing(tmp_path: Path):
     db, project_id = seed_project(tmp_path)
     repo = Repository(db)
@@ -554,8 +659,72 @@ def test_compress_internal_silence_shortens_only_internal_long_pauses(tmp_path: 
     assert result["changed"] is True
     assert result["compressed_count"] == 1
     assert result["original_ms"] == 900
-    assert result["fixed_ms"] == 520
-    assert result["removed_ms"] == 380
+    assert result["fixed_ms"] == 620
+    assert result["removed_ms"] == 280
+
+
+def test_compress_internal_silence_keeps_pauses_up_to_300ms(tmp_path: Path):
+    audio_path = tmp_path / "natural-pause.wav"
+    write_test_wav(
+        audio_path,
+        [
+            (0.2, 0.6),
+            (0.3, 0.0),
+            (0.2, 0.6),
+        ],
+        frame_rate=10000,
+    )
+
+    result = compress_internal_silence(audio_path)
+
+    assert result["changed"] is False
+    assert result["compressed_count"] == 0
+    with wave.open(str(audio_path), "rb") as reader:
+        assert reader.getnframes() == 7000
+
+
+def test_compress_internal_silence_trims_very_long_internal_pauses_to_350ms(tmp_path: Path):
+    audio_path = tmp_path / "very-long-silence.wav"
+    write_test_wav(
+        audio_path,
+        [
+            (0.2, 0.6),
+            (1.0, 0.0),
+            (0.2, 0.6),
+        ],
+        frame_rate=10000,
+    )
+
+    result = compress_internal_silence(audio_path)
+
+    assert result["changed"] is True
+    assert result["compressed_count"] == 1
+    with wave.open(str(audio_path), "rb") as reader:
+        assert reader.getnframes() == 7500
+
+
+def test_normalize_generated_voice_silence_applies_coarse_generation_filter(tmp_path: Path):
+    audio_path = tmp_path / "generated.wav"
+    write_test_wav(
+        audio_path,
+        [
+            (0.5, 0.0),
+            (0.2, 0.6),
+            (0.5, 0.0),
+            (0.2, 0.6),
+            (1.0, 0.0),
+            (0.2, 0.6),
+            (0.8, 0.0),
+        ],
+        frame_rate=10000,
+    )
+
+    result = normalize_generated_voice_silence(audio_path)
+
+    assert result["changed"] is True
+    assert result["changed_count"] == 4
+    assert [change["type"] for change in result["changes"]] == ["leading", "internal", "internal_long", "trailing"]
+    assert result["fixed_ms"] == 1490
 
 
 def test_prepend_silence_adds_100ms_to_wav_start(tmp_path: Path):
@@ -596,11 +765,11 @@ def test_generate_one_voice_runs_new_project_audio_postprocess(tmp_path: Path, m
 
     called: dict[str, Path] = {}
 
-    def fake_compress(path: Path, **_: object) -> dict[str, object]:
+    def fake_normalize(path: Path, **_: object) -> dict[str, object]:
         called["path"] = path
         return {"enabled": True, "changed": True}
 
-    monkeypatch.setattr(workflow_service_module, "compress_internal_silence", fake_compress)
+    monkeypatch.setattr(workflow_service_module, "normalize_generated_voice_silence", fake_normalize)
 
     output_path = service._generate_one_voice(
         FakeHttp(),
@@ -613,4 +782,109 @@ def test_generate_one_voice_runs_new_project_audio_postprocess(tmp_path: Path, m
     assert output_path.exists()
     assert called["path"] == output_path
     with wave.open(str(output_path), "rb") as reader:
-        assert round(reader.getnframes() * 1000 / reader.getframerate()) == 1000
+        assert round(reader.getnframes() * 1000 / reader.getframerate()) == 900
+
+
+def test_markdown_file_to_voice_text_keeps_document_as_single_text(tmp_path: Path):
+    md = tmp_path / "稿件.md"
+    md.write_text(
+        """---
+title: 测试
+---
+<!-- script_id: internal -->
+# 标题
+
+第一段内容。
+
+## 小节
+- 第二段内容。
+""",
+        encoding="utf-8",
+    )
+
+    text = markdown_file_to_voice_text(md)
+
+    assert text == "标题\n第一段内容。\n小节\n第二段内容。"
+    assert "\n\n" not in text
+
+
+def test_markdown_file_to_voice_text_rejects_non_md(tmp_path: Path):
+    path = tmp_path / "稿件.txt"
+    path.write_text("文字", encoding="utf-8")
+
+    try:
+        markdown_file_to_voice_text(path)
+    except ValueError as exc:
+        assert "只支持选择 MD 文档" in str(exc)
+    else:
+        raise AssertionError("non-md file should be rejected")
+
+
+def test_synthesize_standalone_voice_with_configured_account_does_not_bind_assets(tmp_path: Path, monkeypatch):
+    db, _project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    generated_path = tmp_path / "generated.wav"
+    write_test_wav(generated_path, [(0.2, 0.6)])
+    captured: dict[str, object] = {}
+
+    class FakeHttp:
+        def __init__(self, timeout: float = 60.0) -> None:
+            self.timeout = timeout
+
+        def post(self, url: str, json_payload: dict[str, object] | None = None) -> dict[str, str]:
+            captured["url"] = url
+            captured["payload"] = json_payload or {}
+            return {"audio_path": str(generated_path)}
+
+    monkeypatch.setattr(workflow_service_module, "JsonHttpClient", FakeHttp)
+    monkeypatch.setattr(WorkflowService, "_ensure_tts_api_ready", lambda self, http, **kwargs: None)
+    monkeypatch.setattr(WorkflowService, "_ensure_registered_voice", lambda self, http, **kwargs: None)
+
+    result = service.synthesize_standalone_voice(
+        "这是一段单独配音。",
+        account_label="小燃",
+        output_dir=tmp_path / "standalone",
+        source_label="粘贴文本",
+    )
+
+    assert result.returncode == 0
+    assert str(captured["url"]).endswith("/v1/clone/voice")
+    assert captured["payload"]["voice_id"] == "voice-1"
+    output_files = list((tmp_path / "standalone").glob("*.wav"))
+    assert len(output_files) == 1
+    assert output_files[0].name.startswith("单独配音-小燃音色-粘贴文本-")
+    assert db.fetchone("SELECT COUNT(*) AS c FROM asset_bindings WHERE asset_type='voice'")["c"] == 0
+
+
+def test_synthesize_standalone_voice_with_reference_audio_uses_clone_path(tmp_path: Path, monkeypatch):
+    db, _project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    reference = tmp_path / "参考.wav"
+    generated_path = tmp_path / "generated.wav"
+    write_test_wav(reference, [(0.2, 0.4)])
+    write_test_wav(generated_path, [(0.2, 0.6)])
+    captured: dict[str, object] = {}
+
+    class FakeHttp:
+        def __init__(self, timeout: float = 60.0) -> None:
+            self.timeout = timeout
+
+        def post(self, url: str, json_payload: dict[str, object] | None = None) -> dict[str, str]:
+            captured["url"] = url
+            captured["payload"] = json_payload or {}
+            return {"audio_path": str(generated_path)}
+
+    monkeypatch.setattr(workflow_service_module, "JsonHttpClient", FakeHttp)
+    monkeypatch.setattr(WorkflowService, "_ensure_tts_api_ready", lambda self, http, **kwargs: None)
+
+    result = service.synthesize_standalone_voice(
+        markdown_to_voice_text("# 标题\n\n正文"),
+        reference_audio_path=reference,
+        output_dir=tmp_path / "standalone",
+        source_label="稿件",
+    )
+
+    assert result.returncode == 0
+    assert str(captured["url"]).endswith("/v1/clone")
+    assert captured["payload"]["speaker_audio_path"] == str(reference)
+    assert len(list((tmp_path / "standalone").glob("*.wav"))) == 1

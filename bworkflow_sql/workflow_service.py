@@ -26,6 +26,7 @@ from .settings import (
     DEFAULT_INDEXTTS_DIR,
     DEFAULT_JIANYING_DRAFT_ROOT,
     DEFAULT_OUTPUT_ROOT,
+    DEFAULT_STANDALONE_VOICE_ROOT,
     DEFAULT_TTS_API_BASE_URL,
     INTERNAL_WORKSPACE_ROOT,
 )
@@ -49,10 +50,15 @@ DEFAULT_TTS_FIELDS = {
     "verbose": False,
 }
 DEFAULT_SILENCE_THRESHOLD_DB = -45.0
-DEFAULT_MIN_SILENCE_MS = 280
-DEFAULT_KEEP_SILENCE_MS = 120
+DEFAULT_MIN_SILENCE_MS = 300
+DEFAULT_KEEP_SILENCE_MS = 220
+DEFAULT_LONG_SILENCE_MS = 800
+DEFAULT_LONG_SILENCE_KEEP_MS = 350
 DEFAULT_SILENCE_CHUNK_MS = 10
 DEFAULT_LEADING_SILENCE_MS = 100
+DEFAULT_MAX_LEADING_SILENCE_MS = 120
+DEFAULT_TRAILING_SILENCE_LIMIT_MS = 500
+DEFAULT_TRAILING_SILENCE_KEEP_MS = 200
 INTERNAL_PREFIX = "internal:"
 DEFAULT_DISPLAY_VIDEO_SLOT = {
     "x": 1100,
@@ -110,16 +116,59 @@ def dbfs_for_chunk(chunk: bytes, sample_width: int) -> float:
     return 20.0 * math.log10(rms / peak)
 
 
+def silence_ranges_for_audio(
+    raw_audio: bytes,
+    *,
+    frame_count: int,
+    frame_rate: int,
+    bytes_per_frame: int,
+    sample_width: int,
+    threshold_db: float = DEFAULT_SILENCE_THRESHOLD_DB,
+    chunk_ms: int = DEFAULT_SILENCE_CHUNK_MS,
+) -> list[tuple[int, int, bool]]:
+    if chunk_ms <= 0:
+        raise ValueError("chunk_ms must be greater than 0")
+
+    chunk_frames = max(1, seconds_to_frames(chunk_ms / 1000.0, frame_rate))
+    chunks: list[tuple[int, int, bool]] = []
+    start_frame = 0
+    while start_frame < frame_count:
+        end_frame = min(frame_count, start_frame + chunk_frames)
+        start_byte = start_frame * bytes_per_frame
+        end_byte = end_frame * bytes_per_frame
+        chunk = raw_audio[start_byte:end_byte]
+        chunks.append((start_frame, end_frame, dbfs_for_chunk(chunk, sample_width) <= threshold_db))
+        start_frame = end_frame
+
+    if not chunks:
+        return []
+
+    ranges: list[tuple[int, int, bool]] = []
+    current_start, current_end, current_silence = chunks[0]
+    for chunk_start, chunk_end, is_silence in chunks[1:]:
+        if is_silence == current_silence:
+            current_end = chunk_end
+            continue
+        ranges.append((current_start, current_end, current_silence))
+        current_start, current_end, current_silence = chunk_start, chunk_end, is_silence
+    ranges.append((current_start, current_end, current_silence))
+    return ranges
+
+
 def compress_internal_silence(
     audio_path: Path,
     *,
     threshold_db: float = DEFAULT_SILENCE_THRESHOLD_DB,
     min_silence_ms: int = DEFAULT_MIN_SILENCE_MS,
     keep_silence_ms: int = DEFAULT_KEEP_SILENCE_MS,
+    long_silence_ms: int = DEFAULT_LONG_SILENCE_MS,
+    long_keep_silence_ms: int = DEFAULT_LONG_SILENCE_KEEP_MS,
     chunk_ms: int = DEFAULT_SILENCE_CHUNK_MS,
 ) -> dict[str, Any]:
-    if min_silence_ms <= keep_silence_ms:
-        return {"enabled": True, "changed": False, "reason": "min_silence_ms <= keep_silence_ms"}
+    if min_silence_ms < keep_silence_ms:
+        return {"enabled": True, "changed": False, "reason": "min_silence_ms < keep_silence_ms"}
+    if long_silence_ms < min_silence_ms or long_keep_silence_ms < keep_silence_ms:
+        return {"enabled": True, "changed": False, "reason": "invalid long silence thresholds"}
     if chunk_ms <= 0:
         raise ValueError("静音修音参数错误：chunk_ms 必须大于 0。")
 
@@ -137,32 +186,22 @@ def compress_internal_silence(
         return {"enabled": True, "changed": False, "reason": f"unsupported sample width {sample_width}"}
 
     bytes_per_frame = channel_count * sample_width
-    chunk_frames = max(1, seconds_to_frames(chunk_ms / 1000.0, frame_rate))
     min_silence_frames = seconds_to_frames(min_silence_ms / 1000.0, frame_rate)
     keep_silence_frames = seconds_to_frames(keep_silence_ms / 1000.0, frame_rate)
-    chunks: list[tuple[int, int, bool]] = []
+    long_silence_frames = seconds_to_frames(long_silence_ms / 1000.0, frame_rate)
+    long_keep_silence_frames = seconds_to_frames(long_keep_silence_ms / 1000.0, frame_rate)
+    ranges = silence_ranges_for_audio(
+        raw_audio,
+        frame_count=frame_count,
+        frame_rate=frame_rate,
+        bytes_per_frame=bytes_per_frame,
+        sample_width=sample_width,
+        threshold_db=threshold_db,
+        chunk_ms=chunk_ms,
+    )
 
-    start_frame = 0
-    while start_frame < frame_count:
-        end_frame = min(frame_count, start_frame + chunk_frames)
-        start_byte = start_frame * bytes_per_frame
-        end_byte = end_frame * bytes_per_frame
-        chunk = raw_audio[start_byte:end_byte]
-        chunks.append((start_frame, end_frame, dbfs_for_chunk(chunk, sample_width) <= threshold_db))
-        start_frame = end_frame
-
-    if not chunks:
+    if not ranges:
         return {"enabled": True, "changed": False, "reason": "no chunks"}
-
-    ranges: list[tuple[int, int, bool]] = []
-    current_start, current_end, current_silence = chunks[0]
-    for chunk_start, chunk_end, is_silence in chunks[1:]:
-        if is_silence == current_silence:
-            current_end = chunk_end
-            continue
-        ranges.append((current_start, current_end, current_silence))
-        current_start, current_end, current_silence = chunk_start, chunk_end, is_silence
-    ranges.append((current_start, current_end, current_silence))
 
     output_parts: list[bytes] = []
     compressed: list[dict[str, Any]] = []
@@ -170,8 +209,9 @@ def compress_internal_silence(
     for index, (start, end, is_silence) in enumerate(ranges):
         duration_frames = end - start
         keep_frames = duration_frames
-        if is_silence and 0 < index < last_index and duration_frames >= min_silence_frames:
-            keep_frames = min(duration_frames, keep_silence_frames)
+        if is_silence and 0 < index < last_index and duration_frames > min_silence_frames:
+            target_frames = long_keep_silence_frames if duration_frames > long_silence_frames else keep_silence_frames
+            keep_frames = min(duration_frames, target_frames)
             compressed.append(
                 {
                     "start_seconds": round(start / frame_rate, 3),
@@ -190,6 +230,8 @@ def compress_internal_silence(
             "threshold_db": threshold_db,
             "min_silence_ms": min_silence_ms,
             "keep_silence_ms": keep_silence_ms,
+            "long_silence_ms": long_silence_ms,
+            "long_keep_silence_ms": long_keep_silence_ms,
             "compressed_count": 0,
         }
 
@@ -213,6 +255,8 @@ def compress_internal_silence(
         "threshold_db": threshold_db,
         "min_silence_ms": min_silence_ms,
         "keep_silence_ms": keep_silence_ms,
+        "long_silence_ms": long_silence_ms,
+        "long_keep_silence_ms": long_keep_silence_ms,
         "compressed_count": len(compressed),
         "compressed": compressed,
         "original_ms": original_ms,
@@ -255,6 +299,136 @@ def prepend_silence(audio_path: Path, *, silence_ms: int = DEFAULT_LEADING_SILEN
         "enabled": True,
         "changed": True,
         "silence_ms": round(silence_frames * 1000 / frame_rate),
+    }
+
+
+def normalize_generated_voice_silence(
+    audio_path: Path,
+    *,
+    threshold_db: float = DEFAULT_SILENCE_THRESHOLD_DB,
+    chunk_ms: int = DEFAULT_SILENCE_CHUNK_MS,
+    leading_min_ms: int = DEFAULT_LEADING_SILENCE_MS,
+    leading_trim_limit_ms: int = 300,
+    leading_keep_ms: int = DEFAULT_MAX_LEADING_SILENCE_MS,
+    trailing_trim_limit_ms: int = DEFAULT_TRAILING_SILENCE_LIMIT_MS,
+    trailing_keep_ms: int = DEFAULT_TRAILING_SILENCE_KEEP_MS,
+    internal_trim_limit_ms: int = DEFAULT_MIN_SILENCE_MS,
+    internal_keep_ms: int = DEFAULT_KEEP_SILENCE_MS,
+    internal_long_limit_ms: int = DEFAULT_LONG_SILENCE_MS,
+    internal_long_keep_ms: int = DEFAULT_LONG_SILENCE_KEEP_MS,
+) -> dict[str, Any]:
+    if chunk_ms <= 0:
+        raise ValueError("chunk_ms must be greater than 0")
+
+    with wave.open(str(audio_path), "rb") as reader:
+        params = reader.getparams()
+        frame_rate = reader.getframerate()
+        frame_count = reader.getnframes()
+        channel_count = reader.getnchannels()
+        sample_width = reader.getsampwidth()
+        raw_audio = reader.readframes(frame_count)
+
+    if frame_rate <= 0 or frame_count <= 0:
+        return {"enabled": True, "changed": False, "reason": "empty audio"}
+    if channel_count <= 0 or sample_width not in {1, 2, 3, 4}:
+        return {"enabled": True, "changed": False, "reason": "unsupported wav params"}
+
+    bytes_per_frame = channel_count * sample_width
+    ranges = silence_ranges_for_audio(
+        raw_audio,
+        frame_count=frame_count,
+        frame_rate=frame_rate,
+        bytes_per_frame=bytes_per_frame,
+        sample_width=sample_width,
+        threshold_db=threshold_db,
+        chunk_ms=chunk_ms,
+    )
+    if not ranges:
+        return {"enabled": True, "changed": False, "reason": "no chunks"}
+
+    leading_min_frames = seconds_to_frames(leading_min_ms / 1000.0, frame_rate)
+    leading_trim_limit_frames = seconds_to_frames(leading_trim_limit_ms / 1000.0, frame_rate)
+    leading_keep_frames = seconds_to_frames(leading_keep_ms / 1000.0, frame_rate)
+    trailing_trim_limit_frames = seconds_to_frames(trailing_trim_limit_ms / 1000.0, frame_rate)
+    trailing_keep_frames = seconds_to_frames(trailing_keep_ms / 1000.0, frame_rate)
+    internal_trim_limit_frames = seconds_to_frames(internal_trim_limit_ms / 1000.0, frame_rate)
+    internal_keep_frames = seconds_to_frames(internal_keep_ms / 1000.0, frame_rate)
+    internal_long_limit_frames = seconds_to_frames(internal_long_limit_ms / 1000.0, frame_rate)
+    internal_long_keep_frames = seconds_to_frames(internal_long_keep_ms / 1000.0, frame_rate)
+
+    output_parts: list[bytes] = []
+    changes: list[dict[str, Any]] = []
+    last_index = len(ranges) - 1
+    leading_kept_frames = 0
+    for index, (start, end, is_silence) in enumerate(ranges):
+        duration_frames = end - start
+        keep_frames = duration_frames
+        reason = ""
+        if is_silence and index == 0:
+            leading_kept_frames = duration_frames
+            if duration_frames > leading_trim_limit_frames:
+                keep_frames = min(duration_frames, leading_keep_frames)
+                leading_kept_frames = keep_frames
+                reason = "leading"
+        elif is_silence and index == last_index:
+            if duration_frames > trailing_trim_limit_frames:
+                keep_frames = min(duration_frames, trailing_keep_frames)
+                reason = "trailing"
+        elif is_silence and duration_frames > internal_trim_limit_frames:
+            target_frames = internal_long_keep_frames if duration_frames > internal_long_limit_frames else internal_keep_frames
+            keep_frames = min(duration_frames, target_frames)
+            reason = "internal_long" if duration_frames > internal_long_limit_frames else "internal"
+
+        if reason and keep_frames < duration_frames:
+            changes.append(
+                {
+                    "type": reason,
+                    "start_seconds": round(start / frame_rate, 3),
+                    "original_ms": round(duration_frames * 1000 / frame_rate),
+                    "kept_ms": round(keep_frames * 1000 / frame_rate),
+                }
+            )
+        start_byte = start * bytes_per_frame
+        end_byte = (start + keep_frames) * bytes_per_frame
+        output_parts.append(raw_audio[start_byte:end_byte])
+
+    prefix_frames = 0
+    if leading_kept_frames < leading_min_frames:
+        prefix_frames = leading_min_frames - leading_kept_frames
+        output_parts.insert(0, b"\x00" * prefix_frames * bytes_per_frame)
+
+    if not changes and prefix_frames <= 0:
+        return {
+            "enabled": True,
+            "changed": False,
+            "threshold_db": threshold_db,
+            "changed_count": 0,
+        }
+
+    fixed_audio = b"".join(output_parts)
+    temp_path = audio_path.with_name(f"{audio_path.stem}.voicefix.tmp{audio_path.suffix}")
+    try:
+        with wave.open(str(temp_path), "wb") as writer:
+            writer.setparams(params)
+            writer.writeframes(fixed_audio)
+        temp_path.replace(audio_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+    original_ms = round(frame_count * 1000 / frame_rate)
+    fixed_frames = len(fixed_audio) // bytes_per_frame
+    fixed_ms = round(fixed_frames * 1000 / frame_rate)
+    return {
+        "enabled": True,
+        "changed": True,
+        "threshold_db": threshold_db,
+        "changed_count": len(changes) + (1 if prefix_frames > 0 else 0),
+        "changes": changes,
+        "prepended_ms": round(prefix_frames * 1000 / frame_rate),
+        "original_ms": original_ms,
+        "fixed_ms": fixed_ms,
+        "removed_ms": original_ms - fixed_ms,
     }
 
 
@@ -446,6 +620,7 @@ class WorkflowService:
         account_label: str = "",
         uids: list[str] | None = None,
         script_ids: list[str] | None = None,
+        output_dir: str | Path | None = None,
         start_service_if_needed: bool = True,
         progress_hook: Callable[[str], None] | None = None,
     ) -> WorkflowRunResult:
@@ -462,7 +637,7 @@ class WorkflowService:
         voice_id = safe_text(account.get("voice_id") or account.get("account_id"))
         if not voice_id:
             raise ValueError(f"用户“{account.get('label') or account_label}”缺少音色标识。")
-        out_dir = self._voice_output_dir(project, account=account, account_label=account_label)
+        out_dir = Path(output_dir) if safe_text(output_dir) else self._voice_output_dir(project, account=account, account_label=account_label)
         out_dir.mkdir(parents=True, exist_ok=True)
         jobs = self._voice_jobs(project_id, uids=uids, script_ids=script_ids)
         if not jobs:
@@ -501,6 +676,84 @@ class WorkflowService:
             returncode=0 if not failures else 1,
             stdout="\n".join(logs) + "\n",
             stderr="\n".join(failures),
+        )
+
+    def synthesize_standalone_voice(
+        self,
+        text: str,
+        *,
+        account_label: str = "",
+        reference_audio_path: str | Path | None = None,
+        output_dir: str | Path | None = None,
+        output_name: str = "",
+        source_label: str = "",
+        start_service_if_needed: bool = True,
+        progress_hook: Callable[[str], None] | None = None,
+    ) -> WorkflowRunResult:
+        body = safe_text(text).strip()
+        if not body:
+            raise ValueError("请先输入要配音的文字，或选择包含文字的 MD 文档。")
+
+        account_label = safe_text(account_label)
+        reference_text = safe_text(reference_audio_path)
+        if bool(account_label) == bool(reference_text):
+            raise ValueError("请选择一个已配置用户音色，或上传一个参考音频文件，二者必须且只能选一个。")
+
+        logs: list[str] = []
+
+        def emit(message: str) -> None:
+            logs.append(message)
+            if progress_hook:
+                progress_hook(message)
+
+        out_dir = Path(output_dir) if safe_text(output_dir) else DEFAULT_STANDALONE_VOICE_ROOT
+        out_dir.mkdir(parents=True, exist_ok=True)
+        http = JsonHttpClient(timeout=600.0)
+        self._ensure_tts_api_ready(http, logs=logs, start_if_needed=start_service_if_needed, progress_hook=progress_hook)
+
+        if account_label:
+            account = self._resolve_account(account_label)
+            if not account:
+                raise ValueError(f"未找到配音用户：{account_label}")
+            voice_id = safe_text(account.get("voice_id") or account.get("account_id"))
+            if not voice_id:
+                raise ValueError(f"用户“{account_label}”缺少音色标识。")
+            self._ensure_registered_voice(http, voice_id=voice_id, account=account, logs=logs, progress_hook=progress_hook)
+            voice_label = safe_text(account.get("voice_name") or account.get("label") or voice_id)
+            endpoint = f"{DEFAULT_TTS_API_BASE_URL.rstrip('/')}/v1/clone/voice"
+            payload = {"voice_id": voice_id, "text": body, **DEFAULT_TTS_FIELDS}
+            emit(f"[音色] 使用已配置用户音色：{account_label}")
+        else:
+            reference = Path(reference_text)
+            if not reference.exists():
+                raise ValueError(f"参考音频文件不存在：{reference}")
+            if not reference.is_file():
+                raise ValueError(f"参考音频路径不是文件：{reference}")
+            voice_label = reference.stem
+            endpoint = f"{DEFAULT_TTS_API_BASE_URL.rstrip('/')}/v1/clone"
+            payload = {"speaker_audio_path": str(reference), "text": body, **DEFAULT_TTS_FIELDS}
+            emit(f"[音色] 使用参考音频文件：{reference}")
+
+        filename = safe_text(output_name) or standalone_voice_filename(
+            voice_label=voice_label,
+            source_label=source_label,
+            text=body,
+        )
+        filename_stem = Path(filename).stem if Path(filename).suffix else filename
+        final_path = unique_path(out_dir / f"{safe_path_component(filename_stem)}.wav")
+        payload["output_name"] = final_path.name
+        emit(f"[配音任务] 文本 {len(body)} 字，输出目录：{out_dir}")
+        api_result = http.post(endpoint, json_payload=payload)
+        if not isinstance(api_result, dict):
+            raise ValueError(f"配音接口返回异常：{api_result}")
+        generated_path = Path(safe_text(api_result.get("audio_path")))
+        if not generated_path.exists():
+            raise ValueError(f"配音接口返回成功，但没有找到音频文件：{generated_path}")
+        output_path = self._finalize_generated_voice(generated_path, final_path)
+        emit(f"[成功] {output_path}")
+        return WorkflowRunResult(
+            [f"{INTERNAL_PREFIX}standalone-voice"],
+            stdout="\n".join(logs) + "\n",
         )
 
     def assemble_spoken_script(
@@ -713,6 +966,7 @@ class WorkflowService:
                 account_label=args.get("account-label", ""),
                 uids=split_csv(args.get("uids", "")) or None,
                 script_ids=split_csv(args.get("script-ids", "")) or None,
+                output_dir=args.get("output-dir", ""),
             )
         if cmd[0] == f"{INTERNAL_PREFIX}assembly":
             return self.assemble_spoken_script(
@@ -794,6 +1048,84 @@ class WorkflowService:
         manifest_dir.mkdir(parents=True, exist_ok=True)
         stem = Path(markdown_path).stem or "口播稿"
         return manifest_dir / f"{safe_path_component(stem)}.manifest.json"
+
+    def default_subtitle_srt_path(self, project_id: int, markdown_path: str | Path) -> Path:
+        subtitle_dir = self._internal_project_dir(project_id) / "subtitles"
+        subtitle_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(markdown_path).stem or "口播稿"
+        return subtitle_dir / f"{safe_path_component(stem)}.srt"
+
+    def export_subtitle_srt(
+        self,
+        project_id: int,
+        *,
+        manifest_path: str | Path,
+        output_path: str | Path | None = None,
+        intro_video_path: str | Path | None = None,
+    ) -> WorkflowRunResult:
+        self._required_project(project_id)
+        manifest = Path(manifest_path)
+        if not manifest.exists():
+            raise ValueError(f"缺少内部 manifest，请先组合口播稿：{manifest}")
+
+        payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
+        entries = subtitle_manifest_entries(payload)
+        intro_video = Path(safe_text(intro_video_path)) if safe_text(intro_video_path) else None
+        initial_offset = 0.0
+        if intro_video is not None:
+            if not intro_video.exists():
+                raise ValueError(f"引言成片视频不存在：{intro_video}")
+            initial_offset = probe_media_duration_seconds(intro_video)
+            entries = [entry for entry in entries if safe_text(entry.get("section")) != "intro"]
+
+        target = Path(output_path) if output_path else self.default_subtitle_srt_path(project_id, manifest.stem)
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        missing_text: list[str] = []
+        missing_audio: list[str] = []
+        srt_items: list[tuple[float, float, str]] = []
+        cursor = initial_offset
+        for entry in entries:
+            label = subtitle_entry_label(entry)
+            text = safe_text(entry.get("text")).strip()
+            audio_text = safe_text(entry.get("audio_path"))
+            if not text:
+                missing_text.append(label)
+            if not audio_text:
+                missing_audio.append(label)
+            if not text or not audio_text:
+                continue
+            audio_path = Path(audio_text)
+            if not audio_path.is_absolute():
+                audio_path = manifest.parent / audio_path
+            if not audio_path.exists():
+                missing_audio.append(f"{label}：{audio_path}")
+                continue
+            duration = probe_media_duration_seconds(audio_path)
+            for start, end, chunk_text in distribute_subtitle_text(text, cursor, duration):
+                srt_items.append((start, end, chunk_text))
+            cursor += duration
+
+        if missing_text or missing_audio:
+            detail: list[str] = []
+            if missing_text:
+                detail.append("缺字幕文本：" + "；".join(missing_text[:8]))
+            if missing_audio:
+                detail.append("缺配音文件：" + "；".join(missing_audio[:8]))
+            raise ValueError("\n".join(detail))
+        if not srt_items:
+            raise ValueError("manifest 中没有可导出的字幕条目。")
+
+        target.write_text(format_srt(srt_items), encoding="utf-8-sig")
+        total_duration = srt_items[-1][1]
+        stdout = (
+            f"字幕 SRT 已导出：{target}\n"
+            f"字幕条数：{len(srt_items)}\n"
+            f"总时长：{total_duration:.3f} 秒\n"
+        )
+        if intro_video is not None:
+            stdout += f"引言成片偏移：{initial_offset:.3f} 秒\n"
+        return WorkflowRunResult([f"{INTERNAL_PREFIX}subtitle"], stdout=stdout)
 
     def _voice_output_dir(self, project: dict[str, Any], *, account: dict[str, Any], account_label: str = "") -> Path:
         label = safe_text(account.get("label") or account_label or "voice")
@@ -901,23 +1233,22 @@ class WorkflowService:
         generated_path = Path(safe_text(api_result.get("audio_path")))
         if not generated_path.exists():
             raise ValueError(f"配音接口返回成功，但没有找到音频文件：{generated_path}")
-        output_dir.mkdir(parents=True, exist_ok=True)
+        return self._finalize_generated_voice(generated_path, final_path)
+
+    def _finalize_generated_voice(self, generated_path: Path, final_path: Path) -> Path:
+        final_path.parent.mkdir(parents=True, exist_ok=True)
         if generated_path.resolve() != final_path.resolve():
             shutil.move(str(generated_path), str(final_path))
-        compress_internal_silence(final_path)
-        prepend_silence(final_path)
+        normalize_generated_voice_silence(final_path)
         return final_path
 
     def _voice_filename(self, job: VoiceJob) -> str:
-        if job.kind == "product":
-            label = extract_label(safe_text(job.block.get("body"))) or safe_text(job.block.get("block_label"))
-        else:
-            label = safe_text(job.block.get("block_label")) or extract_label(safe_text(job.block.get("body")))
+        label = safe_text(job.block.get("block_label")) or extract_label(safe_text(job.block.get("body")))
         if job.kind == "product":
             price = self._voice_price_label(job.price_label)
             parts = [price, job.uid, job.product_name, label]
         elif job.kind == "intro":
-            parts = ["0", "引言", job.product_name, label]
+            parts = ["0", "引言", label]
         elif job.kind == "price_transition":
             parts = ["0", "价格", job.price_range_label or job.product_name, label]
         else:
@@ -1426,6 +1757,164 @@ def unique_path(path: Path) -> Path:
         if not candidate.exists():
             return candidate
     raise ValueError(f"无法生成不重名文件：{path}")
+
+
+def standalone_voice_filename(*, voice_label: str, source_label: str = "", text: str = "") -> str:
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    source = safe_text(source_label) or extract_label(text, length=12) or "粘贴文本"
+    parts = ["单独配音", voice_label, source, timestamp]
+    return safe_path_component("-".join(part for part in parts if safe_text(part))) + ".wav"
+
+
+def markdown_to_voice_text(markdown: str) -> str:
+    text = safe_text(markdown)
+    text = re.sub(r"\A---\s*\n.*?\n---\s*\n?", "", text, flags=re.S)
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    text = re.sub(r"```.*?```", "", text, flags=re.S)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    cleaned_lines: list[str] = []
+    for line in text.splitlines():
+        line = re.sub(r"^\s{0,3}#{1,6}\s*", "", line)
+        line = re.sub(r"^\s{0,3}>\s?", "", line)
+        line = re.sub(r"^\s*[-*+]\s+", "", line)
+        line = re.sub(r"^\s*\d+[.)、]\s+", "", line)
+        line = re.sub(r"[*_~]{1,3}", "", line)
+        line = line.strip()
+        if line:
+            cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
+
+
+def markdown_file_to_voice_text(path: str | Path) -> str:
+    md_path = Path(path)
+    if md_path.suffix.casefold() != ".md":
+        raise ValueError("只支持选择 MD 文档。")
+    if not md_path.exists():
+        raise ValueError(f"MD 文档不存在：{md_path}")
+    if not md_path.is_file():
+        raise ValueError(f"MD 路径不是文件：{md_path}")
+    return markdown_to_voice_text(md_path.read_text(encoding="utf-8-sig"))
+
+
+def subtitle_manifest_entries(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        raw_entries = payload.get("entries") or payload.get("items") or []
+    elif isinstance(payload, list):
+        raw_entries = payload
+    else:
+        raw_entries = []
+    entries = [entry for entry in raw_entries if isinstance(entry, dict)]
+    return sorted(entries, key=lambda entry: int(entry.get("order_index") or entry.get("section_order") or 0))
+
+
+def subtitle_entry_label(entry: dict[str, Any]) -> str:
+    parts = [
+        f"#{entry.get('order_index') or entry.get('section_order')}" if entry.get("order_index") or entry.get("section_order") else "",
+        safe_text(entry.get("section") or entry.get("type")),
+        safe_text(entry.get("product_uid")),
+        safe_text(entry.get("product_name") or entry.get("source_label")),
+    ]
+    return " ".join(part for part in parts if part) or "未命名字幕段"
+
+
+def probe_media_duration_seconds(path: Path) -> float:
+    if path.suffix.casefold() == ".wav":
+        try:
+            with wave.open(str(path), "rb") as reader:
+                frame_rate = reader.getframerate()
+                frame_count = reader.getnframes()
+            if frame_rate > 0 and frame_count > 0:
+                return frame_count / frame_rate
+        except wave.Error:
+            pass
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "json",
+        str(path),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="ignore", check=False)
+    if completed.returncode != 0:
+        raise ValueError(f"无法读取媒体时长：{path}\n{completed.stderr.strip()}")
+    payload = json.loads(completed.stdout or "{}")
+    duration_text = safe_text(payload.get("format", {}).get("duration"))
+    if not duration_text:
+        raise ValueError(f"无法读取媒体时长：{path}")
+    duration = float(duration_text)
+    if duration <= 0:
+        raise ValueError(f"媒体时长必须大于 0：{path}")
+    return duration
+
+
+def split_subtitle_text(text: str, *, max_chars: int = 24) -> list[str]:
+    body = re.sub(r"\s+", "", safe_text(text))
+    if not body:
+        return []
+    clauses = [item for item in re.split(r"(?<=[。！？!?；;，,、])", body) if item]
+    chunks: list[str] = []
+    current = ""
+    for clause in clauses or [body]:
+        if len(clause) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.extend(clause[index : index + max_chars] for index in range(0, len(clause), max_chars))
+            continue
+        if current and len(current) + len(clause) > max_chars:
+            chunks.append(current)
+            current = clause
+        else:
+            current += clause
+    if current:
+        chunks.append(current)
+    return [chunk for chunk in chunks if chunk]
+
+
+def distribute_subtitle_text(text: str, start_sec: float, duration_sec: float) -> list[tuple[float, float, str]]:
+    chunks = split_subtitle_text(text)
+    if not chunks:
+        return []
+    total_weight = sum(max(len(chunk), 1) for chunk in chunks)
+    cursor = start_sec
+    segments: list[tuple[float, float, str]] = []
+    for index, chunk in enumerate(chunks):
+        if index == len(chunks) - 1:
+            end = start_sec + duration_sec
+        else:
+            end = cursor + duration_sec * (max(len(chunk), 1) / total_weight)
+        if end <= cursor:
+            end = cursor + 0.1
+        segments.append((cursor, end, chunk))
+        cursor = end
+    return segments
+
+
+def format_srt_timestamp(seconds: float) -> str:
+    total_ms = max(0, int(round(seconds * 1000)))
+    hours, rem = divmod(total_ms, 3_600_000)
+    minutes, rem = divmod(rem, 60_000)
+    secs, millis = divmod(rem, 1000)
+    return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
+
+
+def format_srt(items: list[tuple[float, float, str]]) -> str:
+    lines: list[str] = []
+    for index, (start, end, text) in enumerate(items, start=1):
+        lines.extend(
+            [
+                str(index),
+                f"{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}",
+                text,
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def extract_label(text: str, length: int = 2) -> str:

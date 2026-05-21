@@ -140,7 +140,7 @@ class AppEntry(ctk.CTkEntry):
 
 
 class AppComboBox(ctk.CTkComboBox):
-    """统一风格的下拉选择框。"""
+    """统一风格的下拉选择框。点击任意位置弹出下拉菜单，不可编辑文字。"""
 
     def __init__(self, master, values=None, **kwargs):
         super().__init__(
@@ -159,6 +159,23 @@ class AppComboBox(ctk.CTkComboBox):
             button_hover_color=UIStyle.COLOR_PRIMARY_HOVER,
             **kwargs,
         )
+        self._entry.bind("<Button>", self._on_click)
+        self._entry.bind("<Key>", lambda e: "break")
+
+    def _on_click(self, event=None):
+        self.after_idle(self._safe_open_dropdown)
+        return "break"
+
+    def _safe_open_dropdown(self):
+        try:
+            if not self.winfo_exists():
+                return
+            self._canvas.focus_set()
+            x = self.winfo_rootx()
+            y = self.winfo_rooty() + self.winfo_height()
+            self._dropdown_menu.tk_popup(x, y)
+        except Exception:
+            pass
 
 
 class AppLabel(ctk.CTkLabel):

@@ -7,6 +7,7 @@ import threading
 import tkinter as tk
 import traceback
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
@@ -39,6 +40,7 @@ from .settings import (
     DEFAULT_JIANYING_DRAFT_ROOT,
     DEFAULT_MARKDOWN_ROOT,
     DEFAULT_SPOKEN_MD_ROOT,
+    DEFAULT_STANDALONE_VOICE_ROOT,
     DEFAULT_VIDEO_ROOT,
     DEFAULT_VOICE_ROOT,
     INTERNAL_WORKSPACE_ROOT,
@@ -46,7 +48,7 @@ from .settings import (
 from .style_config import UIStyle
 from .sync_service import SyncService
 from .utils import compact_path, now_iso, safe_text, text_hash
-from .workflow_service import WorkflowService
+from .workflow_service import WorkflowRunResult, WorkflowService, markdown_file_to_voice_text
 
 
 ctk.set_appearance_mode("dark")
@@ -63,6 +65,19 @@ class DialogSection:
     rows: list[tuple[str, str]] = field(default_factory=list)
     items: list[str] = field(default_factory=list)
     helper: str = ""
+
+
+@dataclass
+class VoiceTaskDraft:
+    project_id: int
+    project_name: str
+    account_label: str
+    target_text: str = ""
+    output_dir: str = ""
+
+    @property
+    def display_target(self) -> str:
+        return self.target_text.strip() or "全部文案"
 
 
 @dataclass
@@ -115,20 +130,135 @@ def build_project_issue_summary(
     *,
     selected_user: str = "全部",
 ) -> dict[str, list[str]]:
+    return build_project_gap_details(
+        project,
+        products,
+        blocks,
+        assets,
+        accounts,
+        selected_user=selected_user,
+    )
+
+
+def selected_account_labels(accounts: list[dict[str, Any]], selected_user: str) -> list[str]:
+    labels = [safe_text(item.get("label")) for item in accounts if safe_text(item.get("label"))]
+    if selected_user == "全部":
+        return labels
+    return [selected_user] if selected_user else []
+
+
+def voice_block_uid(block: dict[str, Any]) -> str:
+    script_type = safe_text(block.get("script_type"))
+    if script_type == "intro":
+        return "INTRO"
+    if script_type == "price_transition":
+        return "PRICE_TRANSITION"
+    return safe_text(block.get("owner_uid"))
+
+
+def voice_block_match_label(block: dict[str, Any]) -> str:
+    if safe_text(block.get("script_type")) == "price_transition":
+        return safe_text(block.get("price_range_label"))
+    return safe_text(block.get("block_label"))
+
+
+def voice_block_display(block: dict[str, Any], products_by_uid: dict[str, dict[str, Any]] | None = None) -> str:
+    products_by_uid = products_by_uid or {}
+    script_type = safe_text(block.get("script_type"))
+    block_label = safe_text(block.get("block_label")) or "正文"
+    if script_type == "intro":
+        return f"引言 {block_label}"
+    if script_type == "price_transition":
+        price = safe_text(block.get("price_range_label")) or "未分组"
+        return f"价格过渡 {price} / {block_label}"
+    uid = safe_text(block.get("owner_uid"))
+    title = safe_text((products_by_uid.get(uid) or {}).get("title"))
+    return " ".join(part for part in [uid, title, block_label] if part)
+
+
+def collect_voice_status(
+    blocks: list[dict[str, Any]],
+    assets: list[dict[str, Any]],
+    accounts: list[dict[str, Any]],
+    products_by_uid: dict[str, dict[str, Any]],
+    *,
+    selected_user: str,
+) -> dict[str, Any]:
+    labels = selected_account_labels(accounts, selected_user)
+    rows: list[dict[str, str]] = []
+    for account_label in labels:
+        for block in blocks:
+            uid = voice_block_uid(block)
+            if not uid:
+                continue
+            display = voice_block_display(block, products_by_uid)
+            state = voice_state(
+                assets,
+                uid=uid,
+                account_label=account_label,
+                hashes={safe_text(block.get("text_hash"))},
+                block_label=voice_block_match_label(block),
+            )
+            rows.append(
+                {
+                    "account_label": account_label,
+                    "uid": uid,
+                    "display": display,
+                    "block_label": voice_block_match_label(block),
+                    "script_id": safe_text(block.get("script_id")),
+                    "script_type": safe_text(block.get("script_type")),
+                    "state": state,
+                }
+            )
+    total = len(rows)
+    missing = [row for row in rows if row["state"] == "missing"]
+    expired = [row for row in rows if row["state"] == "expired"]
+    ready = total - len(missing) - len(expired)
+    return {
+        "total": total,
+        "ready": ready,
+        "missing": missing,
+        "expired": expired,
+        "rows": rows,
+    }
+
+
+def voice_generation_targets_from_rows(rows: list[dict[str, str]]) -> list[str]:
+    product_uids: list[str] = []
+    script_ids: list[str] = []
+    seen_products: set[str] = set()
+    seen_scripts: set[str] = set()
+    for row in rows:
+        uid = safe_text(row.get("uid"))
+        script_id = safe_text(row.get("script_id"))
+        script_type = safe_text(row.get("script_type"))
+        if script_type == "product":
+            if uid and uid not in seen_products:
+                product_uids.append(uid)
+                seen_products.add(uid)
+            continue
+        if script_id and script_id not in seen_scripts:
+            script_ids.append(script_id)
+            seen_scripts.add(script_id)
+    return product_uids + script_ids
+
+
+def build_project_gap_details(
+    project: dict[str, Any],
+    products: list[dict[str, Any]],
+    blocks: list[dict[str, Any]],
+    assets: list[dict[str, Any]],
+    accounts: list[dict[str, Any]],
+    *,
+    selected_user: str = "全部",
+) -> dict[str, list[str]]:
     product_blocks: dict[str, list[dict[str, Any]]] = {}
-    product_hashes: dict[str, set[str]] = {}
-    intro_hashes: set[str] = set()
     for block in blocks:
         if block["script_type"] == "product":
             product_blocks.setdefault(block["owner_uid"], []).append(block)
-            product_hashes.setdefault(block["owner_uid"], set()).add(block["text_hash"])
-        elif block["script_type"] == "intro":
-            intro_hashes.add(block["text_hash"])
-    labels = [item["label"] for item in accounts if selected_user == "全部" or item["label"] == selected_user]
-    if not labels:
-        labels = [selected_user] if selected_user != "全部" else []
     issues: dict[str, list[str]] = {"missing_copy": [], "missing_image": [], "missing_video": [], "missing_voice": [], "expired_voice": []}
     image_account = "" if selected_user == "全部" else selected_user
+    products_by_uid = {safe_text(item.get("uid")): item for item in products}
     for product in products:
         uid = product["uid"]
         title = product["title"]
@@ -139,20 +269,17 @@ def build_project_issue_summary(
             issues["missing_image"].append(display)
         if not has_ready_asset(assets, uid=uid, asset_type="video"):
             issues["missing_video"].append(display)
-        if uid in product_blocks:
-            for label in labels:
-                state = voice_state(assets, uid=uid, account_label=label, hashes=product_hashes.get(uid, set()))
-                if state == "missing":
-                    issues["missing_voice"].append(f"{label} / {display}")
-                elif state == "expired":
-                    issues["expired_voice"].append(f"{label} / {display}")
-    for label in labels:
-        if intro_hashes:
-            state = voice_state(assets, uid="INTRO", account_label=label, hashes=intro_hashes)
-            if state == "missing":
-                issues["missing_voice"].append(f"{label} / 引言文案")
-            elif state == "expired":
-                issues["expired_voice"].append(f"{label} / 引言文案")
+    voice_status = collect_voice_status(
+        blocks,
+        assets,
+        accounts,
+        products_by_uid,
+        selected_user=selected_user,
+    )
+    for row in voice_status["missing"]:
+        issues["missing_voice"].append(f"{row['account_label']} / {row['display']}")
+    for row in voice_status["expired"]:
+        issues["expired_voice"].append(f"{row['account_label']} / {row['display']}")
     return issues
 
 
@@ -311,6 +438,44 @@ def preview_lines(items: list[str], limit: int = 18) -> list[str]:
     return lines
 
 
+def safe_file_component(value: str, fallback: str = "未命名") -> str:
+    text = safe_text(value).strip()
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text)
+    text = re.sub(r"\s+", " ", text).strip(" .")
+    return text or fallback
+
+
+def default_spoken_markdown_path(project: dict[str, Any], account_label: str = "") -> Path:
+    project_name = safe_file_component(
+        safe_text(project.get("name")) or safe_text(project.get("category_name")),
+        "品类名称",
+    )
+    user_label = safe_file_component(account_label, "用户")
+    return DEFAULT_SPOKEN_MD_ROOT / project_name / f"5月-{user_label}.md"
+
+
+def is_default_spoken_markdown_path(path_text: str) -> bool:
+    text = safe_text(path_text).strip().casefold()
+    if not text:
+        return True
+    return text.startswith(str(DEFAULT_SPOKEN_MD_ROOT).casefold())
+
+
+def account_label_from_spoken_path(path_text: str) -> str:
+    stem = Path(path_text).stem if safe_text(path_text) else ""
+    match = re.match(r"^5月-(?P<label>.+)$", stem)
+    return safe_text(match.group("label")) if match else ""
+
+
+def default_jianying_draft_name(project: dict[str, Any], account_label: str = "") -> str:
+    category = safe_file_component(
+        safe_text(project.get("category_name")) or safe_text(project.get("name")),
+        "品类",
+    )
+    user = safe_file_component(account_label, "用户")
+    return f"完整-{category}-{user}"
+
+
 def normalized_name(value: str | Path | None) -> str:
     text = Path(value).stem if isinstance(value, Path) else safe_text(value)
     text = re.sub(r"\s+", "", text)
@@ -463,15 +628,62 @@ def show_precheck_dialog(
         result["ok"] = ok
         dialog.destroy()
 
-    GhostButton(buttons, text=dismiss_text, command=lambda: close(False)).grid(row=0, column=1, padx=(0, UIStyle.PAD_SM))
-    if can_continue:
-        PrimaryButton(buttons, text=confirm_text, command=lambda: close(True)).grid(row=0, column=2)
+    if not can_continue and confirm_text == dismiss_text:
+        GhostButton(buttons, text=dismiss_text, command=lambda: close(False), width=140).grid(row=0, column=2)
     else:
-        GhostButton(buttons, text=confirm_text, command=lambda: close(False)).grid(row=0, column=2)
+        GhostButton(buttons, text=dismiss_text, command=lambda: close(False)).grid(row=0, column=1, padx=(0, UIStyle.PAD_SM))
+        if can_continue:
+            PrimaryButton(buttons, text=confirm_text, command=lambda: close(True)).grid(row=0, column=2)
+        else:
+            GhostButton(buttons, text=confirm_text, command=lambda: close(False)).grid(row=0, column=2)
     dialog.protocol("WM_DELETE_WINDOW", lambda: close(False))
     _center_dialog(dialog)
     dialog.wait_window()
     return result["ok"]
+
+
+def show_action_sections_dialog(
+    parent: tk.Widget,
+    title: str,
+    subtitle: str,
+    sections: list[DialogSection],
+    *,
+    action_text: str,
+    action_enabled: bool,
+    close_text: str = "关闭",
+) -> str:
+    dialog = ctk.CTkToplevel(parent)
+    dialog.title(title)
+    dialog.geometry("1180x860")
+    dialog.minsize(920, 680)
+    dialog.transient(parent.winfo_toplevel())
+    dialog.grab_set()
+    dialog.rowconfigure(0, weight=1)
+    dialog.columnconfigure(0, weight=1)
+    body = ctk.CTkScrollableFrame(dialog, fg_color="transparent")
+    body.grid(row=0, column=0, sticky="nsew", padx=UIStyle.PAD_XL, pady=(UIStyle.PAD_XL, UIStyle.PAD_MD))
+    for section in sections:
+        card = _build_dialog_section(body, section)
+        card.pack(fill="x", pady=(0, UIStyle.PAD_MD))
+
+    buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+    buttons.grid(row=1, column=0, sticky="ew", padx=UIStyle.PAD_XL, pady=(0, UIStyle.PAD_XL))
+    buttons.columnconfigure(0, weight=1)
+    result = {"action": "close"}
+
+    def close(action: str) -> None:
+        result["action"] = action
+        dialog.destroy()
+
+    action_button = PrimaryButton(buttons, text=action_text, command=lambda: close("action"))
+    action_button.grid(row=0, column=1, padx=(0, UIStyle.PAD_SM))
+    if not action_enabled:
+        action_button.configure(state="disabled")
+    GhostButton(buttons, text=close_text, command=lambda: close("close"), width=140).grid(row=0, column=2)
+    dialog.protocol("WM_DELETE_WINDOW", lambda: close("close"))
+    _center_dialog(dialog)
+    dialog.wait_window()
+    return result["action"]
 
 
 def show_confirmation_dialog(
@@ -521,31 +733,33 @@ class TaskProgressDialog(ctk.CTkToplevel):
     def __init__(self, parent: tk.Widget, title: str, message: str):
         super().__init__(parent)
         self.title(title)
-        self.geometry("1040x700")
-        self.minsize(820, 560)
+        self.geometry("1120x760")
+        self.minsize(900, 620)
         self.transient(parent.winfo_toplevel())
-        self.rowconfigure(1, weight=1)
+        self.configure(fg_color=UIStyle.COLOR_BG)
+        self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
 
         self.hero_title_var = ctk.StringVar(value=title)
         self.status_var = ctk.StringVar(value=message)
         self.detail_var = ctk.StringVar(value="")
+        self._log_count = 0
 
         shell = ctk.CTkFrame(self, fg_color="transparent")
-        shell.grid(row=0, column=0, sticky="nsew", padx=UIStyle.PAD_XL, pady=UIStyle.PAD_XL)
+        shell.grid(row=0, column=0, sticky="nsew", padx=UIStyle.PAD_XL, pady=(UIStyle.PAD_XL, UIStyle.PAD_MD))
         shell.rowconfigure(1, weight=1)
         shell.columnconfigure(0, weight=1)
 
         hero = ctk.CTkFrame(shell, fg_color="transparent")
-        hero.grid(row=0, column=0, sticky="ew", pady=(UIStyle.PAD_XL, UIStyle.PAD_LG))
+        hero.grid(row=0, column=0, sticky="ew", pady=(UIStyle.PAD_MD, UIStyle.PAD_XL))
         self.icon_label = ctk.CTkLabel(
             hero,
             text="✂",
-            font=("Microsoft YaHei", 72, "bold"),
+            font=("Microsoft YaHei", 52, "bold"),
             text_color=UIStyle.COLOR_INFO,
         )
-        self.icon_label.pack(pady=(0, UIStyle.PAD_MD))
-        ctk.CTkLabel(hero, textvariable=self.hero_title_var, font=("Microsoft YaHei", 30, "bold")).pack()
+        self.icon_label.pack(pady=(0, UIStyle.PAD_SM))
+        ctk.CTkLabel(hero, textvariable=self.hero_title_var, font=("Microsoft YaHei", 28, "bold")).pack()
         ctk.CTkLabel(
             hero,
             textvariable=self.status_var,
@@ -553,7 +767,7 @@ class TaskProgressDialog(ctk.CTkToplevel):
             text_color=UIStyle.COLOR_TEXT_DIM,
             justify="center",
             wraplength=860,
-        ).pack(pady=(UIStyle.PAD_MD, UIStyle.PAD_SM))
+        ).pack(pady=(UIStyle.PAD_SM, UIStyle.PAD_XS))
         self.detail_label = ctk.CTkLabel(
             hero,
             textvariable=self.detail_var,
@@ -563,18 +777,39 @@ class TaskProgressDialog(ctk.CTkToplevel):
         self.detail_label.pack()
 
         self.progress = ctk.CTkProgressBar(hero, mode="indeterminate", height=12, corner_radius=999)
-        self.progress.pack(fill="x", padx=140, pady=(UIStyle.PAD_LG, 0))
+        self.progress.pack(fill="x", padx=130, pady=(UIStyle.PAD_XL, 0))
         self.progress.start()
 
-        log_card = ctk.CTkFrame(shell, fg_color=UIStyle.COLOR_CARD_BG, corner_radius=UIStyle.RADIUS_LG, border_width=1, border_color=UIStyle.COLOR_BORDER)
+        log_card = ctk.CTkFrame(
+            shell,
+            fg_color=UIStyle.COLOR_CARD_BG,
+            corner_radius=UIStyle.RADIUS_LG,
+            border_width=1,
+            border_color="#33445F",
+        )
         log_card.grid(row=1, column=0, sticky="nsew")
         log_card.rowconfigure(1, weight=1)
         log_card.columnconfigure(0, weight=1)
-        ctk.CTkLabel(log_card, text="执行日志", font=UIStyle.FONT_H3).grid(
-            row=0, column=0, sticky="w", padx=UIStyle.PAD_LG, pady=(UIStyle.PAD_LG, UIStyle.PAD_SM)
+
+        log_header = ctk.CTkFrame(log_card, fg_color="transparent")
+        log_header.grid(row=0, column=0, sticky="ew", padx=UIStyle.PAD_LG, pady=(UIStyle.PAD_LG, UIStyle.PAD_MD))
+        ctk.CTkLabel(
+            log_header,
+            text="▣",
+            font=("Microsoft YaHei", 20, "bold"),
+            text_color=UIStyle.COLOR_INFO,
+        ).pack(side="left", padx=(0, UIStyle.PAD_SM))
+        ctk.CTkLabel(log_header, text="执行日志", font=("Microsoft YaHei", 18, "bold"), text_color=UIStyle.COLOR_TEXT_MAIN).pack(side="left")
+
+        self.log_scroll = ctk.CTkScrollableFrame(
+            log_card,
+            fg_color="transparent",
+            scrollbar_button_color="#42516A",
+            scrollbar_button_hover_color="#5B6B87",
         )
-        self.text = ctk.CTkTextbox(log_card, wrap="word")
-        self.text.grid(row=1, column=0, sticky="nsew", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_LG))
+        self.log_scroll.grid(row=1, column=0, sticky="nsew", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_SM))
+        self.log_scroll.grid_columnconfigure(0, weight=1)
+
         buttons = ctk.CTkFrame(shell, fg_color="transparent")
         buttons.grid(row=2, column=0, sticky="ew", pady=(UIStyle.PAD_LG, 0))
         buttons.columnconfigure(0, weight=1)
@@ -589,13 +824,96 @@ class TaskProgressDialog(ctk.CTkToplevel):
     def append(self, text: str) -> None:
         if not self.winfo_exists():
             return
-        value = text.rstrip()
-        if not value:
-            return
-        self.text.configure(state="normal")
-        self.text.insert("end", value + "\n")
-        self.text.see("end")
-        self.text.configure(state="disabled")
+        for value in text.splitlines():
+            value = value.strip()
+            if not value:
+                continue
+            self._append_log_row(value)
+
+    def _append_log_row(self, value: str) -> None:
+        self._log_count += 1
+        kind, tag, message = self._parse_log_line(value)
+        color = {
+            "success": UIStyle.COLOR_SUCCESS,
+            "error": UIStyle.COLOR_ERROR,
+            "warning": UIStyle.COLOR_WARNING,
+            "info": "#4B83F1",
+        }.get(kind, "#4B83F1")
+        icon = {"success": "✓", "error": "×", "warning": "!", "info": "i"}.get(kind, "i")
+
+        row = ctk.CTkFrame(self.log_scroll, fg_color="transparent")
+        row.grid(row=self._log_count * 2, column=0, sticky="ew", padx=0, pady=0)
+        row.grid_columnconfigure(3, weight=1)
+
+        icon_label = ctk.CTkLabel(
+            row,
+            text=icon,
+            width=24,
+            height=24,
+            corner_radius=999,
+            fg_color=color,
+            text_color="#07111F",
+            font=("Microsoft YaHei", 12, "bold"),
+        )
+        icon_label.grid(row=0, column=0, sticky="nw", padx=(0, UIStyle.PAD_MD), pady=UIStyle.PAD_SM)
+
+        ctk.CTkLabel(
+            row,
+            text=datetime.now().strftime("%H:%M:%S"),
+            width=78,
+            font=UIStyle.FONT_BODY,
+            text_color=UIStyle.COLOR_TEXT_DIM,
+            anchor="w",
+        ).grid(row=0, column=1, sticky="nw", padx=(0, UIStyle.PAD_MD), pady=UIStyle.PAD_SM)
+
+        ctk.CTkLabel(
+            row,
+            text=tag,
+            width=98,
+            height=26,
+            corner_radius=UIStyle.RADIUS_MD,
+            fg_color="#1A315A",
+            text_color="#6EA8FF",
+            font=("Microsoft YaHei", 12, "bold"),
+        ).grid(row=0, column=2, sticky="nw", padx=(0, UIStyle.PAD_MD), pady=(UIStyle.PAD_SM - 1, UIStyle.PAD_SM))
+
+        ctk.CTkLabel(
+            row,
+            text=message or value,
+            font=UIStyle.FONT_BODY,
+            text_color=UIStyle.COLOR_TEXT_MAIN,
+            justify="left",
+            anchor="w",
+            wraplength=720,
+        ).grid(row=0, column=3, sticky="ew", pady=UIStyle.PAD_SM)
+
+        line = ctk.CTkFrame(self.log_scroll, fg_color="#223047", height=1)
+        line.grid(row=self._log_count * 2 + 1, column=0, sticky="ew")
+        canvas = getattr(self.log_scroll, "_parent_canvas", None)
+        if canvas is not None:
+            canvas.yview_moveto(1.0)
+
+    def _parse_log_line(self, value: str) -> tuple[str, str, str]:
+        match = re.match(r"^\[(?P<tag>[^\]]+)\]\s*(?P<body>.*)$", value)
+        if match:
+            tag = match.group("tag").strip()
+            body = match.group("body").strip()
+        elif "：" in value:
+            tag, body = value.split("：", 1)
+            tag = tag.strip()[:8] or "日志"
+            body = body.strip()
+        else:
+            tag, body = "日志", value
+
+        if tag.startswith("成功") or "完成" in value or "已就绪" in value:
+            kind = "success"
+        elif tag.startswith("失败") or "失败" in value or "错误" in value:
+            kind = "error"
+        elif "未启动" in value or "跳过" in value or "警告" in value or "退出码：1" in value:
+            kind = "warning"
+        else:
+            kind = "info"
+        return kind, tag, body
 
     def finish(self, message: str, *, kind: str = "success", headline: str | None = None, detail: str = "") -> None:
         if not self.winfo_exists():
@@ -709,6 +1027,34 @@ TYPE_LABELS = {
     "price_transition": "价格过渡",
 }
 
+
+def entry_asset_lines(entries: list[dict[str, Any]], *, include_intro: bool = True) -> list[str]:
+    lines: list[str] = []
+    for entry in entries:
+        section = safe_text(entry.get("section"))
+        entry_type = safe_text(entry.get("type"))
+        if not include_intro and section == "intro":
+            continue
+        label = " ".join(
+            part
+            for part in [
+                f"#{entry.get('order_index') or entry.get('index')}" if entry.get("order_index") or entry.get("index") else "",
+                TYPE_LABELS.get(section) or entry_type,
+                safe_text(entry.get("product_uid")),
+                safe_text(entry.get("product_name")),
+                safe_text(entry.get("source_label")),
+            ]
+            if part
+        )
+        label = label or "未命名段落"
+        lines.append(f"{label}｜配音：{safe_text(entry.get('audio_path')) or '未匹配'}")
+        if entry_type == "product":
+            lines.append(f"{label}｜图片：{safe_text(entry.get('image_path')) or '未匹配'}")
+            video_path = safe_text(entry.get("display_video_path")) or safe_text(entry.get("video_path"))
+            lines.append(f"{label}｜视频：{video_path or '未匹配'}")
+    return lines
+
+
 COLUMN_WIDTHS = {
     "品类": 80,
     "类型": 80,
@@ -767,6 +1113,7 @@ class App(ctk.CTk):
         groups = {
             "配置": ["品类项目", "文案中心", "资产中心", "同步中心", "用户管理"],
             "工作流": ["生成配音", "组合口播稿", "生成剪映草稿"],
+            "工具": ["单独配音"],
         }
         for group, names in groups.items():
             ctk.CTkLabel(
@@ -1032,6 +1379,7 @@ class ProjectPage(BasePage):
         act = ctk.CTkFrame(content, fg_color="transparent")
         act.pack(fill="x", pady=(0, UIStyle.PAD_MD))
         PrimaryButton(act, text="创建/更新文案框架", command=self._init_outline).pack(side="left", padx=(0, UIStyle.PAD_SM))
+        GhostButton(act, text="刷新 Master", command=self._refresh_master_for_current, width=96).pack(side="left", padx=(0, UIStyle.PAD_SM))
         ctk.CTkLabel(act, text="Master、MD、素材同步请到“同步中心”统一操作。", font=UIStyle.FONT_SMALL, text_color=UIStyle.COLOR_TEXT_DIM).pack(side="left", padx=UIStyle.PAD_SM)
 
         # Log
@@ -1116,29 +1464,60 @@ class ProjectPage(BasePage):
             return
         if not self.fields["md_path"].get().strip():
             self.fields["md_path"].set(str(self.outline.default_markdown_path(project["id"])))
-        path = filedialog.asksaveasfilename(
-            defaultextension=".md", filetypes=[("Markdown", "*.md"), ("All", "*.*")],
-            initialdir=str(DEFAULT_MARKDOWN_ROOT),
-            initialfile=Path(self.fields["md_path"].get()).name,
-        )
+        md_file = Path(self.fields["md_path"].get())
+        initialdir = str(md_file.parent if md_file.parent.exists() else DEFAULT_MARKDOWN_ROOT)
+        dialog_options = {
+            "defaultextension": ".md",
+            "filetypes": [("Markdown", "*.md"), ("All", "*.*")],
+            "initialdir": initialdir,
+            "initialfile": md_file.name,
+        }
+        if md_file.exists():
+            path = filedialog.askopenfilename(title="选择要更新的 MD 文档", **dialog_options)
+        else:
+            path = filedialog.asksaveasfilename(title="创建新的 MD 文档", **dialog_options)
         if not path:
             return
         if not confirm_project_markdown_path(self, project, path):
             return
 
-        def work() -> tuple[dict[str, Any], dict[str, Any]]:
+        def work() -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
+            master_result = self.sync.sync_master_scheme(project["id"], apply_changes=True) if safe_text(project.get("scheme_id")) else None
             result = self.outline.init_or_update_outline(project["id"], path)
             sync_result = self.sync.sync_markdown(project["id"])
-            return result, sync_result
+            return master_result, result, sync_result
 
-        def on_success(payload: tuple[dict[str, Any], dict[str, Any]]) -> None:
-            result, sync_result = payload
+        def on_success(payload: tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]) -> None:
+            master_result, result, sync_result = payload
             self.fields["md_path"].set(result["target_path"])
+            if master_result:
+                self.log(f"Master 已刷新：新增 {len(master_result['added'])}，更新 {len(master_result['updated'])}，移除 {len(master_result['removed'])}。")
             self.log(f"文案框架已更新：商品 {result['total']} 个，新增 {len(result['added'])}，保留 {len(result['preserved'])}。")
             self.log(f"已同步 MD 到数据库：入库 {sync_result['upserted']} 条。")
             self.toast("文案框架已更新")
 
         self.app.run_background("创建文案框架", work, on_success=on_success, success_message="文案框架已更新", show_success_toast=False)
+
+    def _refresh_master_for_current(self) -> None:
+        project = self.app.current_project()
+        if not project:
+            messagebox.showinfo("需要品类项目", "请先在“品类项目”中创建或选择项目。")
+            return
+        if not safe_text(project.get("scheme_id")):
+            messagebox.showinfo("缺少 Master 方案", "当前项目还没有绑定 Master 方案。")
+            return
+
+        def on_success(result: dict[str, Any]) -> None:
+            self.refresh()
+            self.log(f"Master 已刷新：新增 {len(result['added'])}，更新 {len(result['updated'])}，移除 {len(result['removed'])}。")
+            self.toast("Master 已刷新")
+
+        self.app.run_background(
+            "刷新 Master",
+            lambda: self.sync.sync_master_scheme(project["id"], apply_changes=True),
+            on_success=on_success,
+            show_success_toast=False,
+        )
 
     def refresh(self) -> None:
         projects = self.repo.projects()
@@ -1335,6 +1714,7 @@ class ProjectPageDialog(BasePage):
         action_row = ctk.CTkFrame(content, fg_color="transparent")
         action_row.pack(fill="x", pady=(0, UIStyle.PAD_MD))
         PrimaryButton(action_row, text="创建/更新文案框架", command=self._init_outline).pack(side="left", padx=(0, UIStyle.PAD_SM))
+        GhostButton(action_row, text="刷新 Master", command=self._refresh_master_for_current, width=96).pack(side="left", padx=(0, UIStyle.PAD_SM))
         ctk.CTkLabel(
             action_row,
             text="Master、MD、素材同步请到“同步中心”统一操作。",
@@ -1553,30 +1933,61 @@ class ProjectPageDialog(BasePage):
             messagebox.showinfo("需要品类项目", "请先在“品类项目”中创建或选择项目。")
             return
         md_path = self.fields["md_path"].get().strip() or str(self.outline.default_markdown_path(project["id"]))
-        path = filedialog.asksaveasfilename(
-            defaultextension=".md", filetypes=[("Markdown", "*.md"), ("All", "*.*")],
-            initialdir=str(DEFAULT_MARKDOWN_ROOT),
-            initialfile=Path(md_path).name,
-        )
+        md_file = Path(md_path)
+        initialdir = str(md_file.parent if md_file.parent.exists() else DEFAULT_MARKDOWN_ROOT)
+        dialog_options = {
+            "defaultextension": ".md",
+            "filetypes": [("Markdown", "*.md"), ("All", "*.*")],
+            "initialdir": initialdir,
+            "initialfile": md_file.name,
+        }
+        if md_file.exists():
+            path = filedialog.askopenfilename(title="选择要更新的 MD 文档", **dialog_options)
+        else:
+            path = filedialog.asksaveasfilename(title="创建新的 MD 文档", **dialog_options)
         if not path:
             return
         if not confirm_project_markdown_path(self, project, path):
             return
 
-        def work() -> tuple[dict[str, Any], dict[str, Any]]:
+        def work() -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
+            master_result = self.sync.sync_master_scheme(project["id"], apply_changes=True) if safe_text(project.get("scheme_id")) else None
             result = self.outline.init_or_update_outline(project["id"], path)
             sync_result = self.sync.sync_markdown(project["id"])
-            return result, sync_result
+            return master_result, result, sync_result
 
-        def on_success(payload: tuple[dict[str, Any], dict[str, Any]]) -> None:
-            result, sync_result = payload
+        def on_success(payload: tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]) -> None:
+            master_result, result, sync_result = payload
             self.fields["md_path"].set(result["target_path"])
             self.display_labels["md_path"].set(result["target_path"])
+            if master_result:
+                self.log(f"Master 已刷新：新增 {len(master_result['added'])}，更新 {len(master_result['updated'])}，移除 {len(master_result['removed'])}。")
             self.log(f"文案框架已更新：商品 {result['total']} 个，新增 {len(result['added'])}，保留 {len(result['preserved'])}。")
             self.log(f"已同步 MD 到数据库：入库 {sync_result['upserted']} 条。")
             self.toast("文案框架已更新")
 
         self.app.run_background("创建文案框架", work, on_success=on_success, success_message="文案框架已更新", show_success_toast=False)
+
+    def _refresh_master_for_current(self) -> None:
+        project = self.app.current_project()
+        if not project:
+            messagebox.showinfo("需要品类项目", "请先在“品类项目”中创建或选择项目。")
+            return
+        if not safe_text(project.get("scheme_id")):
+            messagebox.showinfo("缺少 Master 方案", "当前项目还没有绑定 Master 方案。")
+            return
+
+        def on_success(result: dict[str, Any]) -> None:
+            self.refresh()
+            self.log(f"Master 已刷新：新增 {len(result['added'])}，更新 {len(result['updated'])}，移除 {len(result['removed'])}。")
+            self.toast("Master 已刷新")
+
+        self.app.run_background(
+            "刷新 Master",
+            lambda: self.sync.sync_master_scheme(project["id"], apply_changes=True),
+            on_success=on_success,
+            show_success_toast=False,
+        )
 
     def refresh(self) -> None:
         projects = self.repo.projects()
@@ -2422,37 +2833,41 @@ class SyncStatusCard(ctk.CTkFrame):
         self.title_label = ctk.CTkLabel(
             self,
             text=title,
-            font=("Microsoft YaHei", 15, "bold"),
+            font=("Microsoft YaHei", 17, "bold"),
             text_color=UIStyle.COLOR_TEXT_MAIN,
             anchor="w",
         )
-        self.title_label.pack(anchor="w", padx=UIStyle.PAD_LG, pady=(UIStyle.PAD_LG, UIStyle.PAD_SM))
+        self.title_label.pack(anchor="w", padx=UIStyle.PAD_XL, pady=(UIStyle.PAD_XL, UIStyle.PAD_MD))
 
         self.body_label = ctk.CTkLabel(
             self,
             text="等待刷新",
             justify="left",
             anchor="nw",
-            font=UIStyle.FONT_BODY,
+            font=("Microsoft YaHei", 15),
             text_color=UIStyle.COLOR_TEXT_DIM,
             wraplength=520,
         )
-        self.body_label.pack(fill="x", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_SM))
+        self.body_label.pack(fill="x", padx=UIStyle.PAD_XL, pady=(0, UIStyle.PAD_MD))
 
         self.asset_rows_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.metric_frame = ctk.CTkFrame(self, fg_color="transparent")
 
         self.button_frame = ctk.CTkFrame(self, fg_color="transparent")
         if buttons:
-            self.button_frame.pack(fill="x", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_LG))
+            self.button_frame.pack(fill="x", padx=UIStyle.PAD_XL, pady=(0, UIStyle.PAD_XL))
             for text, cmd in buttons:
-                GhostButton(self.button_frame, text=text, command=cmd, height=32).pack(side="left", padx=(0, UIStyle.PAD_SM), pady=2)
+                GhostButton(self.button_frame, text=text, command=cmd, height=36).pack(side="left", padx=(0, UIStyle.PAD_SM), pady=2)
 
     def set_body(self, text: str) -> None:
         self.body_label.configure(text=text)
 
     def set_asset_rows(self, rows: list) -> None:
-        """rows: (label, path, open_cmd, sync_cmd) 或 (label, path, open_cmd, sync_cmd, voice_check_cmd)"""
+        """rows 每项格式：
+        - 标准: (label, path, open_cmd, sync_cmd)
+        - 配音: (label, path, open_cmd, None, voice_check_cmd)
+        - 带匹配数: (label, path, open_cmd, sync_cmd, None, matched_count) 或 (label, path, open_cmd, None, voice_check_cmd, matched_count)
+        """
         for child in self.asset_rows_frame.winfo_children():
             child.destroy()
         if rows:
@@ -2465,28 +2880,38 @@ class SyncStatusCard(ctk.CTkFrame):
                 self.asset_rows_frame.pack_forget()
             need_body = (self.body_label.cget("text") != "等待刷新" and (not self.metric_frame.winfo_ismapped()))
             if need_body and not self.body_label.winfo_ismapped():
-                self.body_label.pack(fill="x", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_SM))
+                self.body_label.pack(fill="x", padx=UIStyle.PAD_XL, pady=(0, UIStyle.PAD_SM))
         for item in rows:
             label, path, open_cmd, sync_cmd, *extra = item
-            voice_check_cmd = extra[0] if extra else None
+            voice_check_cmd = extra[0] if len(extra) > 0 else None
+            matched_count = extra[1] if len(extra) > 1 else None
             row = ctk.CTkFrame(self.asset_rows_frame, fg_color="transparent")
-            row.pack(fill="x", pady=(0, UIStyle.PAD_SM))
-            ctk.CTkLabel(row, text=label, width=34, font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_MAIN, anchor="w").pack(side="left")
+            row.pack(fill="x", pady=(0, UIStyle.PAD_MD))
+            ctk.CTkLabel(row, text=label, width=34, font=("Microsoft YaHei", 15), text_color=UIStyle.COLOR_TEXT_MAIN, anchor="w").pack(side="left")
             path_box = ctk.CTkFrame(row, fg_color=UIStyle.COLOR_INPUT_BG, corner_radius=UIStyle.RADIUS_MD, border_width=1, border_color=UIStyle.COLOR_BORDER)
             path_box.pack(side="left", fill="x", expand=True, padx=(0, UIStyle.PAD_SM))
-            ctk.CTkLabel(path_box, text=compact_path(path, 52) or "--", font=UIStyle.FONT_SMALL, text_color=UIStyle.COLOR_TEXT_DIM, anchor="w").pack(fill="x", padx=UIStyle.PAD_SM, pady=UIStyle.PAD_SM)
-            GhostButton(row, text="打开目录", command=open_cmd, height=34, width=78).pack(side="left", padx=(0, UIStyle.PAD_SM))
+            ctk.CTkLabel(path_box, text=compact_path(path, 52) or "--", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM, anchor="w").pack(fill="x", padx=UIStyle.PAD_SM, pady=UIStyle.PAD_SM)
+            if matched_count is not None:
+                if isinstance(matched_count, str):
+                    stat_text = matched_count
+                    stat_color = UIStyle.COLOR_PRIMARY if "0/" not in matched_count and "无" not in matched_count else UIStyle.COLOR_TEXT_DIM
+                else:
+                    unit = {"图片": "张", "视频": "个", "配音": "个"}.get(label, "个")
+                    stat_text = f"已匹配 {matched_count}{unit}" if matched_count else "无匹配"
+                    stat_color = UIStyle.COLOR_PRIMARY if matched_count else UIStyle.COLOR_TEXT_DIM
+                ctk.CTkLabel(row, text=stat_text, font=("Microsoft YaHei", 13), text_color=stat_color, anchor="e").pack(side="left", padx=(UIStyle.PAD_SM, UIStyle.PAD_SM))
+            GhostButton(row, text="打开目录", command=open_cmd, height=36, width=84).pack(side="left", padx=(0, UIStyle.PAD_SM))
             if voice_check_cmd:
-                GhostButton(row, text="检查配音", command=voice_check_cmd, height=34, width=78).pack(side="left")
+                GhostButton(row, text="检查配音", command=voice_check_cmd, height=36, width=84).pack(side="left")
             else:
-                GhostButton(row, text="同步素材", command=sync_cmd, height=34, width=78).pack(side="left")
+                GhostButton(row, text="同步素材", command=sync_cmd, height=36, width=84).pack(side="left")
 
     def set_metrics(self, items: list[tuple[str, int]], *, warn_labels: set[str] | None = None) -> None:
         for child in self.metric_frame.winfo_children():
             child.destroy()
         if items:
             if not self.metric_frame.winfo_ismapped():
-                self.metric_frame.pack(fill="x", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_SM))
+                self.metric_frame.pack(fill="x", padx=UIStyle.PAD_XL, pady=(0, UIStyle.PAD_MD))
         else:
             if self.metric_frame.winfo_ismapped():
                 self.metric_frame.pack_forget()
@@ -2500,10 +2925,10 @@ class SyncStatusCard(ctk.CTkFrame):
                 border_width=1,
                 border_color=UIStyle.COLOR_BORDER,
             )
-            chip.pack(side="left", padx=(0, UIStyle.PAD_SM), pady=2)
-            ctk.CTkLabel(chip, text=label, font=UIStyle.FONT_SMALL, text_color=UIStyle.COLOR_TEXT_DIM).pack(side="left", padx=(UIStyle.PAD_SM, UIStyle.PAD_XS), pady=UIStyle.PAD_XS)
+            chip.pack(side="left", padx=(0, UIStyle.PAD_SM), pady=3)
+            ctk.CTkLabel(chip, text=label, font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).pack(side="left", padx=(UIStyle.PAD_SM, UIStyle.PAD_XS), pady=UIStyle.PAD_XS)
             value_color = UIStyle.COLOR_PRIMARY if label in warn_labels and value else UIStyle.COLOR_TEXT_MAIN
-            ctk.CTkLabel(chip, text=str(value), font=UIStyle.FONT_SMALL, text_color=value_color).pack(side="left", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS)
+            ctk.CTkLabel(chip, text=str(value), font=UIStyle.FONT_BODY, text_color=value_color).pack(side="left", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS)
 
 
 class SyncPage(BasePage):
@@ -2539,7 +2964,7 @@ class SyncPage(BasePage):
         self.master_card = self._status_card(grid, "Master 方案商品", 0, 0, [("同步 Master", self._sync_master)])
         self.md_card = self._status_card(grid, "MD 文案", 0, 1, [("打开所在文件夹", self._open_md_folder), ("同步 MD", self._sync_md)])
         self.folder_card = self._status_card(grid, "素材文件夹", 1, 0, [], min_height=236)
-        self.mapping_card = self._status_card(grid, "映射关系与缺口", 1, 1, [], min_height=236)
+        self.mapping_card = self._status_card(grid, "映射关系与缺口", 1, 1, [("查看全部缺口", self._show_all_gaps)], min_height=236)
 
         # Sync log (默认折叠，置于底部)
         self._log_expanded = False
@@ -2577,7 +3002,7 @@ class SyncPage(BasePage):
             self._log_header.configure(text="▶ 最近同步记录")
 
     def _status_card(self, parent, title: str, row: int, col: int, buttons: list[tuple[str, Callable]], *, min_height: int | None = None) -> SyncStatusCard:
-        card = SyncStatusCard(parent, title, buttons, min_height=min_height or (144 if row == 0 else 236))
+        card = SyncStatusCard(parent, title, buttons, min_height=min_height or (180 if row == 0 else 270))
         card.grid(row=row, column=col, sticky="nsew", padx=(0, UIStyle.PAD_MD) if col == 0 else (UIStyle.PAD_MD, 0), pady=(0, UIStyle.PAD_MD))
         return card
 
@@ -2625,12 +3050,24 @@ class SyncPage(BasePage):
         intro_count = sum(1 for b in blocks if b["script_type"] == "intro")
         product_block_count = sum(1 for b in blocks if b["script_type"] == "product")
         price_count = sum(1 for b in blocks if b["script_type"] == "price_transition")
+        selected_user = self.user_var.get().strip()
         asset_counts = {
-            "image": sum(1 for a in assets if a["asset_type"] == "image" and a["status"] == "ready"),
+            "image": sum(1 for a in assets if a["asset_type"] == "image" and a["status"] == "ready"
+                         and (selected_user == "全部" or a["account_label"] == selected_user or not a["account_label"])),
             "video": sum(1 for a in assets if a["asset_type"] == "video" and a["status"] == "ready"),
-            "voice": sum(1 for a in assets if a["asset_type"] == "voice" and a["status"] == "ready"),
+            "voice": sum(1 for a in assets if a["asset_type"] == "voice" and a["status"] == "ready"
+                         and (selected_user == "全部" or a["account_label"] == selected_user or not a["account_label"])),
         }
         issues = build_project_issue_summary(project, products, blocks, assets, self.repo.accounts(), selected_user=self.user_var.get())
+        voice_status = collect_voice_status(
+            blocks,
+            assets,
+            self.repo.accounts(),
+            {safe_text(item.get("uid")): item for item in products},
+            selected_user=selected_user,
+        )
+        voice_file_count = asset_counts["voice"]
+        voice_stat = f"配音块 {voice_status['ready']}/{voice_status['total']}；文件 {voice_file_count}"
         self.master_card.set_asset_rows([])
         self.master_card.set_body(f"方案：{project['scheme_name'] or '--'}\n商品：{len(products)} 个")
         self.master_card.set_metrics([])
@@ -2641,12 +3078,12 @@ class SyncPage(BasePage):
         self.folder_card.set_body("")
         self.folder_card.set_asset_rows(
             [
-                ("图片", self.asset_paths.get("image", ""), lambda: self._open_asset_path("image"), lambda: self._sync_asset_type("image")),
-                ("视频", self.asset_paths.get("video", ""), lambda: self._open_asset_path("video"), lambda: self._sync_asset_type("video")),
-                ("配音", self.asset_paths.get("voice", ""), lambda: self._open_asset_path("voice"), None, self._check_voice_status),
+                ("图片", self.asset_paths.get("image", ""), lambda: self._open_asset_path("image"), lambda: self._sync_asset_type("image"), None, asset_counts["image"]),
+                ("视频", self.asset_paths.get("video", ""), lambda: self._open_asset_path("video"), lambda: self._sync_asset_type("video"), None, asset_counts["video"]),
+                ("配音", self.asset_paths.get("voice", ""), lambda: self._open_asset_path("voice"), None, self._check_voice_status, voice_stat),
             ]
         )
-        self.folder_card.set_metrics([("图片", asset_counts["image"]), ("视频", asset_counts["video"]), ("配音", asset_counts["voice"]), ("素材总数", sum(asset_counts.values()))])
+        self.folder_card.set_metrics([])
         self.mapping_card.set_asset_rows([])
         self.mapping_card.set_body(f"筛选用户：{self.user_var.get()}\n{format_issue_preview(issues, limit=3)}")
         self.mapping_card.set_metrics(
@@ -2816,10 +3253,11 @@ class SyncPage(BasePage):
         labels = {"image": "图片", "video": "视频", "voice": "配音"}
         path = self.asset_paths.get(asset_type) or safe_text(project.get(f"{asset_type}_root"))
         label = labels.get(asset_type, "素材")
+        selected_user = self.user_var.get().strip()
         self.app.run_background(
             f"同步{label}素材",
             lambda: self.sync.sync_assets(project["id"], asset_type=asset_type, root_override=path),
-            on_success=lambda r: self._finish_asset_sync(label, r, focus_type=asset_type),
+            on_success=lambda r: self._finish_asset_sync(label, r, focus_type=asset_type, account_filter=selected_user),
             show_success_toast=False,
         )
 
@@ -2832,77 +3270,164 @@ class SyncPage(BasePage):
             account_label = "小燃"
         blocks = self.repo.script_blocks(project["id"])
         assets = self.repo.asset_bindings(project["id"])
-        intro_blocks = [b for b in blocks if b["script_type"] == "intro"]
-        product_blocks = [b for b in blocks if b["script_type"] == "product"]
-        price_blocks = [b for b in blocks if b["script_type"] == "price_transition"]
-
-        missing_voice = []
-        expired_voice = []
-
-        for block in intro_blocks:
-            state = voice_state(assets, uid="INTRO", account_label=account_label,
-                                hashes={safe_text(block.get("text_hash"))},
-                                block_label=safe_text(block.get("block_label")))
-            label = f"引言 {safe_text(block.get('block_label'))}"
-            if state == "missing":
-                missing_voice.append(label)
-            elif state == "expired":
-                expired_voice.append(label)
-
-        for block in product_blocks:
-            uid = safe_text(block.get("owner_uid"))
-            state = voice_state(assets, uid=uid, account_label=account_label,
-                                hashes={safe_text(block.get("text_hash"))})
-            label = f"{uid} {safe_text(block.get('block_label'))}"
-            if state == "missing":
-                missing_voice.append(label)
-            elif state == "expired":
-                expired_voice.append(label)
-
-        for block in price_blocks:
-            state = voice_state(assets, uid="PRICE_TRANSITION", account_label=account_label,
-                                hashes={safe_text(block.get("text_hash"))},
-                                block_label=safe_text(block.get("price_range_label")))
-            label = f"价格过渡 {safe_text(block.get('price_range_label'))}"
-            if state == "missing":
-                missing_voice.append(label)
-            elif state == "expired":
-                expired_voice.append(label)
-
-        all_blocks = len(intro_blocks) + len(product_blocks) + len(price_blocks)
-        ready_count = all_blocks - len(missing_voice) - len(expired_voice)
-        lines = [
-            f"配音检查结果（用户：{account_label}）",
-            "",
-            f"配音块总数：{all_blocks}",
-            f"已就绪：{ready_count}",
-            f"缺配音：{len(missing_voice)}",
-            f"配音过期：{len(expired_voice)}",
+        products = {safe_text(item.get("uid")): item for item in self.repo.products(project["id"], include_removed=False)}
+        voice_status = collect_voice_status(blocks, assets, self.repo.accounts(), products, selected_user=account_label)
+        missing_voice = voice_status["missing"]
+        expired_voice = voice_status["expired"]
+        sections = [
+            DialogSection(
+                title="配音检查结果",
+                step="1",
+                tone="warning" if (missing_voice or expired_voice) else "success",
+                rows=[
+                    ("筛选用户", account_label),
+                    ("配音块总数", str(voice_status["total"])),
+                    ("已就绪", str(voice_status["ready"])),
+                    ("缺配音", str(len(missing_voice))),
+                    ("配音过期", str(len(expired_voice))),
+                ],
+                helper="这里按当前 MD 入库后的文案块统计，不按目录里的 wav 文件数统计。",
+            )
         ]
         if missing_voice:
-            lines += ["", "缺配音列表"]
-            for item in missing_voice[:15]:
-                lines.append(f"  - {item}")
-            if len(missing_voice) > 15:
-                lines.append(f"  ... 另有 {len(missing_voice) - 15} 个")
+            sections.append(
+                DialogSection(
+                    title="缺配音列表",
+                    step="2",
+                    tone="warning",
+                    items=[item["display"] for item in missing_voice],
+                    helper="这些文案块没有找到当前用户可用的配音文件。",
+                )
+            )
         if expired_voice:
-            lines += ["", "配音过期列表"]
-            for item in expired_voice[:15]:
-                lines.append(f"  - {item}")
-            if len(expired_voice) > 15:
-                lines.append(f"  ... 另有 {len(expired_voice) - 15} 个")
-        show_text_dialog(self, "配音检查结果", "\n".join(lines))
+            sections.append(
+                DialogSection(
+                    title="配音过期列表",
+                    step="3" if missing_voice else "2",
+                    tone="warning",
+                    items=[item["display"] for item in expired_voice],
+                    helper="这些文案块已有配音文件，但文本 hash 已不一致，需要重新生成。",
+                )
+            )
+        if not missing_voice and not expired_voice:
+            sections.append(
+                DialogSection(
+                    title="缺口列表",
+                    step="2",
+                    tone="success",
+                    items=["当前用户没有缺配音或过期配音。"],
+                )
+            )
+        action = show_action_sections_dialog(
+            self,
+            "配音检查结果",
+            "按文案块核对当前用户的配音状态。",
+            sections,
+            action_text="立即配音",
+            action_enabled=bool(missing_voice),
+            close_text="关闭",
+        )
+        if action == "action":
+            self._open_voice_generation_for_missing(project["id"], account_label, missing_voice)
 
-    def _finish_asset_sync(self, label: str, result: dict[str, Any], *, focus_type: str = "") -> None:
+    def _open_voice_generation_for_missing(self, project_id: int, account_label: str, missing_voice: list[dict[str, str]]) -> None:
+        targets = voice_generation_targets_from_rows(missing_voice)
+        if not targets:
+            self.toast("没有可自动填充的缺配音目标。", kind="warning")
+            return
+        self.app.set_current_project(project_id)
+        self.app.show_page("生成配音")
+        page = self.app.pages.get("生成配音")
+        if not isinstance(page, VoicePage):
+            self.toast("无法打开生成配音页面。", kind="error")
+            return
+        page.account_var.set(account_label)
+        page.uid_var.set("，".join(targets))
+        page.extra_voice_tasks.clear()
+        page._render_voice_task_list()
+        page._update_voice_output_dir(force=True)
+        page.log(f"已从配音检查填入缺配音目标：{'，'.join(targets)}")
+        self.toast(f"已填入 {len(targets)} 个缺配音目标")
+
+    def _show_all_gaps(self) -> None:
+        project = self._current_project_or_warn()
+        if not project:
+            return
+        products = self.repo.products(project["id"], include_removed=False)
+        blocks = self.repo.script_blocks(project["id"])
+        assets = self.repo.asset_bindings(project["id"])
+        selected_user = self.user_var.get().strip()
+        issues = build_project_gap_details(
+            project,
+            products,
+            blocks,
+            assets,
+            self.repo.accounts(),
+            selected_user=selected_user,
+        )
+        labels = [
+            ("missing_copy", "缺文案"),
+            ("missing_image", "缺图片"),
+            ("missing_video", "缺视频"),
+            ("missing_voice", "缺配音"),
+            ("expired_voice", "配音过期"),
+        ]
+        sections = [
+            DialogSection(
+                title="缺口汇总",
+                step="1",
+                tone="warning" if any(issues.get(key) for key, _label in labels) else "success",
+                rows=[
+                    ("项目", safe_text(project.get("name"))),
+                    ("筛选用户", selected_user or "全部"),
+                    ("缺文案", str(len(issues.get("missing_copy") or []))),
+                    ("缺图片", str(len(issues.get("missing_image") or []))),
+                    ("缺视频", str(len(issues.get("missing_video") or []))),
+                    ("缺配音", str(len(issues.get("missing_voice") or []))),
+                    ("配音过期", str(len(issues.get("expired_voice") or []))),
+                ],
+            )
+        ]
+        step = 2
+        for key, label in labels:
+            items = issues.get(key) or []
+            target = {
+                "missing_copy": "商品文案 MD",
+                "missing_image": "图片目录",
+                "missing_video": "视频目录",
+                "missing_voice": "配音目录",
+                "expired_voice": "重新生成配音",
+            }.get(key, "")
+            sections.append(
+                DialogSection(
+                    title=label,
+                    step=str(step),
+                    tone="warning" if items else "success",
+                    items=items or ["无"],
+                    helper=f"补齐位置：{target}" if target else "",
+                )
+            )
+            step += 1
+        show_precheck_dialog(
+            self,
+            "全部缺口明细",
+            "完整列出当前项目和筛选用户下的所有素材与文案缺口。",
+            sections,
+            can_continue=False,
+            confirm_text="关闭",
+            dismiss_text="关闭",
+        )
+
+    def _finish_asset_sync(self, label: str, result: dict[str, Any], *, focus_type: str = "", account_filter: str = "") -> None:
         if focus_type:
             count_text = f"{label} {result.get(focus_type, 0)}"
         else:
             count_text = f"图片 {result.get('image', 0)}，视频 {result.get('video', 0)}，配音 {result.get('voice', 0)}"
         self.toast(f"{label}素材同步完成：{count_text}，缺素材 {result.get('unmatched', 0)}")
         self.refresh()
-        self._show_asset_sync_result(label, result, focus_type=focus_type)
+        self._show_asset_sync_result(label, result, focus_type=focus_type, account_filter=account_filter)
 
-    def _show_asset_sync_result(self, label: str, result: dict[str, Any], *, focus_type: str = "") -> None:
+    def _show_asset_sync_result(self, label: str, result: dict[str, Any], *, focus_type: str = "", account_filter: str = "") -> None:
         type_labels = {"image": "图片", "video": "视频", "voice": "配音"}
         matched_items = result.get("matched_items") or []
         added_items = result["added_items"] if "added_items" in result else matched_items
@@ -2915,6 +3440,8 @@ class SyncPage(BasePage):
             removed_items = [item for item in removed_items if item.get("asset_type") == focus_type]
             current_items = [item for item in current_items if item.get("asset_type") == focus_type]
             unmatched_items = [item for item in unmatched_items if item.get("asset_type") == focus_type]
+        if account_filter and account_filter != "全部":
+            current_items = [item for item in current_items if safe_text(item.get("account_label")) == account_filter or not item.get("account_label")]
 
         def item_line(item: dict[str, Any], prefix: str = "") -> str:
             uid = safe_text(item.get("uid"))
@@ -2958,6 +3485,16 @@ class SyncPage(BasePage):
                 helper="用于查看当前数据库中可用素材的总览。",
             ),
         ]
+        if unmatched_items:
+            sections.append(
+                DialogSection(
+                    title="缺素材商品",
+                    step="4",
+                    tone="warning",
+                    items=preview_lines([item_line(item) for item in unmatched_items], limit=40),
+                    helper="以下商品的该类型素材尚未找到，可以到对应文件夹下检查文件是否存在。",
+                ),
+            )
 
         dialog = ctk.CTkToplevel(self)
         dialog.title(f"{label}素材同步结果")
@@ -3089,6 +3626,327 @@ class AccountPage(BasePage):
         _set_tree_rows(self.tree, rows)
 
 
+class StandaloneVoicePage(BasePage):
+    def __init__(self, master, app: App):
+        super().__init__(master, "单独配音", app)
+        self.input_mode_var = ctk.StringVar(value="粘贴文字")
+        self.voice_mode_var = ctk.StringVar(value="已配置用户音色")
+        self.account_var = ctk.StringVar()
+        self.md_path_var = ctk.StringVar()
+        self.reference_audio_var = ctk.StringVar()
+        self.output_dir_var = ctk.StringVar(value=str(DEFAULT_STANDALONE_VOICE_ROOT))
+        self.text_placeholder = "粘贴文字文案在这里"
+        self.text_placeholder_visible = False
+
+        input_card = ctk.CTkFrame(self.content, fg_color=UIStyle.COLOR_CARD_BG, corner_radius=UIStyle.RADIUS_LG)
+        input_card.pack(fill="both", expand=True, pady=(0, UIStyle.PAD_SM))
+        input_card.grid_columnconfigure(0, weight=1)
+        input_card.grid_rowconfigure(2, weight=1)
+
+        input_header = ctk.CTkFrame(input_card, fg_color="transparent")
+        input_header.grid(row=0, column=0, sticky="ew", padx=UIStyle.PAD_LG, pady=(UIStyle.PAD_LG, UIStyle.PAD_SM))
+        ctk.CTkLabel(input_header, text="输入内容", font=UIStyle.FONT_H2, text_color=UIStyle.COLOR_TEXT_MAIN).pack(side="left")
+        ctk.CTkLabel(input_header, text="输入方式", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).pack(side="left", padx=(UIStyle.PAD_XL, UIStyle.PAD_SM))
+        self.input_segment = ctk.CTkSegmentedButton(
+            input_header,
+            values=["粘贴文字", "选择文档"],
+            variable=self.input_mode_var,
+            command=lambda _=None: self._sync_input_mode(),
+        )
+        self.input_segment.pack(side="left")
+
+        md_row = ctk.CTkFrame(input_card, fg_color="transparent")
+        md_row.grid(row=1, column=0, sticky="w", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_SM))
+        ctk.CTkLabel(md_row, text="MD 文档", width=74, font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM, anchor="w").pack(side="left", padx=(0, UIStyle.PAD_SM))
+        self.md_entry = AppEntry(md_row, textvariable=self.md_path_var, width=560)
+        self.md_entry.pack(side="left", padx=(0, UIStyle.PAD_SM))
+        self.md_button = GhostButton(md_row, text="选择 MD", command=self._browse_md, width=92)
+        self.md_button.pack(side="left")
+
+        self.text_input = AppTextbox(input_card, height=300, wrap="word")
+        self.text_input.grid(row=2, column=0, sticky="nsew", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_LG))
+        self.text_input.bind("<FocusIn>", lambda _event: self._clear_text_placeholder())
+        self.text_input.bind("<FocusOut>", lambda _event: self._restore_text_placeholder())
+
+        voice_card = ctk.CTkFrame(self.content, fg_color=UIStyle.COLOR_CARD_BG, corner_radius=UIStyle.RADIUS_LG)
+        voice_card.pack(fill="x", pady=(0, UIStyle.PAD_SM))
+        voice_card.grid_columnconfigure(0, weight=1)
+
+        voice_header = ctk.CTkFrame(voice_card, fg_color="transparent")
+        voice_header.grid(row=0, column=0, sticky="ew", padx=UIStyle.PAD_LG, pady=(UIStyle.PAD_LG, UIStyle.PAD_SM))
+        ctk.CTkLabel(voice_header, text="音色与输出", font=UIStyle.FONT_H2, text_color=UIStyle.COLOR_TEXT_MAIN).pack(side="left")
+        ctk.CTkLabel(voice_header, text="音色来源", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).pack(side="left", padx=(UIStyle.PAD_XL, UIStyle.PAD_SM))
+        self.voice_segment = ctk.CTkSegmentedButton(
+            voice_header,
+            values=["已配置用户音色", "参考音频文件"],
+            variable=self.voice_mode_var,
+            command=lambda _=None: self._sync_voice_mode(),
+        )
+        self.voice_segment.pack(side="left")
+
+        voice_fields = ctk.CTkFrame(voice_card, fg_color="transparent")
+        voice_fields.grid(row=1, column=0, sticky="w", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_LG))
+        voice_fields.grid_columnconfigure(1, minsize=260)
+
+        ctk.CTkLabel(voice_fields, text="配音用户", width=74, font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM, anchor="w").grid(row=0, column=0, sticky="w", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS)
+        self.account_combo = AppComboBox(voice_fields, width=220, variable=self.account_var)
+        self.account_combo.grid(row=0, column=1, sticky="w", pady=UIStyle.PAD_XS)
+
+        ctk.CTkLabel(voice_fields, text="参考音频", width=74, font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM, anchor="w").grid(row=1, column=0, sticky="w", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS)
+        self.reference_entry = AppEntry(voice_fields, textvariable=self.reference_audio_var, width=560)
+        self.reference_entry.grid(row=1, column=1, sticky="w", pady=UIStyle.PAD_XS)
+        self.reference_button = GhostButton(voice_fields, text="上传", command=self._browse_reference_audio, width=72)
+        self.reference_button.grid(row=1, column=2, sticky="w", padx=(UIStyle.PAD_SM, 0), pady=UIStyle.PAD_XS)
+
+        ctk.CTkLabel(voice_fields, text="输出目录", width=74, font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM, anchor="w").grid(row=2, column=0, sticky="w", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS)
+        self.output_entry = AppEntry(voice_fields, textvariable=self.output_dir_var, width=560)
+        self.output_entry.grid(row=2, column=1, sticky="w", pady=UIStyle.PAD_XS)
+        GhostButton(voice_fields, text="选择目录", command=self._browse_output_dir, width=92).grid(row=2, column=2, sticky="w", padx=(UIStyle.PAD_SM, 0), pady=UIStyle.PAD_XS)
+
+        actions = ctk.CTkFrame(self.content, fg_color="transparent")
+        actions.pack(fill="x", pady=(0, UIStyle.PAD_SM))
+        actions.columnconfigure(0, weight=1)
+        PrimaryButton(actions, text="预检查并生成", command=self._run_standalone_voice).grid(row=0, column=1, sticky="e")
+
+        self.log_text = AppTextbox(self.content, height=160)
+        self.log_text.pack(fill="both", expand=True)
+        self._refresh_accounts()
+        self._show_text_placeholder()
+        self._sync_input_mode()
+        self._sync_voice_mode()
+
+    def refresh(self) -> None:
+        self._refresh_accounts()
+
+    def _show_text_placeholder(self) -> None:
+        self.text_input.configure(state="normal", text_color=UIStyle.COLOR_TEXT_DIM)
+        self.text_input.delete("1.0", "end")
+        self.text_input.insert("1.0", self.text_placeholder)
+        self.text_placeholder_visible = True
+
+    def _clear_text_placeholder(self) -> None:
+        if not self.text_placeholder_visible:
+            return
+        self.text_input.configure(state="normal", text_color=UIStyle.COLOR_TEXT_MAIN)
+        self.text_input.delete("1.0", "end")
+        self.text_placeholder_visible = False
+
+    def _restore_text_placeholder(self) -> None:
+        if self.input_mode_var.get() != "粘贴文字":
+            return
+        if self.text_input.get("1.0", "end").strip():
+            return
+        self._show_text_placeholder()
+
+    def _refresh_accounts(self) -> None:
+        labels = [
+            safe_text(account.get("label"))
+            for account in self.repo.accounts()
+            if int(account.get("enabled") or 0) and safe_text(account.get("voice_id") or account.get("account_id"))
+        ]
+        labels = [label for label in labels if label]
+        self.account_combo.configure(values=labels)
+        if labels and self.account_var.get() not in labels:
+            self.account_var.set(labels[0])
+        if not labels and self.voice_mode_var.get() == "已配置用户音色":
+            self.voice_mode_var.set("参考音频文件")
+
+    def _sync_input_mode(self) -> None:
+        md_enabled = self.input_mode_var.get() == "选择文档"
+        self.md_entry.configure(state="normal" if md_enabled else "disabled")
+        self.md_button.configure(state="normal" if md_enabled else "disabled")
+        if md_enabled:
+            self.text_input.configure(state="disabled", text_color=UIStyle.COLOR_TEXT_DIM)
+            return
+        self.text_input.configure(state="normal", text_color=UIStyle.COLOR_TEXT_DIM if self.text_placeholder_visible else UIStyle.COLOR_TEXT_MAIN)
+        self._restore_text_placeholder()
+
+    def _sync_voice_mode(self) -> None:
+        user_mode = self.voice_mode_var.get() == "已配置用户音色"
+        self.account_combo.configure(state="normal" if user_mode else "disabled")
+        self.reference_entry.configure(state="disabled" if user_mode else "normal")
+        self.reference_button.configure(state="disabled" if user_mode else "normal")
+        if user_mode:
+            self.reference_audio_var.set("")
+            if not self.account_var.get().strip():
+                labels = [
+                    safe_text(account.get("label"))
+                    for account in self.repo.accounts()
+                    if int(account.get("enabled") or 0) and safe_text(account.get("voice_id") or account.get("account_id"))
+                ]
+                labels = [label for label in labels if label]
+                if labels:
+                    self.account_var.set(labels[0])
+        else:
+            self.account_var.set("")
+
+    def _browse_md(self) -> None:
+        path = filedialog.askopenfilename(title="选择 MD 文档", initialdir=str(DEFAULT_MARKDOWN_ROOT), filetypes=[("Markdown", "*.md")])
+        if not path:
+            return
+        if Path(path).suffix.casefold() != ".md":
+            messagebox.showwarning("只支持 MD", "单独配音只支持选择 .md 文档。")
+            return
+        self.md_path_var.set(path.replace("/", "\\"))
+
+    def _browse_reference_audio(self) -> None:
+        path = filedialog.askopenfilename(
+            title="上传参考音频",
+            initialdir=str(DEFAULT_STANDALONE_VOICE_ROOT),
+            filetypes=[("Audio", "*.wav *.mp3 *.m4a *.flac *.ogg *.aac *.wma")],
+        )
+        if path:
+            self.reference_audio_var.set(path.replace("/", "\\"))
+
+    def _browse_output_dir(self) -> None:
+        initial = self.output_dir_var.get().strip() or str(DEFAULT_STANDALONE_VOICE_ROOT)
+        path = filedialog.askdirectory(initialdir=initial, title="选择配音输出目录")
+        if path:
+            self.output_dir_var.set(path.replace("/", "\\"))
+
+    def _input_text_and_label(self) -> tuple[str, str, str]:
+        if self.input_mode_var.get() == "选择文档":
+            path_text = self.md_path_var.get().strip()
+            text = markdown_file_to_voice_text(path_text)
+            return text, "MD 文档", Path(path_text).stem
+        text = "" if self.text_placeholder_visible else self.text_input.get("1.0", "end").strip()
+        return text, "粘贴文字", "粘贴文本"
+
+    def _voice_source(self) -> tuple[str, str, str]:
+        if self.voice_mode_var.get() == "已配置用户音色":
+            account_label = self.account_var.get().strip()
+            if not account_label:
+                raise ValueError("请选择一个已配置用户音色。")
+            return "用户音色", account_label, ""
+        reference = self.reference_audio_var.get().strip()
+        if not reference:
+            raise ValueError("请上传参考音频文件。")
+        return "参考音频", "", reference
+
+    def _precheck_sections(self) -> tuple[list[DialogSection], bool, dict[str, str]]:
+        blocked: list[str] = []
+        payload = {"text": "", "source_label": "", "account_label": "", "reference_audio_path": ""}
+        try:
+            text, input_label, source_label = self._input_text_and_label()
+            payload["text"] = text
+            payload["source_label"] = source_label
+            if not text:
+                blocked.append("输入内容为空")
+        except Exception as exc:
+            input_label = self.input_mode_var.get()
+            text = ""
+            blocked.append(str(exc))
+        try:
+            voice_label, account_label, reference = self._voice_source()
+            payload["account_label"] = account_label
+            payload["reference_audio_path"] = reference
+        except Exception as exc:
+            voice_label = self.voice_mode_var.get()
+            blocked.append(str(exc))
+        output_dir = self.output_dir_var.get().strip()
+        if not output_dir:
+            blocked.append("请选择输出目录")
+        preview = re.sub(r"\s+", " ", text).strip()
+        sections = [
+            DialogSection(
+                title="单独配音范围",
+                step="1",
+                tone="primary",
+                rows=[
+                    ("输入来源", input_label),
+                    ("音色来源", voice_label),
+                    ("输出目录", output_dir),
+                    ("文本长度", f"{len(text)} 字"),
+                ],
+                helper="MD 文档会作为一整段文字生成一条配音，不做分段切分。",
+            ),
+            DialogSection(
+                title="文本预览",
+                step="2",
+                tone="info",
+                items=[preview[:180] + ("..." if len(preview) > 180 else "")] if preview else ["无"],
+            ),
+            DialogSection(
+                title="阻塞项",
+                step="3",
+                tone="warning" if blocked else "success",
+                items=preview_lines(blocked),
+                helper="" if blocked else "当前没有发现阻塞项，可以继续生成配音。",
+            ),
+        ]
+        return sections, not blocked, payload
+
+    def _run_standalone_voice(self) -> None:
+        sections, can_continue, payload = self._precheck_sections()
+        if not show_precheck_dialog(
+            self,
+            "单独配音预检查",
+            "请核对输入内容、音色来源和输出目录，确认无误后再生成。",
+            sections,
+            can_continue=can_continue,
+            confirm_text="生成配音",
+        ):
+            return
+
+        progress_dialog = TaskProgressDialog(self, "正在生成单独配音", "正在准备配音任务...")
+        progress_dialog.append(f"输出目录：{self.output_dir_var.get().strip()}")
+        progress_dialog.append("")
+
+        def append_progress(message: str) -> None:
+            msg = safe_text(message)
+            if msg.startswith("[服务检查]"):
+                progress_dialog.status_var.set("正在检查并预热配音服务...")
+            elif msg.startswith("[音色]"):
+                progress_dialog.status_var.set("正在确认音色来源...")
+            elif msg.startswith("[成功]"):
+                progress_dialog.status_var.set("正在写入音频文件...")
+            progress_dialog.append(msg)
+
+        def progress_hook(message: str) -> None:
+            self.after(0, lambda m=message: append_progress(m))
+
+        def work() -> WorkflowRunResult:
+            return self.workflow.synthesize_standalone_voice(
+                payload["text"],
+                account_label=payload["account_label"],
+                reference_audio_path=payload["reference_audio_path"],
+                output_dir=self.output_dir_var.get().strip(),
+                source_label=payload["source_label"],
+                start_service_if_needed=True,
+                progress_hook=progress_hook,
+            )
+
+        def close_service() -> None:
+            if self.workflow.is_tts_service_running(timeout=0.8):
+                self.workflow.shutdown_tts_service()
+
+        def on_success(result: WorkflowRunResult) -> None:
+            self.log(result.stdout or "")
+            progress_dialog.append(result.stdout or "")
+            progress_dialog.finish(
+                "单独配音已生成完成。",
+                kind="success",
+                headline="配音生成完成",
+                detail=self.output_dir_var.get().strip(),
+            )
+            self.app.toast("单独配音完成")
+            close_service()
+
+        def on_error(exc: Exception, tb: str) -> None:
+            progress_dialog.append(tb or str(exc))
+            progress_dialog.finish(f"执行失败：{exc}", kind="error")
+            messagebox.showerror("执行失败", str(exc))
+            close_service()
+
+        self.app.run_background("单独配音", work, on_success=on_success, on_error=on_error, show_success_toast=False)
+
+    def log(self, text: str) -> None:
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", text.rstrip() + "\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+
 class WorkflowPage(BasePage):
     def __init__(self, master, app: App, title: str):
         super().__init__(master, title, app)
@@ -3149,11 +4007,24 @@ class WorkflowPage(BasePage):
 
     def _browse_spoken_md(self) -> None:
         p = self.app.current_project()
-        default_name = safe_text(p.get("name")) if p else "口播稿"
-        path = filedialog.asksaveasfilename(defaultextension=".md", filetypes=[("Markdown", "*.md"), ("All", "*.*")],
-                                            initialdir=str(DEFAULT_SPOKEN_MD_ROOT), initialfile=f"{default_name or '口播稿'}.md")
+        current_path = safe_text(self.spoken_md_var.get())
+        if not current_path and p:
+            current_path = str(default_spoken_markdown_path(p, self.account_var.get().strip()))
+        default_path = Path(current_path) if current_path else DEFAULT_SPOKEN_MD_ROOT / "口播稿.md"
+        dialog_options = {
+            "defaultextension": ".md",
+            "filetypes": [("Markdown", "*.md"), ("All", "*.*")],
+            "initialdir": str(default_path.parent),
+            "initialfile": default_path.name,
+        }
+        if isinstance(self, JianyingPage):
+            path = filedialog.askopenfilename(**dialog_options)
+        else:
+            path = filedialog.asksaveasfilename(confirmoverwrite=False, **dialog_options)
         if path:
             self.spoken_md_var.set(path.replace("/", "\\"))
+            if isinstance(self, JianyingPage):
+                self._update_jianying_draft_name(force=True)
 
     def _browse_intro_video(self) -> None:
         path = filedialog.askopenfilename(filetypes=[("Video", "*.mp4 *.mov *.mkv *.avi *.webm"), ("All", "*.*")], initialdir=r"G:\2026项目-b站")
@@ -3165,6 +4036,40 @@ class WorkflowPage(BasePage):
         if path:
             self.db.execute("UPDATE projects SET spoken_md_path=?, updated_at=? WHERE id=?", (path, now_iso(), project_id))
         return path
+
+    def _set_default_spoken_md_if_needed(self, project: dict[str, Any] | None, *, force: bool = False) -> None:
+        if not project:
+            return
+        account_label = self.account_var.get().strip()
+        current = self.spoken_md_var.get().strip()
+        if force or not current or is_default_spoken_markdown_path(current):
+            self.spoken_md_var.set(str(default_spoken_markdown_path(project, account_label)).replace("/", "\\"))
+
+    def _manifest_account_label_for_current_md(self, project: dict[str, Any] | None) -> str:
+        if not project:
+            return ""
+        md_text = self.spoken_md_var.get().strip()
+        if md_text:
+            try:
+                manifest = self.workflow.spoken_manifest_path(project["id"], md_text)
+                if manifest.exists():
+                    payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
+                    label = manifest_account_label(payload)
+                    if label:
+                        return label
+            except Exception:
+                pass
+        return account_label_from_spoken_path(md_text)
+
+    def _update_jianying_draft_name(self, *, force: bool = False) -> None:
+        project = self.app.current_project()
+        if not project:
+            return
+        current = self.account_var.get().strip()
+        if current and not force and not current.startswith("完整-"):
+            return
+        label = self._manifest_account_label_for_current_md(project)
+        self.account_var.set(default_jianying_draft_name(project, label))
 
     def project_required(self) -> dict[str, Any] | None:
         p = self.app.current_project()
@@ -3268,14 +4173,22 @@ class WorkflowPage(BasePage):
         if not self._confirm_precheck():
             return
 
-        account_label = self.account_var.get().strip()
-        uids, script_ids = parse_voice_targets(self.uid_var.get())
-        total_jobs, existing_jobs, pending_jobs = self.workflow.voice_generation_counts(
-            project["id"],
-            account_label=account_label,
-            uids=uids or None,
-            script_ids=script_ids or None,
-        )
+        tasks = self._voice_tasks()
+        task_counts: list[tuple[VoiceTaskDraft, int, int, int]] = []
+        total_jobs = existing_jobs = pending_jobs = 0
+        for task in tasks:
+            uids, script_ids = parse_voice_targets(task.target_text)
+            counts = self.workflow.voice_generation_counts(
+                task.project_id,
+                account_label=task.account_label,
+                uids=uids or None,
+                script_ids=script_ids or None,
+            )
+            task_total, task_existing, task_pending = counts
+            task_counts.append((task, task_total, task_existing, task_pending))
+            total_jobs += task_total
+            existing_jobs += task_existing
+            pending_jobs += task_pending
         if pending_jobs == 0:
             self.toast("所有文案已有 OK 配音，无需生成。", kind="info", duration=3000)
             return
@@ -3305,11 +4218,13 @@ class WorkflowPage(BasePage):
 
         progress_dialog = TaskProgressDialog(self, "正在生成配音", "正在准备配音任务...")
         progress_dialog.append("配音参数：")
-        progress_dialog.append(f"品类项目：{project['name']}")
-        progress_dialog.append(f"配音用户：{account_label}")
-        target_text = "全部文案" if not uids and not script_ids else "、".join(uids + script_ids)
-        progress_dialog.append(f"生成范围：{target_text}")
+        progress_dialog.append(f"任务数：{len(task_counts)} 个")
         progress_dialog.append(f"本次文案：{total_jobs} 条；已有跳过：{existing_jobs} 条；待生成：{pending_jobs} 条")
+        for index, (task, task_total, task_existing, task_pending) in enumerate(task_counts, start=1):
+            progress_dialog.append(
+                f"任务 {index}：{task.project_name}｜{task.account_label}｜{task.display_target}"
+                f"｜文案 {task_total} 条，已有 {task_existing} 条，待生成 {task_pending} 条"
+            )
         progress_dialog.append("")
 
         def append_progress(message: str) -> None:
@@ -3330,13 +4245,34 @@ class WorkflowPage(BasePage):
             self.after(0, lambda m=message: append_progress(m))
 
         def work() -> Any:
-            return self.workflow.generate_voice(
-                project["id"],
-                account_label=account_label,
-                uids=uids or None,
-                script_ids=script_ids or None,
-                start_service_if_needed=True,
-                progress_hook=progress_hook,
+            stdout_parts: list[str] = []
+            stderr_parts: list[str] = []
+            returncode = 0
+            for index, (task, _task_total, _task_existing, task_pending) in enumerate(task_counts, start=1):
+                if task_pending == 0:
+                    stdout_parts.append(f"[任务 {index}] {task.project_name} / {task.account_label}：全部已有配音，跳过生成。\n")
+                    continue
+                progress_hook(f"[任务 {index}/{len(task_counts)}] {task.project_name} / {task.account_label} / {task.display_target}")
+                uids, script_ids = parse_voice_targets(task.target_text)
+                result = self.workflow.generate_voice(
+                    task.project_id,
+                    account_label=task.account_label,
+                    uids=uids or None,
+                    script_ids=script_ids or None,
+                    output_dir=task.output_dir,
+                    start_service_if_needed=True,
+                    progress_hook=progress_hook,
+                )
+                stdout_parts.append(f"[任务 {index}] {task.project_name} / {task.account_label}\n{result.stdout or ''}")
+                if result.stderr:
+                    stderr_parts.append(f"[任务 {index}] {result.stderr}")
+                if result.returncode != 0:
+                    returncode = result.returncode
+            return WorkflowRunResult(
+                ["internal:voice-batch"],
+                returncode=returncode,
+                stdout="\n".join(stdout_parts),
+                stderr="\n".join(stderr_parts),
             )
 
         def close_service() -> None:
@@ -3360,7 +4296,7 @@ class WorkflowPage(BasePage):
                     "本次配音已经完成，生成结果已写入目标目录。",
                     kind="success",
                     headline="配音生成完成",
-                    detail=f"配音用户：{account_label}",
+                    detail=f"任务数：{len(task_counts)}",
                 )
                 self.toast("配音完成")
             else:
@@ -3454,9 +4390,17 @@ class WorkflowPage(BasePage):
             )
         return True
 
-    def _voice_precheck(self, project: dict[str, Any]) -> tuple[list[DialogSection], bool]:
-        account_label = self.account_var.get().strip()
-        selected_uids, selected_script_ids = parse_voice_targets(self.uid_var.get())
+    def _voice_task_precheck_sections(
+        self,
+        project: dict[str, Any],
+        *,
+        account_label: str,
+        target_text: str,
+        output_dir_text: str = "",
+        task_title: str = "",
+        step_start: int = 1,
+    ) -> tuple[list[DialogSection], dict[str, int], bool]:
+        selected_uids, selected_script_ids = parse_voice_targets(target_text)
         products = {a["uid"]: a for a in self.repo.products(project["id"], include_removed=False)}
         blocks = self.repo.script_blocks(project["id"])
         assets = self.repo.asset_bindings(project["id"])
@@ -3501,20 +4445,28 @@ class WorkflowPage(BasePage):
             state = voice_state(assets, uid=uid, account_label=account_label, hashes={b["text_hash"]}, block_label=label)
             (pending if state != "ready" else skipped).append(f"{display}：{'配音过期，将重生成' if state == 'expired' else '缺配音，将生成'}" if state != "ready" else f"{display}：已有配音")
         selected_text = "全部文案" if not selected_uids and not selected_script_ids else "、".join(selected_uids + selected_script_ids)
+        output_dir = None
+        if account_label:
+            try:
+                output_dir = Path(output_dir_text) if safe_text(output_dir_text) else self.workflow.expected_voice_output_dir(project["id"], account_label=account_label)
+            except Exception as exc:
+                blocked.append(f"保存路径无法计算：{exc}")
+        prefix = f"{task_title}｜" if task_title else ""
         sections = [
             DialogSection(
-                title="项目信息",
-                step="1",
+                title=f"{prefix}项目信息",
+                step=str(step_start),
                 tone="primary",
                 rows=[
                     ("项目", project["name"]),
                     ("配音用户", account_label or "未选择"),
                     ("生成范围", selected_text),
+                    ("保存路径", str(output_dir) if output_dir else "未选择用户"),
                 ],
             ),
             DialogSection(
-                title="执行统计",
-                step="2",
+                title=f"{prefix}执行统计",
+                step=str(step_start + 1),
                 tone="success",
                 rows=[
                     ("待生成 / 重生成", f"{len(pending)} 条"),
@@ -3524,26 +4476,35 @@ class WorkflowPage(BasePage):
                 helper="确认后会先执行底层脚本；已有配音由脚本继续跳过，缺失和过期会重新生成。",
             ),
             DialogSection(
-                title="待生成明细",
-                step="3",
+                title=f"{prefix}待生成明细",
+                step=str(step_start + 2),
                 tone="info",
                 items=preview_lines(pending),
             ),
             DialogSection(
-                title="已有跳过",
-                step="4",
+                title=f"{prefix}已有跳过",
+                step=str(step_start + 3),
                 tone="info",
                 items=preview_lines(skipped),
             ),
             DialogSection(
-                title="阻塞与缺口",
-                step="5",
+                title=f"{prefix}阻塞与缺口",
+                step=str(step_start + 4),
                 tone="warning" if blocked else "success",
                 items=preview_lines(blocked),
                 helper="" if blocked else "当前没有发现阻塞项，可以继续生成配音。",
             ),
         ]
-        return sections, bool(account_label) and bool(pending or skipped or blocked)
+        stats = {"pending": len(pending), "skipped": len(skipped), "blocked": len(blocked)}
+        return sections, stats, bool(account_label) and bool(pending or skipped or blocked)
+
+    def _voice_precheck(self, project: dict[str, Any]) -> tuple[list[DialogSection], bool]:
+        sections, _stats, can_continue = self._voice_task_precheck_sections(
+            project,
+            account_label=self.account_var.get().strip(),
+            target_text=self.uid_var.get(),
+        )
+        return sections, can_continue
 
     def _assembly_precheck(self, project: dict[str, Any]) -> tuple[list[DialogSection], bool]:
         blocks = self.repo.script_blocks(project["id"])
@@ -3617,6 +4578,62 @@ class WorkflowPage(BasePage):
             ) != "ready":
                 missing_voice.append(f"价格过渡 {safe_text(block.get('price_range_label'))}")
         output_path = self._remember_spoken_md(project["id"]) if self.spoken_md_var.get().strip() else safe_text(project.get("spoken_md_path"))
+        display_template = self._display_template_for_account()
+        voice_scope = self.workflow._voice_scope_fragment(project, account_label)
+        asset_entries: list[dict[str, Any]] = []
+        asset_order = 1
+        for block in selected_intro:
+            asset_entries.append(
+                self.workflow._manifest_entry(
+                    order=asset_order,
+                    entry_type="transition",
+                    section="intro",
+                    block=block,
+                    account_label=account_label,
+                    account_id="",
+                    assets=assets,
+                    product={},
+                    source_label=safe_text(block.get("block_label")),
+                    display_template=display_template,
+                    preferred_voice_path_contains=voice_scope,
+                )
+            )
+            asset_order += 1
+        for block in used_price_blocks:
+            asset_entries.append(
+                self.workflow._manifest_entry(
+                    order=asset_order,
+                    entry_type="transition",
+                    section="price_transition",
+                    block=block,
+                    account_label=account_label,
+                    account_id="",
+                    assets=assets,
+                    product={},
+                    source_label=f"价格过渡 {safe_text(block.get('price_range_label'))}",
+                    display_template=display_template,
+                    preferred_voice_path_contains=voice_scope,
+                )
+            )
+            asset_order += 1
+        for block, product, is_top_product in ordered_blocks:
+            asset_entries.append(
+                self.workflow._manifest_entry(
+                    order=asset_order,
+                    entry_type="product",
+                    section="top" if is_top_product else "product",
+                    block=block,
+                    account_label=account_label,
+                    account_id="",
+                    assets=assets,
+                    product=product,
+                    source_label=safe_text(block.get("block_label")),
+                    display_template=display_template,
+                    preferred_voice_path_contains=voice_scope,
+                )
+            )
+            asset_order += 1
+        asset_detail_items = entry_asset_lines(asset_entries)
         top_titles = [
             f"{safe_text(product.get('uid'))} {safe_text(product.get('title'))}".strip()
             for _block, product, _is_top in top_product_blocks
@@ -3671,7 +4688,7 @@ class WorkflowPage(BasePage):
                     ("商品范围", f"共 {len(selected_products)} 个；Top 命中文案 {len(top_product_blocks)} 条；其他商品文案 {len(other_product_blocks)} 条"),
                     ("素材缺口", f"缺配音 {len(missing_voice)}，缺图片 {len(missing_image)}，缺视频 {len(missing_video)}"),
                 ],
-                items=hit_items or ["无"],
+                items=preview_lines((hit_items or ["无"]) + asset_detail_items, limit=80),
             ),
             DialogSection(
                 title="缺口示例",
@@ -3722,9 +4739,15 @@ class WorkflowPage(BasePage):
                 payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
                 entries = manifest_entries(payload)
                 selected_user = manifest_account_label(payload) or selected_user
-                missing_product_videos = manifest_product_video_gaps(payload)
-                missing_by_type = manifest_missing_assets(payload)
-                for p in manifest_file_paths(payload):
+                effective_payload = dict(payload) if isinstance(payload, dict) else {"entries": entries}
+                if intro_video_path is not None:
+                    effective_payload["entries"] = [
+                        entry for entry in entries if safe_text(entry.get("section")) != "intro"
+                    ]
+                    entries = manifest_entries(effective_payload)
+                missing_product_videos = manifest_product_video_gaps(effective_payload)
+                missing_by_type = manifest_missing_assets(effective_payload)
+                for p in manifest_file_paths(effective_payload):
                     if not Path(p).exists():
                         missing_files.append(p)
             except Exception as exc:
@@ -3773,6 +4796,9 @@ class WorkflowPage(BasePage):
                     break
         if missing_product_videos:
             missing_examples.extend(missing_product_videos[: max(0, 6 - len(missing_examples))])
+        asset_detail_items = entry_asset_lines(entries)
+        if intro_video_path is not None:
+            asset_detail_items.insert(0, f"引言视频：{intro_video_path}")
         sections = [
             DialogSection(
                 title="项目信息",
@@ -3795,7 +4821,7 @@ class WorkflowPage(BasePage):
                     ("引言视频", str(intro_video_path) if intro_video_path else "未选择，将使用 manifest 内的引言配音"),
                     ("缺失文件", f"音频 {len(missing_by_type['audio'])}，图片 {len(missing_by_type['image'])}，视频 {len(missing_by_type['video'])}"),
                 ],
-                items=missing_examples or ["当前没有可见的缺失文件示例。"],
+                items=preview_lines(asset_detail_items or missing_examples or ["当前没有可见的素材路径。"], limit=100),
             ),
             DialogSection(
                 title="检查结果",
@@ -3846,22 +4872,19 @@ class WorkflowPage(BasePage):
                 self.asm_user_var.set(self.account_var.get())
             self._on_asm_user_changed()
         if isinstance(self, JianyingPage):
-            if not self.account_var.get().strip():
-                try:
-                    md_text = self.spoken_md_var.get().strip()
-                    if md_text and project:
-                        mf = self.workflow.spoken_manifest_path(project["id"], md_text)
-                        if mf.exists():
-                            p = json.loads(mf.read_text(encoding="utf-8-sig"))
-                            label = p.get("account_label", "") if isinstance(p, dict) else ""
-                            if label:
-                                self.account_var.set(f"完整-5月-{label}")
-                except Exception:
-                    pass
+            if project and not self.spoken_md_var.get().strip():
+                self.spoken_md_var.set(
+                    safe_text(project.get("spoken_md_path"))
+                    or str(default_spoken_markdown_path(project)).replace("/", "\\")
+                )
+            self._update_jianying_draft_name()
         if project and not self.spoken_md_var.get().strip():
-            self.spoken_md_var.set(safe_text(project.get("spoken_md_path")))
+            self.spoken_md_var.set(
+                safe_text(project.get("spoken_md_path"))
+                or str(default_spoken_markdown_path(project, self.account_var.get().strip())).replace("/", "\\")
+            )
         if isinstance(self, VoicePage):
-            self._update_voice_output_dir()
+            self._update_voice_output_dir(force=True)
 
     def _select_project(self, _=None) -> None:
         v = self.project_var.get()
@@ -3874,6 +4897,7 @@ class WorkflowPage(BasePage):
 class VoicePage(WorkflowPage):
     def __init__(self, master, app: App):
         super().__init__(master, app, "生成配音")
+        self.extra_voice_tasks: list[VoiceTaskDraft] = []
         self.voice_output_dir_var = ctk.StringVar(value="请先选择项目和配音用户")
         form = ctk.CTkFrame(self.form_area, fg_color=UIStyle.COLOR_CARD_BG, corner_radius=UIStyle.RADIUS_LG)
         form.pack(fill="x", pady=(0, UIStyle.PAD_SM))
@@ -3904,20 +4928,28 @@ class VoicePage(WorkflowPage):
         ctk.CTkLabel(form, text="配音保存目录", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
             row=2, column=0, sticky="w", padx=(UIStyle.PAD_LG, UIStyle.PAD_SM), pady=(0, UIStyle.PAD_MD)
         )
-        output_entry = AppEntry(form, textvariable=self.voice_output_dir_var, state="disabled")
-        output_entry.grid(row=2, column=1, columnspan=3, sticky="ew", padx=(0, UIStyle.PAD_LG), pady=(0, UIStyle.PAD_MD))
+        output_entry = AppEntry(form, textvariable=self.voice_output_dir_var)
+        output_entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(0, UIStyle.PAD_SM), pady=(0, UIStyle.PAD_MD))
+        GhostButton(form, text="选择目录", command=self._browse_voice_output_dir, width=92).grid(
+            row=2, column=3, sticky="e", padx=(0, UIStyle.PAD_LG), pady=(0, UIStyle.PAD_MD)
+        )
 
         actions = ctk.CTkFrame(form, fg_color="transparent")
         actions.grid(row=3, column=0, columnspan=4, sticky="ew", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_LG))
         actions.columnconfigure(0, weight=1)
-        PrimaryButton(actions, text="预检查并执行", command=self._run_command).grid(row=0, column=1, sticky="e")
-        self.account_var.trace_add("write", lambda *_: self._update_voice_output_dir())
+        GhostButton(actions, text="添加任务", command=self._open_add_voice_task_dialog).grid(row=0, column=1, sticky="e", padx=(0, UIStyle.PAD_SM))
+        PrimaryButton(actions, text="预检查并执行", command=self._run_command).grid(row=0, column=2, sticky="e")
+
+        self.voice_task_list = ctk.CTkFrame(self.form_area, fg_color=UIStyle.COLOR_CARD_BG, corner_radius=UIStyle.RADIUS_LG)
+        self.voice_task_list.pack(fill="x", pady=(0, UIStyle.PAD_SM))
+        self._render_voice_task_list()
+        self.account_var.trace_add("write", lambda *_: self._update_voice_output_dir(force=True))
         self._update_voice_output_dir()
 
     def _on_voice_account_changed(self, _=None) -> None:
-        self._update_voice_output_dir()
+        self._update_voice_output_dir(force=True)
 
-    def _update_voice_output_dir(self) -> None:
+    def _update_voice_output_dir(self, *, force: bool = False) -> None:
         project = self.app.current_project()
         account_label = self.account_var.get().strip()
         if not project:
@@ -3931,7 +4963,243 @@ class VoicePage(WorkflowPage):
         except Exception as exc:
             self.voice_output_dir_var.set(f"无法计算保存目录：{exc}")
             return
+        current = self.voice_output_dir_var.get().strip()
+        if current and not force and not current.startswith("请先") and not current.startswith("无法"):
+            return
         self.voice_output_dir_var.set(str(output_dir))
+
+    def _browse_voice_output_dir(self) -> None:
+        project = self.app.current_project()
+        initial = self.voice_output_dir_var.get().strip()
+        if initial.startswith("请先") or initial.startswith("无法"):
+            initial = safe_text(project.get("voice_root")) if project else str(DEFAULT_VOICE_ROOT)
+        path = filedialog.askdirectory(initialdir=initial or str(DEFAULT_VOICE_ROOT), title="选择配音保存目录")
+        if path:
+            self.voice_output_dir_var.set(path.replace("/", "\\"))
+
+    def _current_voice_task(self) -> VoiceTaskDraft | None:
+        project = self.app.current_project()
+        account_label = self.account_var.get().strip()
+        output_dir = self.voice_output_dir_var.get().strip()
+        if not project or not account_label:
+            return None
+        if not output_dir or output_dir.startswith("请先") or output_dir.startswith("无法"):
+            return None
+        return VoiceTaskDraft(
+            project_id=int(project["id"]),
+            project_name=safe_text(project.get("name")),
+            account_label=account_label,
+            target_text=self.uid_var.get().strip(),
+            output_dir=output_dir,
+        )
+
+    def _voice_tasks(self) -> list[VoiceTaskDraft]:
+        tasks: list[VoiceTaskDraft] = []
+        current = self._current_voice_task()
+        if current:
+            tasks.append(current)
+        tasks.extend(self.extra_voice_tasks)
+        return tasks
+
+    def _project_from_selector_value(self, value: str) -> dict[str, Any] | None:
+        if not value:
+            return None
+        try:
+            project_id = int(value.split(" - ", 1)[0])
+        except (TypeError, ValueError):
+            return None
+        return self.repo.project(project_id)
+
+    def _open_add_voice_task_dialog(self) -> None:
+        projects = self.repo.projects()
+        users = [a["label"] for a in self.repo.accounts()]
+        if not projects:
+            messagebox.showinfo("需要品类项目", "请先在“品类项目”中创建或选择项目。")
+            return
+        if not users:
+            messagebox.showinfo("需要配音用户", "请先在“用户管理”中配置配音用户。")
+            return
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("添加配音任务")
+        dialog.geometry("760x360")
+        dialog.minsize(680, 320)
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()
+        dialog.columnconfigure(1, weight=1)
+
+        project_values = [f"{p['id']} - {p['name']}" for p in projects]
+        current_project = self.app.current_project()
+        project_var = ctk.StringVar(value=f"{current_project['id']} - {current_project['name']}" if current_project else project_values[0])
+        account_var = ctk.StringVar(value=self.account_var.get().strip() if self.account_var.get().strip() in users else users[0])
+        target_var = ctk.StringVar()
+        output_var = ctk.StringVar(value="")
+
+        def update_output(_=None) -> None:
+            project = self._project_from_selector_value(project_var.get())
+            account_label = account_var.get().strip()
+            if not project or not account_label:
+                output_var.set("请选择品类项目和配音用户")
+                return
+            try:
+                output_var.set(str(self.workflow.expected_voice_output_dir(project["id"], account_label=account_label)))
+            except Exception as exc:
+                output_var.set(f"无法计算保存目录：{exc}")
+
+        def add_row(row: int, label: str, widget: tk.Widget, *, columnspan: int = 1) -> None:
+            ctk.CTkLabel(dialog, text=label, font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
+                row=row, column=0, sticky="w", padx=(UIStyle.PAD_LG, UIStyle.PAD_SM), pady=UIStyle.PAD_SM
+            )
+            widget.grid(row=row, column=1, columnspan=columnspan, sticky="ew", padx=(0, UIStyle.PAD_LG), pady=UIStyle.PAD_SM)
+
+        project_combo = AppComboBox(dialog, values=project_values, variable=project_var)
+        project_combo.configure(command=update_output)
+        add_row(0, "品类项目", project_combo)
+        account_combo = AppComboBox(dialog, values=users, variable=account_var)
+        account_combo.configure(command=update_output)
+        add_row(1, "配音用户", account_combo)
+        add_row(2, "商品UID / 文案ID（可不填）", AppEntry(dialog, textvariable=target_var))
+        add_row(3, "配音保存目录", AppEntry(dialog, textvariable=output_var), columnspan=1)
+
+        def browse_output_dir() -> None:
+            project = self._project_from_selector_value(project_var.get())
+            initial = output_var.get().strip()
+            if initial.startswith("请选择") or initial.startswith("无法"):
+                initial = safe_text(project.get("voice_root")) if project else str(DEFAULT_VOICE_ROOT)
+            path = filedialog.askdirectory(initialdir=initial or str(DEFAULT_VOICE_ROOT), title="选择配音保存目录")
+            if path:
+                output_var.set(path.replace("/", "\\"))
+
+        GhostButton(dialog, text="选择目录", command=browse_output_dir, width=92).grid(
+            row=3, column=2, sticky="e", padx=(0, UIStyle.PAD_LG), pady=UIStyle.PAD_SM
+        )
+
+        ctk.CTkLabel(
+            dialog,
+            text="留空处理全部文案；多个 UID 或 script_id 用逗号分隔。",
+            font=UIStyle.FONT_SMALL,
+            text_color=UIStyle.COLOR_TEXT_DIM,
+            anchor="w",
+        ).grid(row=4, column=1, sticky="w", padx=(0, UIStyle.PAD_LG), pady=(0, UIStyle.PAD_MD))
+
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.grid(row=5, column=0, columnspan=2, sticky="ew", padx=UIStyle.PAD_LG, pady=(UIStyle.PAD_SM, UIStyle.PAD_LG))
+        buttons.columnconfigure(0, weight=1)
+
+        def confirm() -> None:
+            project = self._project_from_selector_value(project_var.get())
+            account_label = account_var.get().strip()
+            output_dir = output_var.get().strip()
+            if not project or not account_label or not output_dir or output_dir.startswith("无法"):
+                messagebox.showwarning("无法添加", "请填写有效的品类项目、配音用户和配音保存目录。")
+                return
+            self.extra_voice_tasks.append(
+                VoiceTaskDraft(
+                    project_id=int(project["id"]),
+                    project_name=safe_text(project.get("name")),
+                    account_label=account_label,
+                    target_text=target_var.get().strip(),
+                    output_dir=output_dir,
+                )
+            )
+            dialog.destroy()
+            self._render_voice_task_list()
+
+        GhostButton(buttons, text="取消", command=dialog.destroy).grid(row=0, column=1, padx=(0, UIStyle.PAD_SM))
+        PrimaryButton(buttons, text="添加", command=confirm).grid(row=0, column=2)
+        update_output()
+        _center_dialog(dialog)
+        dialog.wait_window()
+
+    def _render_voice_task_list(self) -> None:
+        for child in self.voice_task_list.winfo_children():
+            child.destroy()
+        ctk.CTkLabel(
+            self.voice_task_list,
+            text="已添加的额外配音任务",
+            font=UIStyle.FONT_BODY,
+            text_color=UIStyle.COLOR_TEXT_MAIN,
+            anchor="w",
+        ).pack(anchor="w", padx=UIStyle.PAD_LG, pady=(UIStyle.PAD_LG, UIStyle.PAD_SM))
+        if not self.extra_voice_tasks:
+            ctk.CTkLabel(
+                self.voice_task_list,
+                text="当前没有额外任务。点击“添加任务”后，会在这里显示并参与预检查与执行。",
+                font=UIStyle.FONT_SMALL,
+                text_color=UIStyle.COLOR_TEXT_DIM,
+                anchor="w",
+            ).pack(fill="x", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_LG))
+            return
+        for index, task in enumerate(self.extra_voice_tasks, start=1):
+            row = ctk.CTkFrame(self.voice_task_list, fg_color="transparent")
+            row.pack(fill="x", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_SM))
+            summary = f"{index}. {task.project_name}｜{task.account_label}｜{task.display_target}"
+            ctk.CTkLabel(row, text=summary, font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_MAIN, anchor="w").pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(row, text=compact_path(task.output_dir, 42), font=UIStyle.FONT_SMALL, text_color=UIStyle.COLOR_TEXT_DIM, anchor="e").pack(side="left", padx=(UIStyle.PAD_SM, UIStyle.PAD_SM))
+            GhostButton(row, text="删除", width=72, height=34, command=lambda i=index - 1: self._delete_voice_task(i)).pack(side="left")
+        ctk.CTkLabel(self.voice_task_list, text="", height=1).pack(pady=(0, UIStyle.PAD_SM))
+
+    def _delete_voice_task(self, index: int) -> None:
+        if 0 <= index < len(self.extra_voice_tasks):
+            del self.extra_voice_tasks[index]
+            self._render_voice_task_list()
+
+    def _voice_precheck(self, project: dict[str, Any]) -> tuple[list[DialogSection], bool]:
+        tasks = self._voice_tasks()
+        if not tasks:
+            return [
+                DialogSection(
+                    title="没有可执行任务",
+                    step="1",
+                    tone="warning",
+                    items=["请先填写当前表单，或点击“添加任务”新增一个配音任务。"],
+                )
+            ], False
+        sections: list[DialogSection] = []
+        totals = {"pending": 0, "skipped": 0, "blocked": 0}
+        can_continue = False
+        task_sections: list[DialogSection] = []
+        for index, task in enumerate(tasks, start=1):
+            task_project = self.repo.project(task.project_id)
+            if not task_project:
+                totals["blocked"] += 1
+                task_sections.append(
+                    DialogSection(
+                        title=f"任务 {index}｜阻塞与缺口",
+                        step=str(2 + (index - 1) * 5),
+                        tone="warning",
+                        items=[f"{task.project_name or task.project_id}：品类项目不存在"],
+                    )
+                )
+                continue
+            current_sections, stats, current_can_continue = self._voice_task_precheck_sections(
+                task_project,
+                account_label=task.account_label,
+                target_text=task.target_text,
+                output_dir_text=task.output_dir,
+                task_title=f"任务 {index}",
+                step_start=2 + (index - 1) * 5,
+            )
+            for key in totals:
+                totals[key] += stats[key]
+            can_continue = can_continue or current_can_continue
+            task_sections.extend(current_sections)
+        sections.append(
+            DialogSection(
+                title="本次配音任务总览",
+                step="1",
+                tone="primary",
+                rows=[
+                    ("任务数", f"{len(tasks)} 个"),
+                    ("待生成 / 重生成", f"{totals['pending']} 条"),
+                    ("已有配音跳过", f"{totals['skipped']} 条"),
+                    ("缺文案 / 不可处理", f"{totals['blocked']} 条"),
+                ],
+                helper="确认后会按任务顺序执行；已有配音继续跳过，缺失和过期配音会重新生成。",
+            )
+        )
+        sections.extend(task_sections)
+        return sections, can_continue
 
 
 class AssemblePage(WorkflowPage):
@@ -3994,20 +5262,24 @@ class AssemblePage(WorkflowPage):
         actions.columnconfigure(0, weight=1)
         PrimaryButton(actions, text="预检查并执行", command=self._run_command).grid(row=0, column=1, sticky="e")
 
-    def _on_asm_user_changed(self, _=None) -> None:
+    def _on_asm_user_changed(self, _=None, *, update_path: bool = True) -> None:
         from .template_config import available_templates
         self.asm_user_var.set(self.account_var.get().strip())
         templates = available_templates(self.asm_user_var.get())
         self.asm_template_combo.configure(values=templates)
         if self.template_var.get() in templates:
+            if update_path:
+                self._set_default_spoken_md_if_needed(self.app.current_project())
             return
         if templates:
             self.template_var.set(templates[0])
         else:
             self.template_var.set("")
+        if update_path:
+            self._set_default_spoken_md_if_needed(self.app.current_project())
 
     def _display_template_for_account(self) -> str:
-        self._on_asm_user_changed()
+        self._on_asm_user_changed(update_path=False)
         return self.template_var.get().strip()
 
 
@@ -4042,7 +5314,52 @@ class JianyingPage(WorkflowPage):
 
         act = ctk.CTkFrame(self.form_area, fg_color="transparent")
         act.pack(fill="x", pady=(0, UIStyle.PAD_MD))
-        PrimaryButton(act, text="    预检查并执行    ", command=self._run_command).pack()
+        PrimaryButton(act, text="    预检查并执行    ", command=self._run_command).pack(side="right")
+        GhostButton(act, text="导出字幕 SRT", command=self._export_subtitle_srt).pack(side="right", padx=(0, UIStyle.PAD_SM))
+
+    def _export_subtitle_srt(self) -> None:
+        project = self.project_required()
+        if not project:
+            return
+        path_text = self.spoken_md_var.get().strip() or safe_text(project.get("spoken_md_path"))
+        if not path_text:
+            messagebox.showinfo("缺少口播稿", "请先选择口播稿 MD，并在“组合口播稿”生成 manifest。")
+            return
+        spoken_path = Path(path_text)
+        manifest = self.workflow.spoken_manifest_path(project["id"], spoken_path)
+        intro_video = self.intro_video_var.get().strip()
+        progress_dialog = TaskProgressDialog(self, "正在导出字幕 SRT", "正在按口播 manifest 和配音时长生成字幕文件。")
+        progress_dialog.append(f"口播稿：{spoken_path}")
+        progress_dialog.append(f"manifest：{manifest}")
+        if intro_video:
+            progress_dialog.append(f"引言成片视频：{intro_video}")
+        progress_dialog.append("")
+
+        def work() -> WorkflowRunResult:
+            return self.workflow.export_subtitle_srt(
+                project["id"],
+                manifest_path=manifest,
+                output_path=self.workflow.default_subtitle_srt_path(project["id"], spoken_path),
+                intro_video_path=intro_video,
+            )
+
+        def on_success(result: WorkflowRunResult) -> None:
+            self.log(result.stdout or "")
+            progress_dialog.append(result.stdout or "")
+            progress_dialog.finish(
+                "字幕 SRT 已导出",
+                kind="success",
+                headline="导出完成",
+                detail=result.stdout.strip(),
+            )
+            self.toast("字幕 SRT 已导出")
+
+        def on_error(exc: Exception, tb: str) -> None:
+            progress_dialog.append(tb or str(exc))
+            progress_dialog.finish(f"导出失败：{exc}", kind="error")
+            messagebox.showerror("导出失败", str(exc))
+
+        self.app.run_background("导出字幕 SRT", work, on_success=on_success, on_error=on_error, show_success_toast=False)
 
 
 PAGE_MAP: dict[str, type] = {
@@ -4054,4 +5371,5 @@ PAGE_MAP: dict[str, type] = {
     "生成配音": VoicePage,
     "组合口播稿": AssemblePage,
     "生成剪映草稿": JianyingPage,
+    "单独配音": StandaloneVoicePage,
 }

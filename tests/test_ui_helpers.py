@@ -3,12 +3,15 @@ from bworkflow_sql.ui import (
     ProjectEditorState,
     ProjectPageDialog,
     asset_folder_paths,
+    build_project_issue_summary,
     manifest_account_label,
     manifest_missing_assets,
     manifest_product_video_gaps,
     parse_uid_list,
+    voice_generation_targets_from_rows,
     voice_state,
 )
+from bworkflow_sql.utils import text_hash
 
 
 class FakeVar:
@@ -200,3 +203,60 @@ def test_voice_state_marks_stale_hash_as_expired_even_with_unhashed_scan():
     ]
 
     assert voice_state(assets, uid="JP071", account_label="小燃", hashes={"new"}) == "expired"
+
+
+def test_issue_summary_reports_voice_gaps_per_script_block():
+    products = [{"uid": "JP071", "title": "Keyboard"}]
+    blocks = [
+        {
+            "script_type": "product",
+            "owner_uid": "JP071",
+            "block_label": "正文",
+            "price_range_label": "",
+            "text_hash": text_hash("body one"),
+        },
+        {
+            "script_type": "product",
+            "owner_uid": "JP071",
+            "block_label": "正文2",
+            "price_range_label": "",
+            "text_hash": text_hash("body two"),
+        },
+    ]
+    assets = [
+        {"uid": "JP071", "asset_type": "image", "status": "ready", "account_label": ""},
+        {"uid": "JP071", "asset_type": "video", "status": "ready", "account_label": ""},
+        {
+            "uid": "JP071",
+            "asset_type": "voice",
+            "status": "ready",
+            "account_label": "小燃",
+            "block_label": "正文",
+            "text_hash": text_hash("body one"),
+        },
+    ]
+
+    issues = build_project_issue_summary(
+        {},
+        products,
+        blocks,
+        assets,
+        [{"label": "小燃"}],
+        selected_user="小燃",
+    )
+
+    assert issues["missing_voice"] == ["小燃 / JP071 Keyboard 正文2"]
+    assert issues["missing_copy"] == []
+    assert issues["missing_image"] == []
+    assert issues["missing_video"] == []
+
+
+def test_voice_generation_targets_prefers_unique_product_uids_then_script_ids():
+    rows = [
+        {"script_type": "product", "uid": "JP071", "script_id": "product:JP071:V001"},
+        {"script_type": "product", "uid": "JP071", "script_id": "product:JP071:V002"},
+        {"script_type": "intro", "uid": "INTRO", "script_id": "intro:V001"},
+        {"script_type": "price_transition", "uid": "PRICE_TRANSITION", "script_id": "price:100-200:V001"},
+    ]
+
+    assert voice_generation_targets_from_rows(rows) == ["JP071", "intro:V001", "price:100-200:V001"]

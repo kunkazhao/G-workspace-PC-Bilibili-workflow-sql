@@ -42,6 +42,7 @@ class OutlineService:
         existing_text = target.read_text(encoding="utf-8-sig") if target.exists() else ""
         parsed = parse_markdown_text(existing_text) if existing_text.strip() else None
         existing_products = {item.uid: item for item in parsed.products} if parsed else {}
+        active_uids = {safe_text(item.get("uid")) for item in products}
 
         added: list[dict[str, Any]] = []
         preserved: list[dict[str, Any]] = []
@@ -55,9 +56,8 @@ class OutlineService:
             f"scheme_id: {safe_text(project.get('scheme_id'))}",
             "---",
             "",
-            "## 视频信息",
-            "",
         ]
+        lines += render_section("视频信息", parsed.extra_sections.get("视频信息", []) if parsed else [])
 
         lines += ["## 引言文案", ""]
         if parsed and parsed.intro_scripts:
@@ -81,7 +81,25 @@ class OutlineService:
                 lines += ["#### 正文", ""]
             lines.append("")
 
-        lines += ["## 价格过渡文案", "", "### 0-100元", "", "", "### 100-200元", "", ""]
+        archive_title = "已移出 Master 的商品文案"
+        removed_products = [item for uid, item in existing_products.items() if uid not in active_uids]
+        archived_lines = parsed.extra_sections.get(archive_title, []) if parsed else []
+        if archived_lines or removed_products:
+            lines += [f"## {archive_title}", ""]
+            if archived_lines:
+                lines.extend(archived_lines)
+                lines.append("")
+            for product in removed_products:
+                lines += [f"### {product.price_label or '未定价'}-{product.uid}-{product.title}", ""]
+                lines.extend(render_product_body(product))
+                lines.append("")
+
+        lines += render_price_transitions(parsed.price_transitions if parsed else [])
+        if parsed:
+            for title, section_lines in parsed.extra_sections.items():
+                if title in {"视频信息", archive_title}:
+                    continue
+                lines += render_section(title, section_lines)
 
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
@@ -134,4 +152,23 @@ def render_product_body(product: ProductDoc) -> list[str]:
         lines.append(f"图片：{product.image_path}")
     if product.video_path:
         lines.append(f"视频：{product.video_path}")
+    return lines
+
+
+def render_price_transitions(transitions: list[Any]) -> list[str]:
+    lines: list[str] = ["## 价格过渡文案", ""]
+    if transitions:
+        for price in transitions:
+            lines += [f"### {price.label}", ""]
+            for script in price.scripts:
+                lines += [f"#### {script.label}", script.body, ""]
+        return lines
+    return lines + ["### 0-100元", "", "", "### 100-200元", "", ""]
+
+
+def render_section(title: str, section_lines: list[str]) -> list[str]:
+    lines = [f"## {title}", ""]
+    if section_lines:
+        lines.extend(section_lines)
+        lines.append("")
     return lines
