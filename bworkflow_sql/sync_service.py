@@ -16,7 +16,7 @@ from .utils import file_metadata, now_iso, safe_text, text_hash
 AUDIO_SUFFIXES = {".wav"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi"}
-UID_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{1,12}\d[\w-]*)(?![A-Za-z0-9])")
+UID_BOUNDARY_PATTERN = r"(?<![A-Za-z0-9])({uid})(?![A-Za-z0-9])"
 
 
 def _intro_label(index: int) -> str:
@@ -122,6 +122,8 @@ class SyncService:
                 f"方案品类：{summary.get('category_name') or '--'}（{scheme_category_id}）\n"
                 "请回到“品类项目”重新选择正确的二级品类和方案后再同步。"
             )
+        if project_category_id and scheme_category_id:
+            return
         category_name = safe_text(summary.get("category_name") or project.get("category_name"))
         tokens = _project_identity_tokens(project)
         compact_category = _compact_identity(category_name)
@@ -323,6 +325,11 @@ class SyncService:
         requested_type = asset_type
         if requested_type and requested_type not in allowed_types:
             raise ValueError(f"不支持的素材类型：{asset_type}")
+        checked_types = [requested_type] if requested_type else ["image", "video", "voice"]
+        md_path = safe_text(project.get("md_path"))
+        if "voice" in checked_types and md_path and Path(md_path).exists():
+            self.sync_markdown(project_id)
+            project = self.repo.project(project_id) or project
         products = {item["uid"]: item for item in self.repo.products(project_id, include_removed=False)}
         script_blocks = self.repo.script_blocks(project_id)
         accounts = self.repo.accounts()
@@ -334,7 +341,6 @@ class SyncService:
         scanned_roots: dict[str, str] = {}
         items: list[dict[str, Any]] = []
         ts = now_iso()
-        checked_types = [requested_type] if requested_type else ["image", "video", "voice"]
         before_assets = [
             item
             for item in self.repo.asset_bindings(project_id)
@@ -457,19 +463,20 @@ class SyncService:
                     }
                 )
         added_items = [item for item in matched_items if self._asset_item_key(item) not in before_keys]
-        removed_items = [
-            self._asset_item_from_binding(item)
+        removed_bindings = [
+            item
             for key, item in before_keys.items()
             if key not in matched_keys and self._asset_is_in_scanned_scope(item, scanned_roots)
         ]
+        removed_items = [self._asset_item_from_binding(item) for item in removed_bindings]
         if removed_items:
-            removed_paths = [safe_text(item.get("path")) for item in removed_items if safe_text(item.get("path"))]
-            if removed_paths:
-                placeholders = ", ".join("?" for _ in removed_paths)
+            removed_ids = [int(item.get("id") or 0) for item in removed_bindings if int(item.get("id") or 0)]
+            if removed_ids:
+                placeholders = ", ".join("?" for _ in removed_ids)
                 with self.db.connect() as conn:
                     conn.execute(
-                        f"UPDATE asset_bindings SET status='stale', updated_at=? WHERE project_id=? AND path IN ({placeholders})",
-                        (ts, project_id, *removed_paths),
+                        f"UPDATE asset_bindings SET status='stale', updated_at=? WHERE project_id=? AND id IN ({placeholders})",
+                        (ts, project_id, *removed_ids),
                     )
         current_assets = [
             self._asset_item_from_binding(item)
@@ -630,8 +637,12 @@ class SyncService:
 
     def _uid_from_path(self, path: Path, products: dict[str, dict[str, Any]]) -> str:
         name = path.stem.casefold()
-        for uid in products:
-            if uid.casefold() in name:
+        for uid in sorted(products, key=len, reverse=True):
+            uid_text = safe_text(uid).casefold()
+            if not uid_text:
+                continue
+            pattern = UID_BOUNDARY_PATTERN.format(uid=re.escape(uid_text))
+            if re.search(pattern, name):
                 return uid
         return ""
 
@@ -712,7 +723,14 @@ class SyncService:
                     (project_id, uid, script_block_id, asset_type, account_label, account_id, block_label, script_id, text_hash, path, status, source_kind, file_size, file_mtime, confirmed, created_at, updated_at)
                 VALUES (?, ?, ?, 'voice', ?, ?, ?, ?, ?, ?, 'ready', 'scan', ?, ?, 0, ?, ?)
                 ON CONFLICT(project_id, uid, script_block_id, asset_type, account_label, block_label, path)
-                DO UPDATE SET account_id=excluded.account_id, text_hash=excluded.text_hash, status='ready', file_size=excluded.file_size, file_mtime=excluded.file_mtime, updated_at=excluded.updated_at
+                DO UPDATE SET
+                    account_id=excluded.account_id,
+                    script_id=excluded.script_id,
+                    status='ready',
+                    file_size=excluded.file_size,
+                    file_mtime=excluded.file_mtime,
+                    updated_at=excluded.updated_at,
+                    text_hash=COALESCE(NULLIF(asset_bindings.text_hash, ''), excluded.text_hash)
                 """,
                 (
                     project_id,

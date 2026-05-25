@@ -48,7 +48,16 @@ from .settings import (
 from .style_config import UIStyle
 from .sync_service import SyncService
 from .utils import compact_path, now_iso, safe_text, text_hash
-from .workflow_service import WorkflowRunResult, WorkflowService, markdown_file_to_voice_text
+from .workflow_service import (
+    DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
+    DEFAULT_SUBTITLE_ASR_MODEL,
+    DEFAULT_SUBTITLE_ASR_WORKERS,
+    WorkflowRunResult,
+    WorkflowService,
+    markdown_file_to_voice_text,
+    subtitle_entry_label,
+    subtitle_manifest_entries,
+)
 
 
 ctk.set_appearance_mode("dark")
@@ -316,8 +325,8 @@ def voice_state(assets: list[dict[str, Any]], *, uid: str, account_label: str, h
         # 有文案 hash 可对比：必须 hash 匹配才算 ready
         if any(safe_text(asset.get("text_hash")) in hashes and path_available(asset) for asset in matching_uid):
             return "ready"
-        # 存在 ready 记录但 hash 都不匹配文案 → 过期或缺失
-        if any(safe_text(asset.get("text_hash")) for asset in matching_uid):
+        # 存在 ready 记录且对应文件仍在，但 hash 都不匹配文案 → 过期
+        if any(safe_text(asset.get("text_hash")) and path_available(asset) for asset in matching_uid):
             return "expired"
         return "missing"
     # 没有文案 hash 可对比（旧数据），有 ready 记录就算可用
@@ -443,6 +452,11 @@ def safe_file_component(value: str, fallback: str = "未命名") -> str:
     text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text)
     text = re.sub(r"\s+", " ", text).strip(" .")
     return text or fallback
+
+
+def is_valid_windows_filename(value: str) -> bool:
+    text = safe_text(value).strip()
+    return bool(text and Path(text).name == text and not re.search(r'[<>:"/\\|?*\x00-\x1f]', text))
 
 
 def default_spoken_markdown_path(project: dict[str, Any], account_label: str = "") -> Path:
@@ -1104,24 +1118,80 @@ class App(ctk.CTk):
         sidebar.grid(row=0, column=0, sticky="ns")
         sidebar.grid_propagate(False)
 
-        title = ctk.CTkLabel(sidebar, text="B-Workflow SQL", font=("Microsoft YaHei", 13, "bold"), text_color=UIStyle.COLOR_PRIMARY)
-        title.pack(pady=(UIStyle.PAD_XL, UIStyle.PAD_MD), padx=UIStyle.PAD_MD, anchor="w")
+        title = ctk.CTkLabel(
+            sidebar,
+            text="B-Workflow",
+            font=("Microsoft YaHei", 13, "bold"),
+            text_color=UIStyle.COLOR_TEXT_MAIN,
+        )
+        title.pack(pady=(UIStyle.PAD_LG, UIStyle.PAD_SM), padx=UIStyle.PAD_LG, anchor="w")
 
         nav_frame = ctk.CTkScrollableFrame(sidebar, fg_color="transparent")
-        nav_frame.pack(fill="both", expand=True, padx=UIStyle.PAD_SM)
+        nav_frame.pack(fill="both", expand=True, padx=UIStyle.PAD_SM, pady=(0, UIStyle.PAD_MD))
 
-        groups = {
-            "配置": ["品类项目", "文案中心", "资产中心", "同步中心", "用户管理"],
-            "工作流": ["生成配音", "组合口播稿", "生成剪映草稿"],
-            "工具": ["单独配音"],
+        group_icons = {
+            "配置": "\uE713",
+            "工作流": "\uE9D9",
+            "工具": "\uE90F",
         }
-        for group, names in groups.items():
+        page_icons = {
+            "品类项目": "\uECAA",
+            "文案中心": "\uE8A5",
+            "资产中心": "\uE8B7",
+            "同步中心": "\uE895",
+            "用户管理": "\uE716",
+            "生成配音": "\uE720",
+            "组合口播稿": "\uE8FD",
+            "生成剪映草稿": "\uE8C6",
+            "单独配音": "\uE720",
+            "roll-b改名": "\uE8AC",
+            "导出字幕 SRT": "\uEDE1",
+        }
+        groups = (
+            ("配置", ("品类项目", "文案中心", "资产中心", "同步中心", "用户管理")),
+            ("工作流", ("生成配音", "组合口播稿", "生成剪映草稿")),
+            ("工具", ("单独配音", "roll-b改名", "导出字幕 SRT")),
+        )
+
+        def add_nav_group(group: str) -> None:
+            header = ctk.CTkFrame(nav_frame, fg_color="transparent", height=36)
+            header.pack(fill="x", padx=UIStyle.PAD_XS, pady=(UIStyle.PAD_MD, UIStyle.PAD_XS))
+            header.grid_propagate(False)
+            header.grid_rowconfigure(0, weight=1)
+            header.grid_columnconfigure(2, weight=1)
             ctk.CTkLabel(
-                nav_frame, text=group,
-                font=UIStyle.FONT_SMALL, text_color=UIStyle.COLOR_TEXT_DIM,
-            ).pack(anchor="w", padx=UIStyle.PAD_SM, pady=(UIStyle.PAD_MD, UIStyle.PAD_XS))
+                header,
+                text=group_icons.get(group, ""),
+                width=26,
+                font=UIStyle.FONT_NAV_ICON,
+                text_color=UIStyle.COLOR_NAV_GROUP,
+            ).grid(row=0, column=0, sticky="w", padx=(10, 4))
+            ctk.CTkLabel(
+                header,
+                text=group,
+                font=UIStyle.FONT_NAV_GROUP,
+                text_color=UIStyle.COLOR_NAV_GROUP,
+                anchor="w",
+            ).grid(row=0, column=1, sticky="w")
+            ctk.CTkLabel(
+                header,
+                text="\uE70D",
+                width=22,
+                font=("Segoe MDL2 Assets", 11),
+                text_color="#526179",
+            ).grid(row=0, column=3, sticky="e", padx=(0, 8))
+            divider = ctk.CTkFrame(nav_frame, fg_color="#182235", height=1)
+            divider.pack(fill="x", padx=(UIStyle.PAD_SM, UIStyle.PAD_SM), pady=(0, UIStyle.PAD_SM))
+
+        for group, names in groups:
+            add_nav_group(group)
             for name in names:
-                btn = NavButton(nav_frame, text=name, command=lambda page=name: self.show_page(page))
+                btn = NavButton(
+                    nav_frame,
+                    text=name,
+                    icon=page_icons.get(name, ""),
+                    command=lambda page=name: self.show_page(page),
+                )
                 btn.pack(fill="x", padx=UIStyle.PAD_XS, pady=2)
                 self.nav_buttons[name] = btn
 
@@ -1885,19 +1955,30 @@ class ProjectPageDialog(BasePage):
         if payload.get("md_path") and not confirm_project_markdown_path(self, payload, payload["md_path"]):
             return
 
-        def work() -> tuple[int, dict[str, Any] | None]:
+        def work() -> tuple[int, dict[str, Any] | None, str]:
             project_id = self.db.upsert_project(payload)
-            sync_result = self.sync.sync_master_scheme(project_id, apply_changes=True) if payload.get("scheme_id") else None
-            return project_id, sync_result
+            sync_result = None
+            sync_error = ""
+            if payload.get("scheme_id"):
+                try:
+                    sync_result = self.sync.sync_master_scheme(project_id, apply_changes=True)
+                except Exception as exc:
+                    sync_error = str(exc)
+            return project_id, sync_result, sync_error
 
-        def on_success(result: tuple[int, dict[str, Any] | None]) -> None:
-            project_id, sync_result = result
+        def on_success(result: tuple[int, dict[str, Any] | None, str]) -> None:
+            project_id, sync_result, sync_error = result
             self._close_project_dialog()
             self.app.set_current_project(project_id)
             self.refresh()
             self.log(f"已保存项目：{payload['name']}")
             if sync_result:
                 self.log(f"Master 方案已同步：新增 {len(sync_result['added'])}，更新 {len(sync_result['updated'])}，移除 {len(sync_result['removed'])}")
+            if sync_error:
+                self.log(f"Master 方案同步失败：{sync_error}")
+                messagebox.showwarning("项目已保存，Master 同步失败", sync_error)
+                self.toast("项目已保存，Master 同步失败", kind="warning")
+                return
             self.toast("项目已保存")
 
         self.app.run_background("保存品类项目", work, on_success=on_success, show_success_toast=False)
@@ -3268,6 +3349,11 @@ class SyncPage(BasePage):
         account_label = self.user_var.get().strip()
         if not account_label or account_label == "全部":
             account_label = "小燃"
+        try:
+            self.sync.sync_markdown(project["id"])
+        except Exception as exc:
+            messagebox.showerror("MD 同步失败", f"配音检查前同步当前 MD 失败：{exc}")
+            return
         blocks = self.repo.script_blocks(project["id"])
         assets = self.repo.asset_bindings(project["id"])
         products = {safe_text(item.get("uid")): item for item in self.repo.products(project["id"], include_removed=False)}
@@ -3324,11 +3410,11 @@ class SyncPage(BasePage):
             "按文案块核对当前用户的配音状态。",
             sections,
             action_text="立即配音",
-            action_enabled=bool(missing_voice),
+            action_enabled=bool(missing_voice or expired_voice),
             close_text="关闭",
         )
         if action == "action":
-            self._open_voice_generation_for_missing(project["id"], account_label, missing_voice)
+            self._open_voice_generation_for_missing(project["id"], account_label, missing_voice + expired_voice)
 
     def _open_voice_generation_for_missing(self, project_id: int, account_label: str, missing_voice: list[dict[str, str]]) -> None:
         targets = voice_generation_targets_from_rows(missing_voice)
@@ -4127,8 +4213,7 @@ class WorkflowPage(BasePage):
             messagebox.showerror("执行失败", str(exc))
             return
         progress_dialog = TaskProgressDialog(self, self._running_dialog_title(), self._running_dialog_message())
-        progress_dialog.append("即将执行：")
-        progress_dialog.append(" ".join(f'"{p}"' if " " in p else p for p in cmd))
+        self._append_run_summary(progress_dialog, cmd)
         progress_dialog.append("")
 
         def work() -> Any:
@@ -4165,6 +4250,22 @@ class WorkflowPage(BasePage):
             messagebox.showerror("执行失败", str(exc))
 
         self.app.run_background("执行任务", work, on_success=on_success, on_error=on_error, show_success_toast=False)
+
+    def _append_run_summary(self, progress_dialog: TaskProgressDialog, cmd: list[str]) -> None:
+        if isinstance(self, JianyingPage):
+            draft_name = self.account_var.get().strip()
+            spoken_md = self.spoken_md_var.get().strip()
+            intro_video = self.intro_video_var.get().strip()
+            progress_dialog.append("已确认配置，开始生成剪映草稿。")
+            if draft_name:
+                progress_dialog.append(f"草稿名称：{draft_name}")
+            if spoken_md:
+                progress_dialog.append(f"口播稿：{spoken_md}")
+            if intro_video:
+                progress_dialog.append(f"引言成片视频：{intro_video}")
+            return
+        progress_dialog.append("即将执行：")
+        progress_dialog.append(" ".join(f'"{p}"' if " " in p else p for p in cmd))
 
     def _run_voice_command(self) -> None:
         project = self.project_required()
@@ -4401,6 +4502,18 @@ class WorkflowPage(BasePage):
         step_start: int = 1,
     ) -> tuple[list[DialogSection], dict[str, int], bool]:
         selected_uids, selected_script_ids = parse_voice_targets(target_text)
+        try:
+            self.sync.sync_markdown(project["id"])
+        except Exception as exc:
+            prefix = f"{task_title}｜" if task_title else ""
+            return [
+                DialogSection(
+                    title=f"{prefix}MD 同步失败",
+                    step=str(step_start),
+                    tone="warning",
+                    items=[f"配音预检查前同步当前 MD 失败：{exc}"],
+                )
+            ], {"pending": 0, "skipped": 0, "blocked": 1}, False
         products = {a["uid"]: a for a in self.repo.products(project["id"], include_removed=False)}
         blocks = self.repo.script_blocks(project["id"])
         assets = self.repo.asset_bindings(project["id"])
@@ -4415,14 +4528,19 @@ class WorkflowPage(BasePage):
         product_blocks = [
             b for b in blocks
             if b["script_type"] == "product"
-            and (not selected or b["owner_uid"] in selected)
-            and (not selected_scripts or safe_text(b.get("script_id")).casefold() in selected_scripts)
+            and (
+                (not selected and not selected_scripts)
+                or b["owner_uid"] in selected
+                or safe_text(b.get("script_id")).casefold() in selected_scripts
+            )
         ]
         shared_blocks = [
             b for b in blocks
             if b["script_type"] in {"intro", "price_transition"}
-            and not selected
-            and (not selected_scripts or safe_text(b.get("script_id")).casefold() in selected_scripts)
+            and (
+                (not selected and not selected_scripts)
+                or safe_text(b.get("script_id")).casefold() in selected_scripts
+            )
         ]
         pending, skipped, blocked = [], [], []
         for uid in selected_uids:
@@ -5315,32 +5433,468 @@ class JianyingPage(WorkflowPage):
         act = ctk.CTkFrame(self.form_area, fg_color="transparent")
         act.pack(fill="x", pady=(0, UIStyle.PAD_MD))
         PrimaryButton(act, text="    预检查并执行    ", command=self._run_command).pack(side="right")
-        GhostButton(act, text="导出字幕 SRT", command=self._export_subtitle_srt).pack(side="right", padx=(0, UIStyle.PAD_SM))
 
-    def _export_subtitle_srt(self) -> None:
+
+class RollBRenamePage(WorkflowPage):
+    def __init__(self, master, app: App):
+        super().__init__(master, app, "roll-b改名")
+        self.directory_var = ctk.StringVar()
+
+        form = ctk.CTkFrame(self.form_area, fg_color=UIStyle.COLOR_CARD_BG, corner_radius=UIStyle.RADIUS_LG)
+        form.pack(fill="x", pady=(0, UIStyle.PAD_LG))
+        form.columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(form, text="视频目录", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
+            row=0, column=0, sticky="w", padx=(UIStyle.PAD_LG, UIStyle.PAD_SM), pady=(UIStyle.PAD_LG, UIStyle.PAD_XS)
+        )
+        AppEntry(form, textvariable=self.directory_var).grid(
+            row=0, column=1, sticky="ew", padx=(0, UIStyle.PAD_SM), pady=(UIStyle.PAD_LG, UIStyle.PAD_XS)
+        )
+        GhostButton(form, text="选择目录", width=92, command=self._browse_video_dir).grid(
+            row=0, column=2, sticky="e", padx=(0, UIStyle.PAD_LG), pady=(UIStyle.PAD_LG, UIStyle.PAD_XS)
+        )
+
+        ctk.CTkLabel(
+            form,
+            text="目录下的视频文件名需要包含商品 UID；预检查会生成改名计划，确认后才会实际改名并同步视频素材。",
+            font=UIStyle.FONT_SMALL,
+            text_color=UIStyle.COLOR_TEXT_DIM,
+        ).grid(row=1, column=1, columnspan=2, sticky="w", padx=(0, UIStyle.PAD_LG), pady=(0, UIStyle.PAD_MD))
+
+        actions = ctk.CTkFrame(form, fg_color="transparent")
+        actions.grid(row=2, column=0, columnspan=3, sticky="ew", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_LG))
+        actions.columnconfigure(0, weight=1)
+        PrimaryButton(actions, text="预检查并执行", command=self._run_roll_b_rename).grid(row=0, column=1, sticky="e")
+
+    def refresh(self) -> None:
+        previous_project_id = self.loaded_project_id
+        super().refresh()
+        project = self.app.current_project()
+        current = self.directory_var.get().strip()
+        if project and (previous_project_id != project["id"] or not current or current == str(DEFAULT_VIDEO_ROOT)):
+            self.directory_var.set(str(Path(safe_text(project.get("video_root")) or DEFAULT_VIDEO_ROOT) / project_category_folder(project)))
+
+    def _browse_video_dir(self) -> None:
+        project = self.app.current_project()
+        current = self.directory_var.get().strip()
+        initial = current
+        if not initial and project:
+            initial = str(Path(safe_text(project.get("video_root")) or DEFAULT_VIDEO_ROOT) / project_category_folder(project))
+        path = filedialog.askdirectory(initialdir=initial or str(DEFAULT_VIDEO_ROOT), title="选择 roll-b 视频目录")
+        if path:
+            self.directory_var.set(path.replace("/", "\\"))
+
+    def _roll_b_precheck_sections(self, project: dict[str, Any], preview: dict[str, Any]) -> list[DialogSection]:
+        counts = preview.get("counts") or {}
+        items = [item for item in preview.get("items", []) if isinstance(item, dict)]
+        rename_items = [item for item in items if safe_text(item.get("status")) == "rename"]
+        unchanged_items = [item for item in items if safe_text(item.get("status")) == "unchanged"]
+        skipped_items = [item for item in items if safe_text(item.get("status")) == "skipped"]
+        blocked_items = [item for item in items if safe_text(item.get("status")) == "blocked"]
+        blockers = [safe_text(item) for item in preview.get("blockers") or [] if safe_text(item)]
+        rename_lines = [
+            f"{safe_text(item.get('source_name'))} → {safe_text(item.get('target_name'))}"
+            for item in rename_items
+        ]
+        skipped_lines = [
+            f"{safe_text(item.get('source_name'))}：{safe_text(item.get('message'))}"
+            for item in skipped_items + unchanged_items
+        ]
+        blocked_lines = blockers + [
+            f"{safe_text(item.get('source_name'))}：{safe_text(item.get('message'))}"
+            for item in blocked_items
+        ]
+        return [
+            DialogSection(
+                title="项目信息",
+                step="1",
+                tone="primary",
+                rows=[
+                    ("项目", safe_text(project.get("name"))),
+                    ("视频目录", safe_text(preview.get("directory")) or self.directory_var.get().strip() or "未选择"),
+                    ("命名格式", "价格元-UID-商品名称；多个视频自动加 -1 / -2"),
+                ],
+            ),
+            DialogSection(
+                title="改名统计",
+                step="2",
+                tone="success" if preview.get("can_execute") else "warning",
+                rows=[
+                    ("待改名", f"{counts.get('rename', 0)} 个"),
+                    ("已是目标格式", f"{counts.get('unchanged', 0)} 个"),
+                    ("跳过", f"{counts.get('skipped', 0)} 个"),
+                    ("阻塞", f"{counts.get('blocked', 0) + len(blockers)} 个"),
+                ],
+                helper="确认后只重命名预览中的待改名视频，不删除文件，不覆盖已有目标文件。",
+            ),
+            DialogSection(
+                title="改名计划",
+                step="3",
+                tone="info",
+                items=preview_lines(rename_lines or ["当前没有需要改名的视频。"], limit=120),
+            ),
+            DialogSection(
+                title="跳过和阻塞",
+                step="4",
+                tone="warning" if blocked_lines else "success",
+                items=preview_lines((blocked_lines + skipped_lines) or ["当前没有阻塞项。"], limit=120),
+            ),
+        ]
+
+    def _run_roll_b_rename(self) -> None:
         project = self.project_required()
         if not project:
             return
-        path_text = self.spoken_md_var.get().strip() or safe_text(project.get("spoken_md_path"))
-        if not path_text:
-            messagebox.showinfo("缺少口播稿", "请先选择口播稿 MD，并在“组合口播稿”生成 manifest。")
+        directory = self.directory_var.get().strip()
+        try:
+            preview = self.workflow.preview_roll_b_rename(project["id"], directory)
+        except Exception as exc:
+            messagebox.showerror("预检查失败", str(exc))
             return
-        spoken_path = Path(path_text)
-        manifest = self.workflow.spoken_manifest_path(project["id"], spoken_path)
-        intro_video = self.intro_video_var.get().strip()
-        progress_dialog = TaskProgressDialog(self, "正在导出字幕 SRT", "正在按口播 manifest 和配音时长生成字幕文件。")
-        progress_dialog.append(f"口播稿：{spoken_path}")
-        progress_dialog.append(f"manifest：{manifest}")
-        if intro_video:
-            progress_dialog.append(f"引言成片视频：{intro_video}")
+        sections = self._roll_b_precheck_sections(project, preview)
+        if not show_precheck_dialog(
+            self,
+            "roll-b改名预检查",
+            "请核对本次视频改名计划，确认无误后再执行。",
+            sections,
+            can_continue=bool(preview.get("can_execute")),
+            confirm_text="确认改名",
+        ):
+            return
+
+        progress_dialog = TaskProgressDialog(self, "正在执行 roll-b 改名", "正在重命名视频并同步素材状态...")
+        progress_dialog.append(f"项目：{safe_text(project.get('name'))}")
+        progress_dialog.append(f"视频目录：{directory}")
+        progress_dialog.append("")
+
+        def work() -> dict[str, Any]:
+            result = self.workflow.execute_roll_b_rename(project["id"], directory)
+            sync_result = self.sync.sync_assets(project["id"], asset_type="video", root_override=directory)
+            return {"rename": result, "sync": sync_result}
+
+        def on_success(payload: dict[str, Any]) -> None:
+            rename_result = payload.get("rename") or {}
+            sync_result = payload.get("sync") or {}
+            renamed_items = rename_result.get("renamed_items") or []
+            progress_dialog.append(f"[成功] {safe_text(rename_result.get('result_message')) or 'roll-b 改名完成。'}")
+            for item in renamed_items[:80]:
+                progress_dialog.append(f"[改名] {Path(safe_text(item.get('source_path'))).name} → {safe_text(item.get('target_name'))}")
+            if len(renamed_items) > 80:
+                progress_dialog.append(f"[提示] 另有 {len(renamed_items) - 80} 个视频已改名，日志中省略。")
+            progress_dialog.append(
+                f"[同步] 视频素材同步完成：命中 {sync_result.get('video', 0)} 个，缺素材 {sync_result.get('unmatched', 0)} 个。"
+            )
+            self.log_text.configure(state="normal")
+            self.log_text.insert("end", f"roll-b改名完成：{rename_result.get('renamed', 0)} 个\n")
+            self.log_text.see("end")
+            self.log_text.configure(state="disabled")
+            progress_dialog.finish(
+                "roll-b 改名已执行完成。",
+                kind="success",
+                headline="roll-b改名完成",
+                detail=f"已改名 {rename_result.get('renamed', 0)} 个视频",
+            )
+            self.app.toast("roll-b改名完成")
+
+        def on_error(exc: Exception, tb: str) -> None:
+            progress_dialog.append(tb or str(exc))
+            progress_dialog.finish(f"执行失败：{exc}", kind="error")
+            messagebox.showerror("执行失败", str(exc))
+
+        self.app.run_background("roll-b改名", work, on_success=on_success, on_error=on_error, show_success_toast=False)
+
+
+class SubtitleSrtPage(WorkflowPage):
+    def __init__(self, master, app: App):
+        super().__init__(master, app, "导出字幕 SRT")
+        self.output_dir_var = ctk.StringVar(value=str(DEFAULT_STANDALONE_VOICE_ROOT))
+        self.output_filename_var = ctk.StringVar(value="字幕-口播稿.srt")
+        self.intro_video_var.trace_add("write", lambda *_args: self._sync_intro_text_state())
+
+        form = ctk.CTkFrame(self.form_area, fg_color=UIStyle.COLOR_CARD_BG, corner_radius=UIStyle.RADIUS_LG)
+        form.pack(fill="x", pady=(0, UIStyle.PAD_LG))
+        inner = ctk.CTkFrame(form, fg_color="transparent")
+        inner.pack(fill="x", padx=UIStyle.PAD_LG, pady=UIStyle.PAD_LG)
+        inner.columnconfigure(1, weight=1)
+
+        r = 0
+        ctk.CTkLabel(inner, text="口播稿 MD", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
+            row=r, column=0, sticky="w", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS
+        )
+        AppEntry(inner, textvariable=self.spoken_md_var).grid(row=r, column=1, sticky="ew", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS)
+        GhostButton(inner, text="选", width=50, command=self._browse_spoken_md_for_srt).grid(row=r, column=2, pady=UIStyle.PAD_XS)
+
+        r += 1
+        ctk.CTkLabel(inner, text="导出目录", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
+            row=r, column=0, sticky="w", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS
+        )
+        AppEntry(inner, textvariable=self.output_dir_var).grid(row=r, column=1, sticky="ew", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS)
+        GhostButton(inner, text="选", width=50, command=self._browse_srt_output_dir).grid(row=r, column=2, pady=UIStyle.PAD_XS)
+
+        r += 1
+        ctk.CTkLabel(inner, text="SRT 文件名", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
+            row=r, column=0, sticky="w", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS
+        )
+        AppEntry(inner, textvariable=self.output_filename_var).grid(row=r, column=1, sticky="ew", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS)
+        GhostButton(inner, text="重置", width=50, command=lambda: self._sync_default_srt_filename(force=True)).grid(row=r, column=2, pady=UIStyle.PAD_XS)
+
+        r += 1
+        ctk.CTkLabel(inner, text="片头视频时长校准（可选）", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
+            row=r, column=0, sticky="w", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS
+        )
+        AppEntry(inner, textvariable=self.intro_video_var).grid(row=r, column=1, sticky="ew", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS)
+        intro_actions = ctk.CTkFrame(inner, fg_color="transparent")
+        intro_actions.grid(row=r, column=2, sticky="w", pady=UIStyle.PAD_XS)
+        GhostButton(intro_actions, text="选", width=50, command=self._browse_intro_video_for_srt).pack(side="left")
+        GhostButton(intro_actions, text="清空", width=58, command=self._clear_intro_video_for_srt).pack(side="left", padx=(UIStyle.PAD_XS, 0))
+
+        r += 1
+        ctk.CTkLabel(inner, text="片头文案", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
+            row=r, column=0, sticky="nw", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS
+        )
+        self.intro_text_input = AppTextbox(inner, height=88, wrap="word")
+        self.intro_text_input.grid(row=r, column=1, columnspan=2, sticky="ew", pady=UIStyle.PAD_XS)
+
+        r += 1
+        ctk.CTkLabel(
+            inner,
+            text="只有最终成片前面另放片头视频时才需要选择；选择后可粘贴片头文案，留空则只做时长校准。",
+            font=UIStyle.FONT_SMALL,
+            text_color=UIStyle.COLOR_TEXT_DIM,
+        ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(UIStyle.PAD_XS, UIStyle.PAD_SM))
+
+        actions = ctk.CTkFrame(self.form_area, fg_color="transparent")
+        actions.pack(fill="x", pady=(0, UIStyle.PAD_MD))
+        PrimaryButton(actions, text="预检查并导出", command=self._run_subtitle_export).pack(side="right")
+        self._sync_intro_text_state()
+
+    def refresh(self) -> None:
+        projects = self.repo.projects()
+        vals = [f"{p['id']} - {p['name']}" for p in projects]
+        self.project_combo.configure(values=vals)
+        project = self.app.current_project()
+        if project:
+            self.project_var.set(f"{project['id']} - {project['name']}")
+            if self.loaded_project_id != project["id"]:
+                self.spoken_md_var.set(safe_text(project.get("spoken_md_path")))
+                self.loaded_project_id = project["id"]
+                self._sync_default_srt_filename(force=True)
+
+    def _browse_spoken_md_for_srt(self) -> None:
+        current_path = safe_text(self.spoken_md_var.get())
+        default_path = Path(current_path) if current_path else DEFAULT_SPOKEN_MD_ROOT / "口播稿.md"
+        initial_dir = default_path.parent if default_path.parent.exists() else DEFAULT_SPOKEN_MD_ROOT
+        path = filedialog.askopenfilename(
+            title="选择口播稿 MD",
+            initialdir=str(initial_dir),
+            filetypes=[("Markdown", "*.md"), ("All", "*.*")],
+        )
+        if not path:
+            return
+        if Path(path).suffix.casefold() != ".md":
+            messagebox.showwarning("只支持 MD", "导出字幕 SRT 只支持选择 .md 口播稿。")
+            return
+        self.spoken_md_var.set(path.replace("/", "\\"))
+        self._sync_default_srt_filename(force=True)
+
+    def _browse_srt_output_dir(self) -> None:
+        initial = self.output_dir_var.get().strip() or str(DEFAULT_STANDALONE_VOICE_ROOT)
+        path = filedialog.askdirectory(initialdir=initial, title="选择 SRT 导出目录")
+        if path:
+            self.output_dir_var.set(path.replace("/", "\\"))
+
+    def _browse_intro_video_for_srt(self) -> None:
+        self._browse_intro_video()
+        self._sync_intro_text_state()
+
+    def _clear_intro_video_for_srt(self) -> None:
+        self.intro_video_var.set("")
+        self._sync_intro_text_state()
+
+    def _sync_intro_text_state(self) -> None:
+        intro_text = getattr(self, "intro_text_input", None)
+        if intro_text is None:
+            return
+        intro_text.configure(state="normal" if self.intro_video_var.get().strip() else "disabled")
+
+    def _intro_video_text(self) -> str:
+        intro_text = getattr(self, "intro_text_input", None)
+        if intro_text is None or not self.intro_video_var.get().strip():
+            return ""
+        return intro_text.get("1.0", "end").strip()
+
+    def _sync_default_srt_filename(self, *, force: bool = False) -> None:
+        current = self.output_filename_var.get().strip()
+        if not force and current and not current.startswith("字幕-"):
+            return
+        stem = Path(self.spoken_md_var.get().strip()).stem if self.spoken_md_var.get().strip() else "口播稿"
+        self.output_filename_var.set(f"字幕-{safe_file_component(stem, '口播稿')}.srt")
+
+    def _subtitle_target_path(self) -> Path:
+        filename = self.output_filename_var.get().strip()
+        if not filename:
+            stem = Path(self.spoken_md_var.get().strip()).stem if self.spoken_md_var.get().strip() else "口播稿"
+            filename = f"字幕-{safe_file_component(stem, '口播稿')}.srt"
+        if Path(filename).suffix.casefold() != ".srt":
+            filename = f"{filename}.srt"
+        return Path(self.output_dir_var.get().strip()) / filename
+
+    def _subtitle_precheck(self, project: dict[str, Any]) -> tuple[list[DialogSection], bool, dict[str, Any]]:
+        blocked: list[str] = []
+        warnings: list[str] = []
+        path_text = self.spoken_md_var.get().strip()
+        spoken_path = Path(path_text) if path_text else Path()
+        manifest = self.workflow.spoken_manifest_path(project["id"], spoken_path if path_text else "口播稿.md")
+        output_dir_text = self.output_dir_var.get().strip()
+        output_path = self._subtitle_target_path()
+        intro_video_text = self.intro_video_var.get().strip()
+        intro_video = Path(intro_video_text) if intro_video_text else None
+        intro_text = self._intro_video_text()
+
+        if not path_text:
+            blocked.append("请选择口播稿 MD。")
+        elif spoken_path.suffix.casefold() != ".md":
+            blocked.append("口播稿必须是 .md 文件。")
+        elif not spoken_path.exists():
+            blocked.append(f"口播稿不存在：{spoken_path}")
+        if not manifest.exists():
+            blocked.append(f"缺少内部 manifest，请先在“组合口播稿”生成：{manifest}")
+        if not output_dir_text:
+            blocked.append("请选择 SRT 导出目录。")
+        else:
+            anchor = Path(output_dir_text).anchor
+            if anchor and not Path(anchor).exists():
+                blocked.append(f"导出目录所在盘符不存在：{anchor}")
+        filename = self.output_filename_var.get().strip()
+        if filename and not is_valid_windows_filename(filename):
+            blocked.append("SRT 文件名不能包含路径或 Windows 非法字符。")
+        if intro_video is not None and not intro_video.exists():
+            blocked.append(f"引言成片视频不存在：{intro_video}")
+        if output_path.exists():
+            warnings.append(f"目标文件已存在，确认后会覆盖：{output_path}")
+        elif output_dir_text and not Path(output_dir_text).exists():
+            warnings.append(f"导出目录不存在，确认后会自动创建：{output_dir_text}")
+
+        entries: list[dict[str, Any]] = []
+        missing_text: list[str] = []
+        missing_audio: list[str] = []
+        manifest_error = ""
+        if manifest.exists():
+            try:
+                payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
+                entries = subtitle_manifest_entries(payload)
+                export_entries = entries
+                if intro_video is not None:
+                    export_entries = [entry for entry in entries if safe_text(entry.get("section")) != "intro"]
+                for entry in export_entries:
+                    label = subtitle_entry_label(entry)
+                    if not safe_text(entry.get("text")).strip():
+                        missing_text.append(label)
+                    audio_text = safe_text(entry.get("audio_path"))
+                    if not audio_text:
+                        missing_audio.append(label)
+                        continue
+                    audio_path = Path(audio_text)
+                    if not audio_path.is_absolute():
+                        audio_path = manifest.parent / audio_path
+                    if not audio_path.exists():
+                        missing_audio.append(f"{label}：{audio_path}")
+                if not export_entries:
+                    blocked.append("manifest 中没有可导出的字幕条目。")
+            except Exception as exc:
+                manifest_error = str(exc)
+                blocked.append(f"manifest 读取失败：{exc}")
+        if missing_text:
+            blocked.append(f"缺字幕文本 {len(missing_text)} 条。")
+        if missing_audio:
+            blocked.append(f"缺配音文件 {len(missing_audio)} 条。")
+
+        sections = [
+            DialogSection(
+                title="导出配置",
+                step="1",
+                tone="primary",
+                rows=[
+                    ("项目", safe_text(project.get("name"))),
+                    ("口播稿", str(spoken_path) if path_text else "未选择"),
+                    ("manifest", str(manifest)),
+                    ("导出文件", str(output_path)),
+                    (
+                        "字幕对齐",
+                        f"ASR（faster-whisper {DEFAULT_SUBTITLE_ASR_MODEL}，beam={DEFAULT_SUBTITLE_ASR_BEAM_SIZE}，并行 {DEFAULT_SUBTITLE_ASR_WORKERS} 路）",
+                    ),
+                    ("片头视频时长校准", str(intro_video) if intro_video is not None else "未选择"),
+                    ("片头文案", f"{len(intro_text)} 字" if intro_video is not None and intro_text else "未填写"),
+                ],
+            ),
+            DialogSection(
+                title="manifest 检查",
+                step="2",
+                tone="warning" if missing_text or missing_audio or manifest_error else "success",
+                rows=[
+                    ("字幕条目", str(len(entries))),
+                    ("缺字幕文本", str(len(missing_text))),
+                    ("缺配音文件", str(len(missing_audio))),
+                ],
+                items=preview_lines((missing_text + missing_audio)[:12]) if (missing_text or missing_audio) else ["当前没有发现字幕文本或配音文件缺口。"],
+            ),
+            DialogSection(
+                title="阻塞与提醒",
+                step="3",
+                tone="warning" if warnings or blocked else "success",
+                items=preview_lines(blocked + warnings),
+                helper="" if blocked else "当前没有阻塞项，可以继续导出字幕 SRT。",
+            ),
+        ]
+        return sections, not blocked, {
+            "manifest": manifest,
+            "output_path": output_path,
+            "intro_video": intro_video_text,
+            "intro_video_text": intro_text,
+            "target_exists": output_path.exists(),
+        }
+
+    def _run_subtitle_export(self) -> None:
+        project = self.project_required()
+        if not project:
+            return
+        self._sync_default_srt_filename()
+        sections, can_continue, payload = self._subtitle_precheck(project)
+        confirm_text = "修正后再导出" if not can_continue else ("覆盖并导出" if payload["target_exists"] else "导出 SRT")
+        confirmed = show_precheck_dialog(
+            self,
+            "导出字幕 SRT 预检查",
+            "请核对口播稿、manifest、导出路径和缺口信息，确认无误后再导出。",
+            sections,
+            can_continue=can_continue,
+            confirm_text=confirm_text,
+            dismiss_text="关闭" if not can_continue else "取消",
+        )
+        if not confirmed:
+            if not can_continue:
+                self.toast("存在阻塞项，SRT 未导出", kind="warning", duration=4000)
+            return
+
+        progress_dialog = TaskProgressDialog(self, "正在导出字幕 SRT", "正在按口播 manifest 和配音 ASR 时间生成字幕文件。")
+        progress_dialog.append(f"manifest：{payload['manifest']}")
+        progress_dialog.append(f"导出文件：{payload['output_path']}")
+        progress_dialog.append(
+            f"字幕对齐：ASR（faster-whisper {DEFAULT_SUBTITLE_ASR_MODEL}，beam={DEFAULT_SUBTITLE_ASR_BEAM_SIZE}，并行 {DEFAULT_SUBTITLE_ASR_WORKERS} 路）"
+        )
+        if payload["intro_video"]:
+            progress_dialog.append(f"片头视频时长校准：{payload['intro_video']}")
+            if payload["intro_video_text"]:
+                progress_dialog.append(f"片头文案：{len(payload['intro_video_text'])} 字")
         progress_dialog.append("")
 
         def work() -> WorkflowRunResult:
             return self.workflow.export_subtitle_srt(
                 project["id"],
-                manifest_path=manifest,
-                output_path=self.workflow.default_subtitle_srt_path(project["id"], spoken_path),
-                intro_video_path=intro_video,
+                manifest_path=payload["manifest"],
+                output_path=payload["output_path"],
+                intro_video_path=payload["intro_video"],
+                intro_video_text=payload["intro_video_text"],
+                align_with_asr=True,
             )
 
         def on_success(result: WorkflowRunResult) -> None:
@@ -5372,4 +5926,6 @@ PAGE_MAP: dict[str, type] = {
     "组合口播稿": AssemblePage,
     "生成剪映草稿": JianyingPage,
     "单独配音": StandaloneVoicePage,
+    "roll-b改名": RollBRenamePage,
+    "导出字幕 SRT": SubtitleSrtPage,
 }

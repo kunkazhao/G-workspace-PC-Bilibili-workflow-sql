@@ -65,7 +65,8 @@ def test_outline_uses_price_uid_title_and_preserves_existing_copy(tmp_path: Path
     assert "59.0-YXEJ002" not in text
     assert "保留商品正文" in text
     assert "保留引言" in text
-    assert "保留视频信息" in text
+    assert "## 视频信息" not in text
+    assert "保留视频信息" not in text
     assert "保留价格过渡" in text
     assert "## 已移出 Master 的商品文案" in text
     assert "已删除商品正文" in text

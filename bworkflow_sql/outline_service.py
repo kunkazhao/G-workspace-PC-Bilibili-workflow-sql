@@ -57,8 +57,6 @@ class OutlineService:
             "---",
             "",
         ]
-        lines += render_section("视频信息", parsed.extra_sections.get("视频信息", []) if parsed else [])
-
         lines += ["## 引言文案", ""]
         if parsed and parsed.intro_scripts:
             for block in parsed.intro_scripts:

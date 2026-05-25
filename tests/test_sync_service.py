@@ -62,6 +62,59 @@ def test_script_hash_matches_legacy_voice_registry_format(tmp_path: Path):
     assert len(row["text_hash"]) == 40
 
 
+def test_voice_asset_sync_refreshes_markdown_and_preserves_existing_voice_hash(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    md_path = tmp_path / "product.md"
+    voice_root = tmp_path / "voice"
+    project_id = db.upsert_project({"name": "数码-键盘", "md_path": str(md_path), "voice_root": str(voice_root)})
+    repo.upsert_products_from_master(
+        project_id,
+        [{"uid": "YXEJ002", "title": "竹林鸟夜莺Z1", "price_label": "59元"}],
+    )
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO accounts (label, account_id, created_at, updated_at)
+            VALUES ('小燃', 'xiaoran', 'now', 'now')
+            """
+        )
+    md_path.write_text(
+        """
+## 商品文案
+
+### 59元-YXEJ002-竹林鸟夜莺Z1
+#### 正文
+旧版配音文案
+""".strip(),
+        encoding="utf-8",
+    )
+    SyncService(db).sync_markdown(project_id)
+    voice_path = voice_root / "数码-键盘" / "小燃" / "59-YXEJ002-竹林鸟夜莺Z1-正文.wav"
+    voice_path.parent.mkdir(parents=True)
+    voice_path.write_bytes(b"voice")
+    SyncService(db).sync_assets(project_id, asset_type="voice", root_override=voice_root)
+    md_path.write_text(
+        """
+## 商品文案
+
+### 59元-YXEJ002-竹林鸟夜莺Z1
+#### 正文
+新版配音文案
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = SyncService(db).sync_assets(project_id, asset_type="voice", root_override=voice_root)
+
+    block = db.fetchone("SELECT body, text_hash FROM script_blocks WHERE project_id=? AND owner_uid='YXEJ002'", (project_id,))
+    asset = db.fetchone("SELECT text_hash FROM asset_bindings WHERE project_id=? AND asset_type='voice'", (project_id,))
+    assert result["voice"] == 1
+    assert block["body"] == "新版配音文案"
+    assert block["text_hash"] == text_hash("新版配音文案")
+    assert asset["text_hash"] == text_hash("旧版配音文案")
+
+
 def test_markdown_sync_preserves_and_generates_script_ids(tmp_path: Path):
     db = Database(tmp_path / "test.db")
     repo = Repository(db)
@@ -162,6 +215,37 @@ def test_master_sync_forces_fresh_scheme_summary(tmp_path: Path, monkeypatch):
     assert result["added"] == [{"uid": "JP096", "title": "狼蛛F75Max 客制化", "price_label": "279元", "master_item_id": "", "sort_order": 1}]
 
 
+def test_master_sync_trusts_matching_category_id_when_names_are_aliases(tmp_path: Path, monkeypatch):
+    db = Database(tmp_path / "test.db")
+    project_id = db.upsert_project(
+        {
+            "name": "数码-入耳蓝牙耳机",
+            "workspace_id": "workspace-1",
+            "category_id": "category-1",
+            "category_name": "入耳蓝牙耳机",
+            "scheme_id": "scheme-1",
+            "scheme_name": "赵二-b站-入耳式",
+            "md_path": r"G:\WriteSpace\B站-文案脚本\10_b站文案\3.商品文案\数码-入耳蓝牙耳机.md",
+        }
+    )
+
+    class FakeMasterSchemes:
+        @staticmethod
+        def fetch_scheme_summary(*, workspace_id, scheme_id, force_refresh=False):
+            return {
+                "category_id": "category-1",
+                "category_name": "耳机-入耳",
+                "items": [{"uid": "EJ001", "title": "示例耳机", "price": "99元"}],
+            }
+
+    monkeypatch.setattr("bworkflow_sql.sync_service.install_legacy_paths", lambda: None)
+    monkeypatch.setattr("bworkflow_sql.sync_service.try_import", lambda name: FakeMasterSchemes)
+
+    result = SyncService(db).sync_master_scheme(project_id, apply_changes=False)
+
+    assert result["added"] == [{"uid": "EJ001", "title": "示例耳机", "price_label": "99元", "master_item_id": "", "sort_order": 1}]
+
+
 def test_asset_sync_ignores_extra_files_and_reports_missing_scheme_products(tmp_path: Path):
     db = Database(tmp_path / "test.db")
     repo = Repository(db)
@@ -191,6 +275,92 @@ def test_asset_sync_ignores_extra_files_and_reports_missing_scheme_products(tmp_
     assert result["unmatched_items"][0]["uid"] == "JP097"
     assert result["unmatched_items"][0]["title"] == "京东京造JZ990Pro"
     assert result["unmatched_items"][0]["asset_type"] == "image"
+
+
+def test_video_asset_sync_matches_overlapping_uid_tokens(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    video_root = tmp_path / "videos"
+    video_root.mkdir()
+    ly_video = video_root / "149元-LY018-瓷音未来Mars 2i.mp4"
+    rely_video = video_root / "186元-RELY018-西圣 A1.mp4"
+    ly_video.write_bytes(b"video")
+    rely_video.write_bytes(b"video")
+    project_id = db.upsert_project({"name": "earbuds", "video_root": str(video_root)})
+    repo.upsert_products_from_master(
+        project_id,
+        [
+            {"uid": "LY018", "title": "瓷音未来Mars 2i", "price_label": "149元"},
+            {"uid": "RELY018", "title": "西圣 A1", "price_label": "186元"},
+        ],
+    )
+
+    result = SyncService(db).sync_assets(project_id, asset_type="video", root_override=video_root)
+
+    assert result["video"] == 2
+    assert result["unmatched"] == 0
+    assert {item["uid"] for item in result["matched_items"]} == {"LY018", "RELY018"}
+    assert db.fetchone(
+        "SELECT uid FROM asset_bindings WHERE project_id=? AND path=?",
+        (project_id, str(rely_video)),
+    )["uid"] == "RELY018"
+
+
+def test_video_asset_sync_rejects_substring_uid_without_token_boundaries(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    video_root = tmp_path / "videos"
+    video_root.mkdir()
+    typo_video = video_root / "499元-RELY028-水月雨梦回2.mp4"
+    typo_video.write_bytes(b"video")
+    project_id = db.upsert_project({"name": "earbuds", "video_root": str(video_root)})
+    repo.upsert_products_from_master(
+        project_id,
+        [{"uid": "LY028", "title": "水月雨梦回2", "price_label": "499元"}],
+    )
+
+    result = SyncService(db).sync_assets(project_id, asset_type="video", root_override=video_root)
+
+    assert result["video"] == 0
+    assert result["unmatched"] == 1
+    assert result["matched_items"] == []
+    assert result["unmatched_items"][0]["uid"] == "LY028"
+
+
+def test_video_asset_sync_keeps_rematched_path_ready(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    video_root = tmp_path / "videos"
+    video_root.mkdir()
+    rely_video = video_root / "186元-RELY018-西圣 A1.mp4"
+    rely_video.write_bytes(b"video")
+    project_id = db.upsert_project({"name": "earbuds", "video_root": str(video_root)})
+    repo.upsert_products_from_master(
+        project_id,
+        [
+            {"uid": "LY018", "title": "瓷音未来Mars 2i", "price_label": "149元"},
+            {"uid": "RELY018", "title": "西圣 A1", "price_label": "186元"},
+        ],
+    )
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, asset_type, account_label, path, status, source_kind, created_at, updated_at)
+            VALUES (?, 'LY018', 'video', '', ?, 'ready', 'scan', 'now', 'now')
+            """,
+            (project_id, str(rely_video)),
+        )
+
+    result = SyncService(db).sync_assets(project_id, asset_type="video", root_override=video_root)
+
+    assert result["video"] == 1
+    assert result["unmatched_items"][0]["uid"] == "LY018"
+    rows = db.fetchall(
+        "SELECT uid, status FROM asset_bindings WHERE project_id=? AND path=? ORDER BY uid",
+        (project_id, str(rely_video)),
+    )
+    assert [(row["uid"], row["status"]) for row in rows] == [("LY018", "stale"), ("RELY018", "ready")]
 
 
 def test_asset_sync_reports_added_removed_and_current_items(tmp_path: Path):

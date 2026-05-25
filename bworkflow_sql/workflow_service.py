@@ -6,7 +6,6 @@ import math
 import os
 import random
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -14,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import wave
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -59,6 +59,12 @@ DEFAULT_LEADING_SILENCE_MS = 100
 DEFAULT_MAX_LEADING_SILENCE_MS = 120
 DEFAULT_TRAILING_SILENCE_LIMIT_MS = 500
 DEFAULT_TRAILING_SILENCE_KEEP_MS = 200
+DEFAULT_SUBTITLE_ASR_MODEL = "base"
+DEFAULT_SUBTITLE_ASR_LANGUAGE = "zh"
+DEFAULT_SUBTITLE_ASR_BEAM_SIZE = 2
+DEFAULT_SUBTITLE_ASR_WORKERS = 3
+DEFAULT_SUBTITLE_SPEECH_SNAP_WINDOW_SEC = 0.5
+DEFAULT_SUBTITLE_OVERLAP_GAP_SEC = 0.02
 INTERNAL_PREFIX = "internal:"
 DEFAULT_DISPLAY_VIDEO_SLOT = {
     "x": 1100,
@@ -67,7 +73,8 @@ DEFAULT_DISPLAY_VIDEO_SLOT = {
     "height": 258,
     "round_corner": 0.08,
 }
-DEFAULT_CLOSING_TEXT = "如果你看完这些还是拿不准该选哪款，或者不知道你的预算最适合哪一把，按老规矩在评论区留预算和需求，我看到都会回复。"
+DEFAULT_CLOSING_TEXT = "如果你看完这些还是拿不准该选哪款，或者不知道你的预算最适合哪个，按老规矩在评论区留预算和需求，我看到都会回复。"
+SUBTITLE_ASR_MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
 
 
 @dataclass
@@ -87,6 +94,35 @@ class VoiceJob:
     index: int = 0
     kind: str = "product"
     price_range_label: str = ""
+
+
+ROLL_B_VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi"}
+
+
+@dataclass
+class RollBRenameItem:
+    source_path: str
+    target_path: str
+    source_name: str
+    target_name: str
+    uid: str
+    title: str
+    price_label: str
+    status: str
+    message: str = ""
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "source_path": self.source_path,
+            "target_path": self.target_path,
+            "source_name": self.source_name,
+            "target_name": self.target_name,
+            "uid": self.uid,
+            "title": self.title,
+            "price_label": self.price_label,
+            "status": self.status,
+            "message": self.message,
+        }
 
 
 def seconds_to_frames(seconds: float, frame_rate: int) -> int:
@@ -656,7 +692,14 @@ class WorkflowService:
         for position, job in enumerate(pending, start=1):
             try:
                 emit(f"[生成 {position}/{len(pending)}] {job.product_name} / {job.block['block_label']}")
-                path = self._generate_one_voice(http, job=job, account=account, voice_id=voice_id, output_dir=out_dir)
+                path = self._generate_one_voice(
+                    http,
+                    job=job,
+                    account=account,
+                    voice_id=voice_id,
+                    output_dir=out_dir,
+                    overwrite_expired=self._has_existing_stale_voice_file(project_id, job=job, account=account),
+                )
                 self._upsert_voice_asset(project_id, job=job, account=account, path=path)
                 generated += 1
                 emit(f"[成功] {path}")
@@ -949,6 +992,7 @@ class WorkflowService:
         if intro_video is not None:
             cmd += ["--intro-video", str(intro_video)]
         completed = run_subprocess_text(cmd)
+        completed.stdout = format_jianying_run_stdout(completed.stdout)
         self.db.log_event(
             project_id,
             "jianying_draft",
@@ -1053,7 +1097,9 @@ class WorkflowService:
         subtitle_dir = self._internal_project_dir(project_id) / "subtitles"
         subtitle_dir.mkdir(parents=True, exist_ok=True)
         stem = Path(markdown_path).stem or "口播稿"
-        return subtitle_dir / f"{safe_path_component(stem)}.srt"
+        if stem.endswith(".manifest"):
+            stem = Path(stem).stem or "口播稿"
+        return subtitle_dir / f"字幕-{safe_path_component(stem)}.srt"
 
     def export_subtitle_srt(
         self,
@@ -1062,6 +1108,11 @@ class WorkflowService:
         manifest_path: str | Path,
         output_path: str | Path | None = None,
         intro_video_path: str | Path | None = None,
+        intro_video_text: str = "",
+        align_with_asr: bool = False,
+        subtitle_asr_model: str = DEFAULT_SUBTITLE_ASR_MODEL,
+        subtitle_asr_language: str = DEFAULT_SUBTITLE_ASR_LANGUAGE,
+        subtitle_asr_workers: int = DEFAULT_SUBTITLE_ASR_WORKERS,
     ) -> WorkflowRunResult:
         self._required_project(project_id)
         manifest = Path(manifest_path)
@@ -1084,6 +1135,13 @@ class WorkflowService:
         missing_text: list[str] = []
         missing_audio: list[str] = []
         srt_items: list[tuple[float, float, str]] = []
+        asr_jobs: list[dict[str, Any]] = []
+        intro_text = safe_text(intro_video_text).strip() if intro_video is not None else ""
+        if intro_text:
+            if align_with_asr and intro_video is not None:
+                asr_jobs.append({"label": "片头视频", "audio_path": str(intro_video), "text": intro_text, "offset_sec": 0.0})
+            else:
+                srt_items.extend(distribute_subtitle_text(intro_text, 0.0, initial_offset))
         cursor = initial_offset
         for entry in entries:
             label = subtitle_entry_label(entry)
@@ -1102,8 +1160,11 @@ class WorkflowService:
                 missing_audio.append(f"{label}：{audio_path}")
                 continue
             duration = probe_media_duration_seconds(audio_path)
-            for start, end, chunk_text in distribute_subtitle_text(text, cursor, duration):
-                srt_items.append((start, end, chunk_text))
+            if align_with_asr:
+                asr_jobs.append({"label": label, "audio_path": str(audio_path), "text": text, "offset_sec": cursor})
+            else:
+                for start, end, chunk_text in distribute_subtitle_text(text, cursor, duration):
+                    srt_items.append((start, end, chunk_text))
             cursor += duration
 
         if missing_text or missing_audio:
@@ -1113,6 +1174,16 @@ class WorkflowService:
             if missing_audio:
                 detail.append("缺配音文件：" + "；".join(missing_audio[:8]))
             raise ValueError("\n".join(detail))
+        if asr_jobs:
+            srt_items.extend(
+                align_subtitle_jobs_with_asr(
+                    asr_jobs,
+                    model_name=subtitle_asr_model,
+                    language=subtitle_asr_language,
+                    beam_size=DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
+                    workers=subtitle_asr_workers,
+                )
+            )
         if not srt_items:
             raise ValueError("manifest 中没有可导出的字幕条目。")
 
@@ -1123,9 +1194,177 @@ class WorkflowService:
             f"字幕条数：{len(srt_items)}\n"
             f"总时长：{total_duration:.3f} 秒\n"
         )
+        if align_with_asr:
+            stdout += (
+                f"字幕对齐：ASR（faster-whisper {subtitle_asr_model}，"
+                f"beam={DEFAULT_SUBTITLE_ASR_BEAM_SIZE}，并行 {max(1, int(subtitle_asr_workers or 1))} 路）\n"
+            )
         if intro_video is not None:
             stdout += f"引言成片偏移：{initial_offset:.3f} 秒\n"
         return WorkflowRunResult([f"{INTERNAL_PREFIX}subtitle"], stdout=stdout)
+
+    def preview_roll_b_rename(self, project_id: int, directory: str | Path) -> dict[str, Any]:
+        self._required_project(project_id)
+        root = Path(directory)
+        products = {safe_text(item.get("uid")).casefold(): item for item in self.repo.products(project_id, include_removed=False)}
+        items: list[RollBRenameItem] = []
+        blockers: list[str] = []
+        if not safe_text(directory):
+            blockers.append("还没有选择视频目录。")
+        elif not root.exists():
+            blockers.append(f"视频目录不存在：{root}")
+        elif not root.is_dir():
+            blockers.append(f"选择的路径不是目录：{root}")
+        if not products:
+            blockers.append("当前项目还没有同步 Master 商品。请先到“同步中心”同步 Master。")
+        if blockers:
+            return self._roll_b_result(root, items, blockers)
+
+        files = sorted(
+            [path for path in root.iterdir() if path.is_file() and path.suffix.casefold() in ROLL_B_VIDEO_SUFFIXES],
+            key=lambda path: path.name.casefold(),
+        )
+        if not files:
+            blockers.append("目录下没有可处理的视频文件（mp4 / mov / mkv / avi）。")
+            return self._roll_b_result(root, items, blockers)
+
+        product_uids = sorted((safe_text(item.get("uid")) for item in products.values()), key=lambda value: len(value), reverse=True)
+        grouped: dict[str, list[Path]] = {}
+        unmatched: list[RollBRenameItem] = []
+        for path in files:
+            matched = [uid for uid in product_uids if uid and uid.casefold() in path.stem.casefold()]
+            if len(matched) == 1:
+                grouped.setdefault(matched[0].casefold(), []).append(path)
+            elif len(matched) > 1:
+                unmatched.append(self._roll_b_item(path, "", "", "", "blocked", f"文件名匹配到多个 UID：{'、'.join(matched[:5])}"))
+            else:
+                unmatched.append(self._roll_b_item(path, "", "", "", "skipped", "文件名没有匹配到当前项目的商品 UID。"))
+
+        planned: list[RollBRenameItem] = []
+        for uid_key, paths in grouped.items():
+            paths = sorted(paths, key=lambda path: (path.stem.casefold() != uid_key, path.name.casefold()))
+            product = products[uid_key]
+            uid = safe_text(product.get("uid"))
+            title = safe_text(product.get("title"))
+            price = self._roll_b_price_label(safe_text(product.get("price_label")))
+            if not title or not price:
+                for path in paths:
+                    planned.append(self._roll_b_item(path, uid, title, price, "blocked", "Master 商品缺少价格或商品名称。"))
+                continue
+            for index, path in enumerate(paths, start=1):
+                suffix = f"-{index}" if len(paths) > 1 else ""
+                target_name = safe_path_component(f"{price}-{uid}-{title}{suffix}") + path.suffix
+                target = path.with_name(target_name)
+                status = "unchanged" if path.name == target_name else "rename"
+                message = "已是目标格式，无需改名。" if status == "unchanged" else "将改名。"
+                planned.append(
+                    RollBRenameItem(
+                        source_path=str(path),
+                        target_path=str(target),
+                        source_name=path.name,
+                        target_name=target_name,
+                        uid=uid,
+                        title=title,
+                        price_label=price,
+                        status=status,
+                        message=message,
+                    )
+                )
+
+        source_paths = {Path(item.source_path).resolve() for item in planned}
+        moving_sources = {Path(item.source_path).resolve() for item in planned if item.status == "rename"}
+        for item in planned:
+            if item.status != "rename":
+                continue
+            target = Path(item.target_path)
+            target_resolved = target.resolve() if target.exists() else target.absolute()
+            if target.exists() and target_resolved not in source_paths:
+                item.status = "blocked"
+                item.message = f"目标文件已存在：{target.name}"
+            elif target.exists() and target_resolved in source_paths and target_resolved not in moving_sources:
+                item.status = "blocked"
+                item.message = f"目标文件被本目录中的另一个文件占用：{target.name}"
+
+        items = planned + unmatched
+        return self._roll_b_result(root, items, blockers)
+
+    def execute_roll_b_rename(self, project_id: int, directory: str | Path) -> dict[str, Any]:
+        preview = self.preview_roll_b_rename(project_id, directory)
+        items = [dict(item) for item in preview.get("items", [])]
+        actionable = [item for item in items if item.get("status") == "rename"]
+        if not actionable:
+            preview["renamed"] = 0
+            preview["result_message"] = "没有需要改名的视频文件。"
+            return preview
+        if any(item.get("status") == "blocked" for item in items):
+            raise ValueError("预览中存在阻塞项，请修正后再执行。")
+
+        temp_pairs: list[tuple[Path, Path, Path]] = []
+        renamed_items: list[dict[str, str]] = []
+        try:
+            for index, item in enumerate(actionable, start=1):
+                source = Path(item["source_path"])
+                target = Path(item["target_path"])
+                if not source.exists():
+                    raise ValueError(f"源文件不存在：{source}")
+                temp = source.with_name(f".{source.name}.rollbtmp-{int(time.time() * 1000)}-{index}{source.suffix}")
+                while temp.exists():
+                    temp = source.with_name(f".{source.name}.rollbtmp-{int(time.time() * 1000)}-{index + 1}{source.suffix}")
+                source.rename(temp)
+                temp_pairs.append((temp, target, source))
+            for temp, target, source in temp_pairs:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temp.rename(target)
+                renamed_items.append({"source_path": str(source), "target_path": str(target), "target_name": target.name})
+        except Exception:
+            for temp, _target, source in reversed(temp_pairs):
+                if temp.exists() and not source.exists():
+                    try:
+                        temp.rename(source)
+                    except OSError:
+                        pass
+            raise
+
+        refreshed = self.preview_roll_b_rename(project_id, directory)
+        refreshed["renamed"] = len(renamed_items)
+        refreshed["renamed_items"] = renamed_items
+        refreshed["result_message"] = f"已改名 {len(renamed_items)} 个视频文件。"
+        return refreshed
+
+    def _roll_b_item(self, path: Path, uid: str, title: str, price: str, status: str, message: str) -> RollBRenameItem:
+        return RollBRenameItem(
+            source_path=str(path),
+            target_path="",
+            source_name=path.name,
+            target_name="",
+            uid=uid,
+            title=title,
+            price_label=price,
+            status=status,
+            message=message,
+        )
+
+    def _roll_b_result(self, root: Path, items: list[RollBRenameItem], blockers: list[str]) -> dict[str, Any]:
+        counts = {
+            "rename": sum(1 for item in items if item.status == "rename"),
+            "unchanged": sum(1 for item in items if item.status == "unchanged"),
+            "skipped": sum(1 for item in items if item.status == "skipped"),
+            "blocked": sum(1 for item in items if item.status == "blocked"),
+        }
+        return {
+            "directory": str(root),
+            "counts": counts,
+            "items": [item.as_dict() for item in items],
+            "blockers": blockers,
+            "can_execute": counts["rename"] > 0 and counts["blocked"] == 0 and not blockers,
+        }
+
+    def _roll_b_price_label(self, value: str) -> str:
+        number = first_number(value)
+        if number is None:
+            return safe_text(value)
+        label = str(int(number)) if number.is_integer() else str(number)
+        return f"{label}元"
 
     def _voice_output_dir(self, project: dict[str, Any], *, account: dict[str, Any], account_label: str = "") -> Path:
         label = safe_text(account.get("label") or account_label or "voice")
@@ -1160,11 +1399,13 @@ class WorkflowService:
         jobs: list[VoiceJob] = []
         product_index = 0
         for block in self.repo.script_blocks(project_id):
-            if selected_scripts and safe_text(block.get("script_id")).casefold() not in selected_scripts:
-                continue
+            block_script_id = safe_text(block.get("script_id")).casefold()
             if block["script_type"] == "product":
                 uid = block["owner_uid"]
-                if selected and uid.casefold() not in selected:
+                product_selected = not selected and not selected_scripts
+                product_selected = product_selected or (selected and uid.casefold() in selected)
+                product_selected = product_selected or (selected_scripts and block_script_id in selected_scripts)
+                if not product_selected:
                     continue
                 product = products.get(uid)
                 if not product:
@@ -1180,7 +1421,7 @@ class WorkflowService:
                         kind="product",
                     )
                 )
-            elif not selected:
+            elif (not selected and not selected_scripts) or (selected_scripts and block_script_id in selected_scripts):
                 uid = "INTRO" if block["script_type"] == "intro" else "PRICE_TRANSITION"
                 label = block["block_label"] if block["script_type"] == "intro" else block["price_range_label"]
                 jobs.append(
@@ -1218,9 +1459,18 @@ class WorkflowService:
             (existing if found else pending).append(job)
         return existing, pending
 
-    def _generate_one_voice(self, http: "JsonHttpClient", *, job: VoiceJob, account: dict[str, Any], voice_id: str, output_dir: Path) -> Path:
+    def _generate_one_voice(
+        self,
+        http: "JsonHttpClient",
+        *,
+        job: VoiceJob,
+        account: dict[str, Any],
+        voice_id: str,
+        output_dir: Path,
+        overwrite_expired: bool = False,
+    ) -> Path:
         filename = self._voice_filename(job)
-        final_path = unique_path(output_dir / filename)
+        final_path = output_dir / filename if overwrite_expired else unique_path(output_dir / filename)
         payload = {
             "voice_id": voice_id,
             "text": safe_text(job.block.get("body")),
@@ -1238,9 +1488,27 @@ class WorkflowService:
     def _finalize_generated_voice(self, generated_path: Path, final_path: Path) -> Path:
         final_path.parent.mkdir(parents=True, exist_ok=True)
         if generated_path.resolve() != final_path.resolve():
-            shutil.move(str(generated_path), str(final_path))
+            generated_path.replace(final_path)
         normalize_generated_voice_silence(final_path)
         return final_path
+
+    def _has_existing_stale_voice_file(self, project_id: int, *, job: VoiceJob, account: dict[str, Any]) -> bool:
+        account_label = safe_text(account.get("label"))
+        current_hash = safe_text(job.block.get("text_hash"))
+        for asset in self.repo.asset_bindings(project_id):
+            if asset["asset_type"] != "voice" or asset["status"] != "ready":
+                continue
+            if int(asset["script_block_id"] or 0) != int(job.block["id"]):
+                continue
+            if safe_text(asset.get("account_label")) != account_label:
+                continue
+            asset_hash = safe_text(asset.get("text_hash"))
+            if not asset_hash or asset_hash == current_hash:
+                continue
+            path_text = safe_text(asset.get("path"))
+            if path_text and Path(path_text).exists():
+                return True
+        return False
 
     def _voice_filename(self, job: VoiceJob) -> str:
         label = safe_text(job.block.get("block_label")) or extract_label(safe_text(job.block.get("body")))
@@ -1688,6 +1956,94 @@ def run_subprocess_text(cmd: list[str]) -> WorkflowRunResult:
     )
 
 
+def format_jianying_run_stdout(stdout: str) -> str:
+    payload = parse_json_object(stdout)
+    if not isinstance(payload, dict):
+        return stdout
+
+    status = safe_text(payload.get("status"))
+    if status == "failed":
+        error = safe_text(payload.get("error")) or "未知错误"
+        return f"生成失败：{error}\n"
+
+    lines: list[str] = []
+    draft_name = safe_text(payload.get("draft_name"))
+    draft_dir = safe_text(payload.get("draft_dir"))
+    if draft_name:
+        lines.append(f"草稿名称：{draft_name}")
+    if draft_dir:
+        lines.append(f"草稿已写入：{draft_dir}")
+
+    total_items = int(payload.get("total_items") or 0)
+    product_items = int(payload.get("product_items") or 0)
+    if total_items:
+        lines.append(f"本次共拼接 {total_items} 段素材，其中商品推荐 {product_items} 段。")
+
+    total_duration = float(payload.get("total_duration_sec") or 0)
+    if total_duration > 0:
+        lines.append(f"草稿总时长约 {format_duration_cn(total_duration)}。")
+
+    if payload.get("has_intro_video"):
+        intro_duration = float(payload.get("intro_duration_sec") or 0)
+        suffix = f"，时长约 {format_duration_cn(intro_duration)}" if intro_duration > 0 else ""
+        lines.append(f"已使用引言成片视频{suffix}。")
+
+    display_video_segments = int(payload.get("display_video_segments") or 0)
+    if display_video_segments:
+        lines.append(f"已插入 {display_video_segments} 段商品展示视频。")
+
+    subtitle_segments = int(payload.get("subtitle_segments") or 0)
+    if subtitle_segments:
+        lines.append(f"已生成 {subtitle_segments} 段字幕。")
+
+    image_fallback = payload.get("image_fallback")
+    if isinstance(image_fallback, dict):
+        resolved_count = int(image_fallback.get("resolved_count") or 0)
+        missing_uids = [safe_text(item) for item in image_fallback.get("missing_uids") or [] if safe_text(item)]
+        if resolved_count:
+            lines.append(f"有 {resolved_count} 个商品图片已从图片索引自动补齐。")
+        if missing_uids:
+            lines.append(f"仍有 {len(missing_uids)} 个商品没有找到可用图片：{'、'.join(missing_uids[:8])}")
+
+    skipped_entries = payload.get("skipped_entries")
+    if isinstance(skipped_entries, list) and skipped_entries:
+        lines.append(f"有 {len(skipped_entries)} 个条目因缺少素材被跳过，请检查口播稿清单。")
+
+    missing_subtitle_texts = payload.get("missing_subtitle_texts")
+    if isinstance(missing_subtitle_texts, list) and missing_subtitle_texts:
+        lines.append(f"有 {len(missing_subtitle_texts)} 段音频缺少字幕文本，已跳过字幕生成。")
+
+    if not lines:
+        return stdout
+    lines.append("剪映草稿生成完成，可以在剪映草稿列表中打开。")
+    return "\n".join(lines) + "\n"
+
+
+def parse_json_object(text: str) -> Any:
+    raw = safe_text(text).strip()
+    if not raw:
+        return None
+    candidates = [raw]
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(raw[start : end + 1])
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def format_duration_cn(seconds: float) -> str:
+    total_seconds = max(0, int(round(seconds)))
+    minutes, secs = divmod(total_seconds, 60)
+    if minutes:
+        return f"{minutes} 分 {secs} 秒"
+    return f"{secs} 秒"
+
+
 def decode_process_output(value: bytes | str | None) -> str:
     if value is None:
         return ""
@@ -1852,27 +2208,23 @@ def probe_media_duration_seconds(path: Path) -> float:
     return duration
 
 
+SUBTITLE_BREAK_RE = re.compile(r"[，,。!！?？；;：:]|……|…")
+SUBTITLE_DROP_PUNCT_RE = re.compile(r"[，,。!！?？；;：:]|……|…")
+SUBTITLE_ALIGN_DROP_RE = re.compile(r"[\s，,。.!！?？；;：:、/\\\-—_~·`\"“”'‘’（）()【】\[\]{}《》<>]+|……|…")
+
+
 def split_subtitle_text(text: str, *, max_chars: int = 24) -> list[str]:
     body = re.sub(r"\s+", "", safe_text(text))
     if not body:
         return []
-    clauses = [item for item in re.split(r"(?<=[。！？!?；;，,、])", body) if item]
+    clauses = [SUBTITLE_DROP_PUNCT_RE.sub("", item) for item in SUBTITLE_BREAK_RE.split(body)]
+    clauses = [item for item in clauses if item]
     chunks: list[str] = []
-    current = ""
     for clause in clauses or [body]:
         if len(clause) > max_chars:
-            if current:
-                chunks.append(current)
-                current = ""
             chunks.extend(clause[index : index + max_chars] for index in range(0, len(clause), max_chars))
             continue
-        if current and len(current) + len(clause) > max_chars:
-            chunks.append(current)
-            current = clause
-        else:
-            current += clause
-    if current:
-        chunks.append(current)
+        chunks.append(clause)
     return [chunk for chunk in chunks if chunk]
 
 
@@ -1893,6 +2245,228 @@ def distribute_subtitle_text(text: str, start_sec: float, duration_sec: float) -
         segments.append((cursor, end, chunk))
         cursor = end
     return segments
+
+
+def normalize_subtitle_alignment_text(text: str) -> str:
+    return SUBTITLE_ALIGN_DROP_RE.sub("", safe_text(text)).casefold()
+
+
+def _expand_asr_unit(start: float, end: float, text: str) -> list[dict[str, Any]]:
+    clean = normalize_subtitle_alignment_text(text)
+    if not clean:
+        return []
+    start = max(0.0, float(start or 0.0))
+    end = max(start + 0.001, float(end or start))
+    step = (end - start) / len(clean)
+    return [
+        {
+            "start": start + step * index,
+            "end": start + step * (index + 1),
+            "text": char,
+        }
+        for index, char in enumerate(clean)
+    ]
+
+
+def _subtitle_asr_model(model_name: str):
+    device = "cpu"
+    compute_type = "int8"
+    key = (model_name, device, compute_type)
+    if key not in SUBTITLE_ASR_MODEL_CACHE:
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as exc:
+            raise ValueError("当前环境缺少 faster-whisper，无法执行 ASR 字幕对齐。") from exc
+        SUBTITLE_ASR_MODEL_CACHE[key] = WhisperModel(model_name, device=device, compute_type=compute_type)
+    return SUBTITLE_ASR_MODEL_CACHE[key]
+
+
+def run_subtitle_alignment_asr(
+    audio_path: str | Path,
+    *,
+    model_name: str = DEFAULT_SUBTITLE_ASR_MODEL,
+    language: str = DEFAULT_SUBTITLE_ASR_LANGUAGE,
+    beam_size: int = DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
+) -> list[dict[str, Any]]:
+    path = Path(audio_path)
+    if not path.exists():
+        raise ValueError(f"音频文件不存在：{path}")
+    model = _subtitle_asr_model(model_name)
+    segments, _info = model.transcribe(
+        str(path),
+        language=language or None,
+        vad_filter=True,
+        word_timestamps=True,
+        beam_size=max(1, int(beam_size or 1)),
+    )
+    units: list[dict[str, Any]] = []
+    for segment in segments:
+        words = getattr(segment, "words", None) or []
+        if words:
+            for word in words:
+                units.extend(_expand_asr_unit(float(word.start), float(word.end), safe_text(word.word)))
+            continue
+        units.extend(_expand_asr_unit(float(segment.start), float(segment.end), safe_text(segment.text)))
+    return units
+
+
+def subtitle_speech_ranges(audio_path: str | Path) -> list[tuple[float, float]]:
+    path = Path(audio_path)
+    if path.suffix.casefold() != ".wav":
+        return []
+    try:
+        with wave.open(str(path), "rb") as reader:
+            frame_rate = reader.getframerate()
+            frame_count = reader.getnframes()
+            channel_count = reader.getnchannels()
+            sample_width = reader.getsampwidth()
+            raw_audio = reader.readframes(frame_count)
+    except wave.Error:
+        return []
+    if frame_rate <= 0 or frame_count <= 0 or channel_count <= 0 or sample_width not in {1, 2, 3, 4}:
+        return []
+    bytes_per_frame = channel_count * sample_width
+    ranges = silence_ranges_for_audio(
+        raw_audio,
+        frame_count=frame_count,
+        frame_rate=frame_rate,
+        bytes_per_frame=bytes_per_frame,
+        sample_width=sample_width,
+        threshold_db=DEFAULT_SILENCE_THRESHOLD_DB,
+        chunk_ms=DEFAULT_SILENCE_CHUNK_MS,
+    )
+    return [(start / frame_rate, end / frame_rate) for start, end, is_silence in ranges if not is_silence]
+
+
+def snap_subtitle_segments_to_speech(
+    audio_path: str | Path,
+    segments: list[tuple[float, float, str]],
+    offset_sec: float,
+    *,
+    snap_window_sec: float = DEFAULT_SUBTITLE_SPEECH_SNAP_WINDOW_SEC,
+) -> list[tuple[float, float, str]]:
+    speech_ranges = subtitle_speech_ranges(audio_path)
+    if not speech_ranges or not segments:
+        return segments
+
+    offset = max(0.0, float(offset_sec or 0.0))
+    snapped: list[tuple[float, float, str]] = []
+    for start, end, text in segments:
+        local_start = max(0.0, start - offset)
+        snapped_start = start
+        for speech_start, speech_end in speech_ranges:
+            if speech_end <= local_start:
+                continue
+            if speech_start <= local_start < speech_end:
+                break
+            if 0 <= speech_start - local_start <= snap_window_sec:
+                snapped_start = offset + speech_start
+            break
+        if end <= snapped_start:
+            end = snapped_start + 0.1
+        snapped.append((snapped_start, end, text))
+
+    adjusted = snapped[:]
+    for index in range(len(adjusted) - 1):
+        start, end, text = adjusted[index]
+        next_start = adjusted[index + 1][0]
+        max_end = next_start - DEFAULT_SUBTITLE_OVERLAP_GAP_SEC
+        if end > max_end:
+            end = max(start + 0.1, max_end)
+            adjusted[index] = (start, end, text)
+    return adjusted
+
+
+def align_subtitle_text_with_asr(
+    audio_path: str | Path,
+    text: str,
+    offset_sec: float,
+    *,
+    model_name: str = DEFAULT_SUBTITLE_ASR_MODEL,
+    language: str = DEFAULT_SUBTITLE_ASR_LANGUAGE,
+    beam_size: int = DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
+) -> list[tuple[float, float, str]]:
+    chunks = split_subtitle_text(text)
+    if not chunks:
+        return []
+    units = run_subtitle_alignment_asr(audio_path, model_name=model_name, language=language, beam_size=beam_size)
+    if not units:
+        raise ValueError(f"ASR 未识别到可对齐语音：{audio_path}")
+
+    normalized_lengths = [len(normalize_subtitle_alignment_text(chunk)) for chunk in chunks]
+    if sum(normalized_lengths) <= 0:
+        return []
+
+    unit_index = 0
+    offset = max(0.0, float(offset_sec or 0.0))
+    aligned: list[tuple[float, float, str]] = []
+    for index, chunk in enumerate(chunks):
+        remaining_chunks = len(chunks) - index - 1
+        available = len(units) - unit_index
+        if available <= 0:
+            start = aligned[-1][1] if aligned else offset
+            aligned.append((start, start + 0.1, chunk))
+            continue
+        if index == len(chunks) - 1:
+            take = available
+        else:
+            target_len = max(normalized_lengths[index], 1)
+            take = min(target_len, max(1, available - remaining_chunks))
+        start_unit = units[unit_index]
+        end_unit = units[min(len(units) - 1, unit_index + take - 1)]
+        start = offset + float(start_unit["start"])
+        end = offset + float(end_unit["end"])
+        if end <= start:
+            end = start + 0.1
+        aligned.append((start, end, chunk))
+        unit_index += take
+    return snap_subtitle_segments_to_speech(audio_path, aligned, offset)
+
+
+def _align_subtitle_job_worker(job: dict[str, Any], model_name: str, language: str, beam_size: int) -> list[tuple[float, float, str]]:
+    return align_subtitle_text_with_asr(
+        safe_text(job.get("audio_path")),
+        safe_text(job.get("text")),
+        float(job.get("offset_sec") or 0.0),
+        model_name=model_name,
+        language=language,
+        beam_size=beam_size,
+    )
+
+
+def align_subtitle_jobs_with_asr(
+    jobs: list[dict[str, Any]],
+    *,
+    model_name: str = DEFAULT_SUBTITLE_ASR_MODEL,
+    language: str = DEFAULT_SUBTITLE_ASR_LANGUAGE,
+    beam_size: int = DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
+    workers: int = DEFAULT_SUBTITLE_ASR_WORKERS,
+) -> list[tuple[float, float, str]]:
+    if not jobs:
+        return []
+    requested_workers = max(1, int(workers or 1))
+    worker_count = min(requested_workers, len(jobs))
+    if requested_workers <= 1:
+        results = [_align_subtitle_job_worker(job, model_name, language, beam_size) for job in jobs]
+    else:
+        results: list[list[tuple[float, float, str]] | None] = [None] * len(jobs)
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(_align_subtitle_job_worker, job, model_name, language, beam_size): index
+                for index, job in enumerate(jobs)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    results[index] = future.result()
+                except Exception as exc:
+                    label = safe_text(jobs[index].get("label")) or f"字幕段 {index + 1}"
+                    raise ValueError(f"{label} ASR 字幕对齐失败：{exc}") from exc
+    merged: list[tuple[float, float, str]] = []
+    for result in results:
+        if result:
+            merged.extend(result)
+    return merged
 
 
 def format_srt_timestamp(seconds: float) -> str:

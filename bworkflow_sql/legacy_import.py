@@ -17,6 +17,7 @@ from .utils import file_metadata, now_iso, safe_text
 OLD_ACCOUNTS_PATH = LEGACY_PROJECT_ROOT / "data" / "accounts.json"
 OLD_VOICE_REGISTRY_PATH = Path(r"G:\Tools\IndexTTS2.0\outputs\voices\voices.json")
 OLD_MEDIA_INDEX_PATH = LEGACY_PROJECT_ROOT / "data" / "media_index.json"
+UID_BOUNDARY_PATTERN = r"(?<![A-Za-z0-9])({uid})(?![A-Za-z0-9])"
 
 
 class LegacyImportService:
@@ -483,8 +484,12 @@ def _product_from_path(path: Path, products: list[dict[str, Any]]) -> dict[str, 
 
 def _uid_from_path(path: Path, products: dict[str, dict[str, Any]]) -> str:
     name = path.stem.casefold()
-    for uid in products:
-        if uid.casefold() in name:
+    for uid in sorted(products, key=len, reverse=True):
+        uid_text = safe_text(uid).casefold()
+        if not uid_text:
+            continue
+        pattern = UID_BOUNDARY_PATTERN.format(uid=re.escape(uid_text))
+        if re.search(pattern, name):
             return uid
     return ""
 

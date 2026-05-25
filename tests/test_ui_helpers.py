@@ -4,6 +4,7 @@ from bworkflow_sql.ui import (
     ProjectPageDialog,
     asset_folder_paths,
     build_project_issue_summary,
+    is_valid_windows_filename,
     manifest_account_label,
     manifest_missing_assets,
     manifest_product_video_gaps,
@@ -67,6 +68,13 @@ def _editor_state() -> ProjectEditorState:
         child_combo=FakeCombo(),
         scheme_combo=FakeCombo(),
     )
+
+
+def test_windows_filename_validation_accepts_default_srt_names():
+    assert is_valid_windows_filename("字幕-5月-小燃.srt")
+    assert is_valid_windows_filename("字幕-5月-小燃")
+    assert not is_valid_windows_filename(r"G:\2026项目-b站\字幕-5月-小燃.srt")
+    assert not is_valid_windows_filename("字幕:5月-小燃.srt")
 
 
 def test_project_dialog_master_combos_receive_candidate_values(monkeypatch):
@@ -203,6 +211,22 @@ def test_voice_state_marks_stale_hash_as_expired_even_with_unhashed_scan():
     ]
 
     assert voice_state(assets, uid="JP071", account_label="小燃", hashes={"new"}) == "expired"
+
+
+def test_voice_state_treats_deleted_stale_voice_as_missing(tmp_path):
+    deleted_path = tmp_path / "deleted.wav"
+    assets = [
+        {
+            "uid": "JP071",
+            "asset_type": "voice",
+            "status": "ready",
+            "account_label": "小燃",
+            "text_hash": "old",
+            "path": str(deleted_path),
+        },
+    ]
+
+    assert voice_state(assets, uid="JP071", account_label="小燃", hashes={"new"}) == "missing"
 
 
 def test_issue_summary_reports_voice_gaps_per_script_block():

@@ -48,6 +48,7 @@ Workflow:
 Tools:
 
 - 单独配音：directly synthesize pasted text or a whole MD document without binding the result to a category project.
+- 导出字幕 SRT：select a spoken-script MD, reuse its generated manifest and audio durations, and export `字幕-<口播稿 MD 文件名>.srt`.
 
 The UI is intentionally direct and database-first. JSON/Markdown support is compatibility and import/export, not the primary app state.
 

@@ -12,6 +12,8 @@ class UIStyle:
     COLOR_SIDEBAR_BG = "#0B111D"
     COLOR_NAV_ACTIVE = "#1B2535"
     COLOR_NAV_HOVER = "#202B3D"
+    COLOR_NAV_GROUP = "#7C879B"
+    COLOR_NAV_ICON = "#718098"
     COLOR_TEXT_MAIN = "#F7FAFF"
     COLOR_TEXT_DIM = "#A8B3C5"
     COLOR_TEXT_ACCENT = "#FB7299"
@@ -37,7 +39,7 @@ class UIStyle:
     PAD_MD = 12
     PAD_SM = 8
     PAD_XS = 4
-    SIDEBAR_WIDTH = 152
+    SIDEBAR_WIDTH = 202
     INPUT_HEIGHT = 36
     BUTTON_HEIGHT = 36
 
@@ -47,5 +49,7 @@ class UIStyle:
     FONT_H3 = ("Microsoft YaHei", 14, "bold")
     FONT_BODY = ("Microsoft YaHei", 13)
     FONT_SMALL = ("Microsoft YaHei", 12)
+    FONT_NAV_GROUP = ("Microsoft YaHei", 12, "bold")
+    FONT_NAV_ICON = ("Segoe MDL2 Assets", 15)
     FONT_TABLE = ("Microsoft YaHei", 12)
     FONT_BUTTON = ("Microsoft YaHei", 13, "bold")

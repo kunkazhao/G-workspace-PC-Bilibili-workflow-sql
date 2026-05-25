@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import math
+import re
 import struct
 import wave
 
@@ -20,6 +21,7 @@ from bworkflow_sql.workflow_service import (
     markdown_to_voice_text,
     normalize_generated_voice_silence,
     prepend_silence,
+    split_subtitle_text,
     unique_path,
 )
 
@@ -147,6 +149,20 @@ def test_workflow_commands_use_internal_tasks(tmp_path: Path):
     assert "generate_jianying_draft_with_display_videos.py" not in " ".join(jianying)
 
 
+def test_voice_jobs_treat_mixed_uids_and_script_ids_as_union(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    repo = Repository(db)
+    service = WorkflowService(db)
+    blocks = repo.script_blocks(project_id)
+    intro_id = next(block["script_id"] for block in blocks if block["script_type"] == "intro")
+    price_id = next(block["script_id"] for block in blocks if block["script_type"] == "price_transition")
+
+    jobs = service._voice_jobs(project_id, uids=["YXEJ002"], script_ids=[intro_id, price_id])
+
+    assert {job.kind for job in jobs} == {"product", "intro", "price_transition"}
+    assert {job.block["script_id"] for job in jobs} == {"product:YXEJ002:V001", intro_id, price_id}
+
+
 def test_voice_filename_uses_price_uid_title_and_duplicate_suffix(tmp_path: Path):
     db, project_id = seed_project(tmp_path)
     service = WorkflowService(db)
@@ -167,6 +183,130 @@ def test_voice_filename_uses_price_uid_title_and_duplicate_suffix(tmp_path: Path
     existing.parent.mkdir(parents=True)
     existing.write_bytes(b"voice")
     assert unique_path(existing).name == "229-JP097-京东京造JZ990Pro-正文-1.wav"
+
+
+def test_roll_b_rename_preview_uses_price_uid_title_and_duplicate_suffix(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    repo = Repository(db)
+    repo.upsert_products_from_master(
+        project_id,
+        [
+            {"uid": "JP015", "title": "狼途 LT84有线", "price_label": "99.0"},
+            {"uid": "JP018", "title": "凌豹/K98", "price_label": "149元"},
+        ],
+    )
+    video_dir = tmp_path / "videos"
+    video_dir.mkdir()
+    (video_dir / "JP015.mp4").write_bytes(b"video")
+    (video_dir / "JP015-2.mov").write_bytes(b"video")
+    (video_dir / "JP018.mp4").write_bytes(b"video")
+    (video_dir / "unknown.mp4").write_bytes(b"video")
+
+    preview = WorkflowService(db).preview_roll_b_rename(project_id, video_dir)
+    targets = {item["source_name"]: item["target_name"] for item in preview["items"]}
+
+    assert preview["counts"]["rename"] == 3
+    assert preview["counts"]["skipped"] == 1
+    assert targets["JP015.mp4"] == "99元-JP015-狼途 LT84有线-1.mp4"
+    assert targets["JP015-2.mov"] == "99元-JP015-狼途 LT84有线-2.mov"
+    assert targets["JP018.mp4"] == "149元-JP018-凌豹_K98.mp4"
+    assert preview["can_execute"]
+
+
+def test_roll_b_rename_execute_renames_files_and_preserves_suffix(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    repo = Repository(db)
+    repo.upsert_products_from_master(project_id, [{"uid": "JP015", "title": "狼途 LT84有线", "price_label": "99元"}])
+    video_dir = tmp_path / "videos"
+    video_dir.mkdir()
+    source = video_dir / "JP015.mp4"
+    source.write_bytes(b"video")
+
+    result = WorkflowService(db).execute_roll_b_rename(project_id, video_dir)
+
+    target = video_dir / "99元-JP015-狼途 LT84有线.mp4"
+    assert result["renamed"] == 1
+    assert target.exists()
+    assert not source.exists()
+
+
+def test_roll_b_rename_blocks_external_target_conflict(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    repo = Repository(db)
+    repo.upsert_products_from_master(project_id, [{"uid": "JP015", "title": "狼途 LT84有线", "price_label": "99元"}])
+    video_dir = tmp_path / "videos"
+    video_dir.mkdir()
+    (video_dir / "JP015.mp4").write_bytes(b"video")
+    (video_dir / "99元-JP015-狼途 LT84有线.mp4").mkdir()
+
+    preview = WorkflowService(db).preview_roll_b_rename(project_id, video_dir)
+    blocked = [item for item in preview["items"] if item["status"] == "blocked"]
+
+    assert preview["counts"]["blocked"] == 1
+    assert not preview["can_execute"]
+    assert "目标文件已存在" in blocked[0]["message"]
+
+
+def test_expired_voice_generation_overwrites_original_filename(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    repo = Repository(db)
+    project = repo.project(project_id)
+    account = repo.accounts()[0]
+    block = next(block for block in repo.script_blocks(project_id) if block["script_type"] == "product")
+    job = VoiceJob(
+        block=block,
+        uid="YXEJ002",
+        product_name="竹林鸟夜莺Z1",
+        price_label="59元",
+        index=1,
+        kind="product",
+    )
+    output_dir = Path(project["voice_root"]) / project["name"] / account["label"]
+    old_path = output_dir / service._voice_filename(job)
+    write_test_wav(old_path, [(0.02, 0.0)])
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, script_block_id, asset_type, account_label, account_id, block_label, script_id, text_hash, path, status, source_kind, file_size, file_mtime, confirmed, created_at, updated_at)
+            VALUES (?, ?, ?, 'voice', ?, ?, ?, ?, ?, ?, 'ready', 'generated', ?, ?, 1, ?, ?)
+            """,
+            (
+                project_id,
+                job.uid,
+                job.block["id"],
+                account["label"],
+                account["account_id"],
+                job.block["block_label"],
+                job.block["script_id"],
+                "old-hash",
+                str(old_path),
+                old_path.stat().st_size,
+                "old",
+                now_iso(),
+                now_iso(),
+            ),
+        )
+
+    class FakeHttp:
+        def post(self, _url, *, json_payload):
+            generated = tmp_path / "tts" / json_payload["output_name"]
+            write_test_wav(generated, [(0.02, 0.2)])
+            return {"audio_path": str(generated)}
+
+    assert service._has_existing_stale_voice_file(project_id, job=job, account=account)
+    result_path = service._generate_one_voice(
+        FakeHttp(),
+        job=job,
+        account=account,
+        voice_id="voice-1",
+        output_dir=output_dir,
+        overwrite_expired=True,
+    )
+
+    assert result_path == old_path
+    assert not old_path.with_name(f"{old_path.stem}-1{old_path.suffix}").exists()
 
 
 def test_export_markdown_uses_database_asset_bindings_and_asset_sync_dedupes(tmp_path: Path):
@@ -461,6 +601,106 @@ def test_jianying_generation_skips_subtitles_by_default(tmp_path: Path, monkeypa
     assert "--skip-subtitles" in captured["cmd"]
 
 
+def test_jianying_generation_summarizes_json_stdout_for_users(tmp_path: Path, monkeypatch):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    project = Repository(db).project(project_id)
+    result = service.run_command(service.build_assembly_command(project_id, account_label="小燃"))
+    assert result.returncode == 0
+    spoken_path = Path(project["spoken_md_path"])
+    manifest_path = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "manifests" / f"{spoken_path.stem}.manifest.json"
+
+    def fake_run(cmd: list[str]):
+        return workflow_service_module.WorkflowRunResult(
+            cmd,
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "status": "success",
+                    "draft_name": "完整-耳机-小燃",
+                    "draft_dir": str(tmp_path / "drafts" / "完整-耳机-小燃"),
+                    "total_items": 4,
+                    "product_items": 3,
+                    "total_duration_sec": 125.2,
+                    "total_voice_gap_sec": 0.0,
+                    "background_image": str(tmp_path / "bg.png"),
+                    "has_intro_video": True,
+                    "intro_duration_sec": 47.68,
+                    "display_video_segments": 2,
+                    "image_fallback": {"resolved_count": 1, "missing_uids": ["A001"]},
+                    "missing_subtitle_texts": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+
+    monkeypatch.setattr(workflow_service_module, "run_subprocess_text", fake_run)
+
+    draft = service.generate_jianying_draft(
+        project_id,
+        manifest_path=manifest_path,
+        draft_name="完整-耳机-小燃",
+        draft_root=tmp_path / "drafts",
+    )
+
+    assert draft.returncode == 0
+    assert "total_voice_gap_sec" not in draft.stdout
+    assert "background_image" not in draft.stdout
+    assert "本次共拼接 4 段素材，其中商品推荐 3 段。" in draft.stdout
+    assert "草稿总时长约 2 分 5 秒。" in draft.stdout
+    assert "已使用引言成片视频，时长约 48 秒。" in draft.stdout
+    assert "已插入 2 段商品展示视频。" in draft.stdout
+    assert "仍有 1 个商品没有找到可用图片：A001" in draft.stdout
+
+
+def test_jianying_generation_summarizes_failed_json_stdout(tmp_path: Path, monkeypatch):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    project = Repository(db).project(project_id)
+    result = service.run_command(service.build_assembly_command(project_id, account_label="小燃"))
+    assert result.returncode == 0
+    spoken_path = Path(project["spoken_md_path"])
+    manifest_path = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "manifests" / f"{spoken_path.stem}.manifest.json"
+
+    def fake_run(cmd: list[str]):
+        return workflow_service_module.WorkflowRunResult(
+            cmd,
+            returncode=1,
+            stdout=json.dumps({"status": "failed", "error": "背景图不存在"}, ensure_ascii=False, indent=2),
+        )
+
+    monkeypatch.setattr(workflow_service_module, "run_subprocess_text", fake_run)
+
+    draft = service.generate_jianying_draft(
+        project_id,
+        manifest_path=manifest_path,
+        draft_name="bad-draft",
+        draft_root=tmp_path / "drafts",
+    )
+
+    assert draft.returncode == 1
+    assert draft.stdout == "生成失败：背景图不存在\n"
+
+
+def test_split_subtitle_text_drops_sentence_punctuation_and_keeps_dunhao():
+    chunks = split_subtitle_text("人声也不容易被糊住。颜值简约高级，可以连接App联动。降噪、音质、LDAC高清编码，")
+
+    assert chunks == [
+        "人声也不容易被糊住",
+        "颜值简约高级",
+        "可以连接App联动",
+        "降噪、音质、LDAC高清编码",
+    ]
+    assert all(not re.search(r"[，,。!！?？；;：:]", chunk) for chunk in chunks)
+
+
+def test_split_subtitle_text_keeps_decimal_dot():
+    chunks = split_subtitle_text("蓝牙6.0也非常好用。降噪也稳。")
+
+    assert chunks == ["蓝牙6.0也非常好用", "降噪也稳"]
+
+
 def test_export_subtitle_srt_from_manifest_text_and_audio(tmp_path: Path):
     db, project_id = seed_project(tmp_path)
     service = WorkflowService(db)
@@ -504,8 +744,11 @@ def test_export_subtitle_srt_from_manifest_text_and_audio(tmp_path: Path):
     assert result.returncode == 0
     text = output.read_text(encoding="utf-8-sig")
     assert "00:00:00,000 -->" in text
-    assert "今天聊有线耳机。" in text
-    assert "这是第一句。这里是第二句。" in text
+    assert "今天聊有线耳机\n" in text
+    assert "这是第一句\n" in text
+    assert "这里是第二句\n" in text
+    assert "今天聊有线耳机。" not in text
+    assert "这是第一句。这里是第二句。" not in text
     assert "00:00:03,000" in text
 
 
@@ -560,7 +803,156 @@ def test_export_subtitle_srt_offsets_when_intro_video_is_selected(tmp_path: Path
     text = output.read_text(encoding="utf-8-sig")
     assert "这段引言来自 manifest。" not in text
     assert "00:00:01,500 -->" in text
-    assert "商品字幕从引言视频后开始。" in text
+    assert "商品字幕从引言视频后开始" in text
+
+
+def test_export_subtitle_srt_includes_intro_video_text_when_provided(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    intro_audio = tmp_path / "intro.wav"
+    product_audio = tmp_path / "product.wav"
+    intro_video = tmp_path / "intro-video.wav"
+    write_test_wav(intro_audio, [(1.0, 0.5)])
+    write_test_wav(product_audio, [(2.0, 0.5)])
+    write_test_wav(intro_video, [(1.5, 0.5)])
+    manifest = tmp_path / "口播稿.manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "type": "transition",
+                        "order_index": 1,
+                        "section": "intro",
+                        "product_uid": "INTRO",
+                        "product_name": "引言",
+                        "text": "这段引言来自 manifest。",
+                        "audio_path": str(intro_audio),
+                    },
+                    {
+                        "type": "product",
+                        "order_index": 2,
+                        "section": "product",
+                        "product_uid": "YXEJ002",
+                        "product_name": "竹林鸟夜莺Z1",
+                        "text": "商品字幕从引言视频后开始。",
+                        "audio_path": str(product_audio),
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "out.srt"
+
+    result = service.export_subtitle_srt(
+        project_id,
+        manifest_path=manifest,
+        output_path=output,
+        intro_video_path=intro_video,
+        intro_video_text="这是片头文案。欢迎回来。",
+    )
+
+    assert result.returncode == 0
+    text = output.read_text(encoding="utf-8-sig")
+    assert "这段引言来自 manifest。" not in text
+    assert "00:00:00,000 -->" in text
+    assert "这是片头文案\n" in text
+    assert "欢迎回来\n" in text
+    assert "00:00:01,500 -->" in text
+    assert "商品字幕从引言视频后开始" in text
+
+
+def test_export_subtitle_srt_uses_asr_alignment_when_enabled(tmp_path: Path, monkeypatch):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    product_audio = tmp_path / "product.wav"
+    write_test_wav(product_audio, [(2.0, 0.5)])
+    manifest = tmp_path / "口播稿.manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "type": "product",
+                        "order_index": 1,
+                        "section": "product",
+                        "product_uid": "YXEJ002",
+                        "product_name": "竹林鸟夜莺Z1",
+                        "text": "第一句。第二句。",
+                        "audio_path": str(product_audio),
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "out.srt"
+
+    def fake_align_jobs(jobs, *, model_name, language, beam_size, workers):
+        assert len(jobs) == 1
+        assert Path(jobs[0]["audio_path"]) == product_audio
+        assert jobs[0]["text"] == "第一句。第二句。"
+        assert jobs[0]["offset_sec"] == 0.0
+        assert model_name == workflow_service_module.DEFAULT_SUBTITLE_ASR_MODEL
+        assert language == workflow_service_module.DEFAULT_SUBTITLE_ASR_LANGUAGE
+        assert beam_size == workflow_service_module.DEFAULT_SUBTITLE_ASR_BEAM_SIZE
+        assert workers == workflow_service_module.DEFAULT_SUBTITLE_ASR_WORKERS
+        return [(0.2, 0.9, "第一句"), (0.9, 1.8, "第二句")]
+
+    monkeypatch.setattr(workflow_service_module, "align_subtitle_jobs_with_asr", fake_align_jobs)
+
+    result = service.export_subtitle_srt(
+        project_id,
+        manifest_path=manifest,
+        output_path=output,
+        align_with_asr=True,
+    )
+
+    assert result.returncode == 0
+    assert "字幕对齐：ASR" in result.stdout
+    text = output.read_text(encoding="utf-8-sig")
+    assert "00:00:00,200 --> 00:00:00,900" in text
+    assert "00:00:00,900 --> 00:00:01,800" in text
+    assert "第一句\n" in text
+    assert "第二句\n" in text
+
+
+def test_asr_alignment_snaps_subtitle_start_after_breath_pause(tmp_path: Path, monkeypatch):
+    audio_path = tmp_path / "voice.wav"
+    write_test_wav(audio_path, [(0.4, 0.6), (0.3, 0.0), (0.4, 0.6)], frame_rate=1000)
+
+    def fake_asr(_audio_path, *, model_name, language, beam_size):
+        assert beam_size == workflow_service_module.DEFAULT_SUBTITLE_ASR_BEAM_SIZE
+        return [
+            {"start": 0.0, "end": 0.1, "text": "第"},
+            {"start": 0.1, "end": 0.2, "text": "一"},
+            {"start": 0.2, "end": 0.4, "text": "句"},
+            {"start": 0.4, "end": 0.5, "text": "第"},
+            {"start": 0.5, "end": 0.8, "text": "二"},
+            {"start": 0.8, "end": 1.1, "text": "句"},
+        ]
+
+    monkeypatch.setattr(workflow_service_module, "run_subtitle_alignment_asr", fake_asr)
+
+    items = workflow_service_module.align_subtitle_text_with_asr(audio_path, "第一句。第二句。", 0.0)
+
+    assert items[0] == (0.0, 0.4, "第一句")
+    assert items[1][0] == 0.7
+    assert items[1][2] == "第二句"
+
+
+def test_default_subtitle_srt_path_prefixes_spoken_md_name(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+
+    spoken_output = service.default_subtitle_srt_path(project_id, tmp_path / "5月-小燃.md")
+    manifest_output = service.default_subtitle_srt_path(project_id, tmp_path / "5月-小燃.manifest.json")
+
+    assert spoken_output.name == "字幕-5月-小燃.srt"
+    assert manifest_output.name == "字幕-5月-小燃.srt"
 
 
 def test_top_mode_writes_top_products_before_price_transitions_and_adds_closing(tmp_path: Path):

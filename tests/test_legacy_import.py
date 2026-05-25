@@ -15,6 +15,23 @@ def test_product_from_path_matches_uid_title_then_order():
     assert _product_from_path(Path("9-没有标题命中_去字幕.mp4"), products)["uid"] == "PMGD003"
 
 
+def test_product_from_path_prefers_uid_token_boundaries():
+    products = [
+        {"uid": "LY018", "title": "瓷音未来Mars 2i", "sort_order": 7},
+        {"uid": "RELY018", "title": "西圣 A1", "sort_order": 9},
+    ]
+
+    assert _product_from_path(Path("186元-RELY018-西圣 A1.mp4"), products)["uid"] == "RELY018"
+
+
+def test_product_from_path_rejects_substring_uid_without_token_boundaries():
+    products = [
+        {"uid": "LY028", "title": "正确商品名", "sort_order": 16},
+    ]
+
+    assert _product_from_path(Path("499元-RELY028-水月雨梦回2.mp4"), products) == {}
+
+
 def test_candidate_roots_support_category_aliases(tmp_path: Path):
     for name in ["有线耳机", "数码-有线耳机", "键盘大全", "鼠标垫"]:
         (tmp_path / name).mkdir()

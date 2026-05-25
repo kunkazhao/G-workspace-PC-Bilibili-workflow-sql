@@ -8,30 +8,68 @@ from typing import Any
 from .style_config import UIStyle
 
 
-class NavButton(ctk.CTkButton):
-    """侧边栏导航按钮：透明背景，Hover 变色，文字靠左。"""
+class NavButton(ctk.CTkFrame):
+    """侧边栏导航项：图标 + 文案 + 选中强调条。"""
 
-    def __init__(self, master, text: str, command=None, **kwargs):
+    def __init__(self, master, text: str, command=None, icon: str = "", **kwargs):
         height = kwargs.pop("height", 40)
         super().__init__(
             master,
-            text=text,
-            command=command,
             fg_color="transparent",
-            text_color=UIStyle.COLOR_TEXT_DIM,
-            hover_color=UIStyle.COLOR_NAV_HOVER,
-            anchor="w",
-            font=UIStyle.FONT_BODY,
-            height=height,
             corner_radius=UIStyle.RADIUS_MD,
+            height=height,
             **kwargs,
         )
+        self.command = command
+        self._active = False
+        self.grid_propagate(False)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(2, weight=1)
+
+        self.accent = ctk.CTkFrame(self, fg_color="transparent", width=3, corner_radius=999)
+        self.accent.grid(row=0, column=0, sticky="nsw", pady=8)
+
+        self.icon_label = ctk.CTkLabel(
+            self,
+            text=icon,
+            width=28,
+            font=UIStyle.FONT_NAV_ICON,
+            text_color=UIStyle.COLOR_NAV_ICON,
+        )
+        self.icon_label.grid(row=0, column=1, sticky="w", padx=(12, 4))
+
+        self.text_label = ctk.CTkLabel(
+            self,
+            text=text,
+            font=UIStyle.FONT_BODY,
+            text_color=UIStyle.COLOR_TEXT_DIM,
+            anchor="w",
+        )
+        self.text_label.grid(row=0, column=2, sticky="ew", padx=(0, 10))
+
+        for widget in (self, self.accent, self.icon_label, self.text_label):
+            widget.bind("<Button-1>", self._on_click)
+            widget.bind("<Enter>", self._on_enter)
+            widget.bind("<Leave>", self._on_leave)
+
+    def _on_click(self, _event=None) -> None:
+        if self.command:
+            self.command()
+
+    def _on_enter(self, _event=None) -> None:
+        if not self._active:
+            self.configure(fg_color=UIStyle.COLOR_NAV_HOVER)
+
+    def _on_leave(self, _event=None) -> None:
+        if not self._active:
+            self.configure(fg_color="transparent")
 
     def set_active(self, active: bool) -> None:
-        self.configure(
-            fg_color=UIStyle.COLOR_NAV_ACTIVE if active else "transparent",
-            text_color=UIStyle.COLOR_PRIMARY if active else UIStyle.COLOR_TEXT_DIM,
-        )
+        self._active = active
+        self.configure(fg_color=UIStyle.COLOR_NAV_ACTIVE if active else "transparent")
+        self.accent.configure(fg_color=UIStyle.COLOR_PRIMARY if active else "transparent")
+        self.icon_label.configure(text_color=UIStyle.COLOR_PRIMARY if active else UIStyle.COLOR_NAV_ICON)
+        self.text_label.configure(text_color=UIStyle.COLOR_PRIMARY if active else UIStyle.COLOR_TEXT_DIM)
 
 
 class PrimaryButton(ctk.CTkButton):
