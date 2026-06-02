@@ -10,8 +10,9 @@ TEMPLATE_COORDS: dict[str, dict[str, Any]] = {
     "小博-模板3": {"x": 1015, "y": 154, "width": 680, "height": 520},
     "小燃-模板1": {"x": -830, "y": -77, "width": 970, "height": 590, "coordinate_mode": "clip_transform_pixels"},
     "小燃-模板2": {"x": 50, "y": 322, "width": 1004, "height": 588},
-    "小歪-模板1": {"x": 48, "y": 316, "width": 984, "height": 600},
-    "小歪-模板2": {"x": -56, "y": 420, "width": 1132, "height": 576},
+    "小歪-模板1": {"x": -855, "y": 38, "width": 960, "height": 540, "coordinate_mode": "clip_transform_pixels"},
+    "小歪-模板2": {"x": -843, "y": -34, "width": 1037, "height": 528, "coordinate_mode": "clip_transform_pixels"},
+    "知了-模板1": {"x": 67, "y": 185, "width": 990, "height": 576, "round_corner": 22},
 }
 
 # 每个用户对应的可用模板列表
@@ -19,6 +20,7 @@ USER_TEMPLATES: dict[str, list[str]] = {
     "小博": ["小博-模板1", "小博-模板2", "小博-模板3"],
     "小燃": ["小燃-模板1", "小燃-模板2"],
     "小歪": ["小歪-模板1", "小歪-模板2"],
+    "知了": ["知了-模板1"],
 }
 
 
@@ -33,6 +35,15 @@ def get_template_slot(template_name: str) -> dict[str, Any]:
 def available_templates(user_label: str) -> list[str]:
     """获取某个用户可用的模板列表。"""
     return list(USER_TEMPLATES.get(user_label, []))
+
+
+def image_set_for_template(template_name: str) -> str:
+    """根据模板显示名推导素材目录关键字。"""
+    if not template_name:
+        return ""
+    if "-" in template_name:
+        return template_name.split("-", 1)[1]
+    return template_name
 
 
 def user_for_template(template_name: str) -> str:

@@ -31,7 +31,7 @@ from .settings import (
     INTERNAL_WORKSPACE_ROOT,
 )
 from .utils import file_metadata, now_iso, safe_text
-from .template_config import user_for_template
+from .template_config import image_set_for_template, user_for_template
 
 
 DEFAULT_TTS_FIELDS = {
@@ -1742,7 +1742,7 @@ class WorkflowService:
                 voice = self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label, path_contains=preferred_voice_path_contains)
             if not voice:
                 voice = self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label)
-        template_suffix = display_template.split("-", 1)[1] if display_template and "-" in display_template else ""
+        template_suffix = image_set_for_template(display_template)
         display_user = user_for_template(display_template)
         image = None
         if product:

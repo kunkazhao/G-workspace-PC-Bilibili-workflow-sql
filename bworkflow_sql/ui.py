@@ -89,6 +89,70 @@ class VoiceTaskDraft:
         return self.target_text.strip() or "全部文案"
 
 
+def project_selector_value(project: dict[str, Any] | None) -> str:
+    if not project:
+        return ""
+    return f"{project['id']} - {project['name']}"
+
+
+def project_id_from_selector_value(value: str) -> int | None:
+    text = safe_text(value)
+    if not text:
+        return None
+    head = text.split(" - ", 1)[0].strip()
+    try:
+        return int(head)
+    except ValueError:
+        return None
+
+
+_TREEVIEW_STYLE_READY = False
+
+
+def configure_treeview_style(master: tk.Misc | None = None, *, force: bool = False) -> None:
+    global _TREEVIEW_STYLE_READY
+    if _TREEVIEW_STYLE_READY and not force:
+        return
+    style = ttk.Style(master)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+    try:
+        style.layout("CTreeview")
+    except tk.TclError:
+        style.layout("CTreeview", style.layout("Treeview"))
+    style.configure(
+        "CTreeview",
+        background=UIStyle.COLOR_TABLE_ROW,
+        foreground=UIStyle.COLOR_TEXT_MAIN,
+        fieldbackground=UIStyle.COLOR_TABLE_ROW,
+        font=UIStyle.FONT_TABLE,
+        rowheight=28,
+    )
+    try:
+        style.layout("CTreeview.Heading")
+    except tk.TclError:
+        try:
+            style.layout("CTreeview.Heading", style.layout("Treeview.Heading"))
+        except tk.TclError:
+            pass
+    style.configure(
+        "CTreeview.Heading",
+        background=UIStyle.COLOR_TABLE_HEADER,
+        foreground=UIStyle.COLOR_TEXT_MAIN,
+        font=UIStyle.FONT_TABLE,
+        relief="flat",
+    )
+    style.map(
+        "CTreeview",
+        background=[("selected", UIStyle.COLOR_PRIMARY)],
+        foreground=[("selected", "white")],
+    )
+    style.map("CTreeview.Heading", background=[("active", UIStyle.COLOR_NAV_HOVER)])
+    _TREEVIEW_STYLE_READY = True
+
+
 @dataclass
 class ProjectEditorState:
     dialog: ctk.CTkToplevel
@@ -528,6 +592,16 @@ def _center_dialog(dialog: ctk.CTkToplevel) -> None:
     dialog.geometry(f"+{x}+{y}")
 
 
+def _restore_window(win: tk.Misc) -> None:
+    """将窗口恢复到前台并获取焦点（修复 Windows 任务栏图标点击无响应问题）。"""
+    try:
+        win.deiconify()       # 如果被最小化则恢复
+        win.lift()            # 提升 Z 序
+        win.focus_force()     # 强制获取焦点
+    except Exception:
+        pass
+
+
 def _dialog_tone_colors(tone: str) -> tuple[str, str]:
     palette = {
         "default": (UIStyle.COLOR_INFO, UIStyle.COLOR_BORDER),
@@ -746,10 +820,12 @@ def show_text_dialog(parent: tk.Widget, title: str, message: str) -> None:
 class TaskProgressDialog(ctk.CTkToplevel):
     def __init__(self, parent: tk.Widget, title: str, message: str):
         super().__init__(parent)
+        self._parent_toplevel = parent.winfo_toplevel()
         self.title(title)
         self.geometry("1120x760")
         self.minsize(900, 620)
-        self.transient(parent.winfo_toplevel())
+        # 不使用 transient()：该绑定会导致对话框关闭时 Windows 将主窗口一起降到
+        # Z 序底部，且 zoomed 状态下任务栏图标点击无法恢复主窗口。
         self.configure(fg_color=UIStyle.COLOR_BG)
         self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
@@ -768,8 +844,8 @@ class TaskProgressDialog(ctk.CTkToplevel):
         hero.grid(row=0, column=0, sticky="ew", pady=(UIStyle.PAD_MD, UIStyle.PAD_XL))
         self.icon_label = ctk.CTkLabel(
             hero,
-            text="✂",
-            font=("Microsoft YaHei", 52, "bold"),
+            text=UIStyle.ICON_PROGRESS,
+            font=UIStyle.FONT_ICON_LG,
             text_color=UIStyle.COLOR_INFO,
         )
         self.icon_label.pack(pady=(0, UIStyle.PAD_SM))
@@ -799,7 +875,7 @@ class TaskProgressDialog(ctk.CTkToplevel):
             fg_color=UIStyle.COLOR_CARD_BG,
             corner_radius=UIStyle.RADIUS_LG,
             border_width=1,
-            border_color="#33445F",
+            border_color=UIStyle.COLOR_LOG_BORDER,
         )
         log_card.grid(row=1, column=0, sticky="nsew")
         log_card.rowconfigure(1, weight=1)
@@ -809,8 +885,8 @@ class TaskProgressDialog(ctk.CTkToplevel):
         log_header.grid(row=0, column=0, sticky="ew", padx=UIStyle.PAD_LG, pady=(UIStyle.PAD_LG, UIStyle.PAD_MD))
         ctk.CTkLabel(
             log_header,
-            text="▣",
-            font=("Microsoft YaHei", 20, "bold"),
+            text=UIStyle.ICON_LOG,
+            font=UIStyle.FONT_ICON_MD,
             text_color=UIStyle.COLOR_INFO,
         ).pack(side="left", padx=(0, UIStyle.PAD_SM))
         ctk.CTkLabel(log_header, text="执行日志", font=("Microsoft YaHei", 18, "bold"), text_color=UIStyle.COLOR_TEXT_MAIN).pack(side="left")
@@ -818,8 +894,8 @@ class TaskProgressDialog(ctk.CTkToplevel):
         self.log_scroll = ctk.CTkScrollableFrame(
             log_card,
             fg_color="transparent",
-            scrollbar_button_color="#42516A",
-            scrollbar_button_hover_color="#5B6B87",
+            scrollbar_button_color=UIStyle.COLOR_LOG_SCROLLBAR,
+            scrollbar_button_hover_color=UIStyle.COLOR_LOG_SCROLLBAR_HOVER,
         )
         self.log_scroll.grid(row=1, column=0, sticky="nsew", padx=UIStyle.PAD_LG, pady=(0, UIStyle.PAD_SM))
         self.log_scroll.grid_columnconfigure(0, weight=1)
@@ -851,9 +927,14 @@ class TaskProgressDialog(ctk.CTkToplevel):
             "success": UIStyle.COLOR_SUCCESS,
             "error": UIStyle.COLOR_ERROR,
             "warning": UIStyle.COLOR_WARNING,
-            "info": "#4B83F1",
-        }.get(kind, "#4B83F1")
-        icon = {"success": "✓", "error": "×", "warning": "!", "info": "i"}.get(kind, "i")
+            "info": UIStyle.COLOR_LOG_INFO,
+        }.get(kind, UIStyle.COLOR_LOG_INFO)
+        icon = {
+            "success": UIStyle.ICON_SUCCESS,
+            "error": UIStyle.ICON_ERROR,
+            "warning": UIStyle.ICON_WARNING,
+            "info": UIStyle.ICON_INFO,
+        }.get(kind, UIStyle.ICON_INFO)
 
         row = ctk.CTkFrame(self.log_scroll, fg_color="transparent")
         row.grid(row=self._log_count * 2, column=0, sticky="ew", padx=0, pady=0)
@@ -866,8 +947,8 @@ class TaskProgressDialog(ctk.CTkToplevel):
             height=24,
             corner_radius=999,
             fg_color=color,
-            text_color="#07111F",
-            font=("Microsoft YaHei", 12, "bold"),
+            text_color=UIStyle.COLOR_LOG_ICON_TEXT,
+            font=UIStyle.FONT_ICON_SM,
         )
         icon_label.grid(row=0, column=0, sticky="nw", padx=(0, UIStyle.PAD_MD), pady=UIStyle.PAD_SM)
 
@@ -886,8 +967,8 @@ class TaskProgressDialog(ctk.CTkToplevel):
             width=98,
             height=26,
             corner_radius=UIStyle.RADIUS_MD,
-            fg_color="#1A315A",
-            text_color="#6EA8FF",
+            fg_color=UIStyle.COLOR_LOG_TAG_BG,
+            text_color=UIStyle.COLOR_LOG_TAG_TEXT,
             font=("Microsoft YaHei", 12, "bold"),
         ).grid(row=0, column=2, sticky="nw", padx=(0, UIStyle.PAD_MD), pady=(UIStyle.PAD_SM - 1, UIStyle.PAD_SM))
 
@@ -901,7 +982,7 @@ class TaskProgressDialog(ctk.CTkToplevel):
             wraplength=720,
         ).grid(row=0, column=3, sticky="ew", pady=UIStyle.PAD_SM)
 
-        line = ctk.CTkFrame(self.log_scroll, fg_color="#223047", height=1)
+        line = ctk.CTkFrame(self.log_scroll, fg_color=UIStyle.COLOR_LOG_DIVIDER, height=1)
         line.grid(row=self._log_count * 2 + 1, column=0, sticky="ew")
         canvas = getattr(self.log_scroll, "_parent_canvas", None)
         if canvas is not None:
@@ -935,10 +1016,10 @@ class TaskProgressDialog(ctk.CTkToplevel):
         self.progress.stop()
         self.progress.pack_forget()
         palette = {
-            "success": (UIStyle.COLOR_SUCCESS, "✓"),
-            "warning": (UIStyle.COLOR_WARNING, "!"),
-            "error": (UIStyle.COLOR_ERROR, "×"),
-            "info": (UIStyle.COLOR_INFO, "i"),
+            "success": (UIStyle.COLOR_SUCCESS, UIStyle.ICON_SUCCESS),
+            "warning": (UIStyle.COLOR_WARNING, UIStyle.ICON_WARNING),
+            "error": (UIStyle.COLOR_ERROR, UIStyle.ICON_ERROR),
+            "info": (UIStyle.COLOR_INFO, UIStyle.ICON_INFO),
         }
         color, icon = palette.get(kind, palette["success"])
         self.icon_label.configure(text=icon, text_color=color)
@@ -946,9 +1027,22 @@ class TaskProgressDialog(ctk.CTkToplevel):
             self.hero_title_var.set(headline)
         self.status_var.set(message)
         self.detail_var.set(detail)
-        self.close_button.configure(state="normal")
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.close_button.configure(state="normal", command=self._close_and_restore_parent)
+        self.protocol("WM_DELETE_WINDOW", self._close_and_restore_parent)
         self.close_button.focus_set()
+
+    def _close_and_restore_parent(self) -> None:
+        """关闭进度对话框并将焦点归还主窗口。"""
+        try:
+            parent = self._parent_toplevel
+            self.destroy()
+            # 延迟一帧让 Tk 完成窗口销毁后再恢复主窗口
+            parent.after(50, lambda: _restore_window(parent))
+        except Exception:
+            try:
+                self.destroy()
+            except Exception:
+                pass
 
 
 def manifest_file_paths(value: Any) -> list[str]:
@@ -1091,8 +1185,9 @@ class App(ctk.CTk):
         self.after(50, lambda: self.state("zoomed"))
 
         self._busy = False
-        self._toast_label: ctk.CTkLabel | None = None
-        self._toast_after: str | None = None
+        self._toast_items: list[ctk.CTkFrame] = []
+        self.project_selector_var = ctk.StringVar()
+        self._project_selector_widgets: list[AppComboBox] = []
 
         self.db = Database()
         self.repo = Repository(self.db)
@@ -1106,7 +1201,9 @@ class App(ctk.CTk):
         self.pages: dict[str, ctk.CTkFrame] = {}
         self.nav_buttons: dict[str, NavButton] = {}
 
+        configure_treeview_style(self)
         self._build_shell()
+        self.sync_project_selectors()
         self.show_page("品类项目")
 
     def _build_shell(self) -> None:
@@ -1178,9 +1275,9 @@ class App(ctk.CTk):
                 text="\uE70D",
                 width=22,
                 font=("Segoe MDL2 Assets", 11),
-                text_color="#526179",
+                text_color=UIStyle.COLOR_NAV_CHEVRON,
             ).grid(row=0, column=3, sticky="e", padx=(0, 8))
-            divider = ctk.CTkFrame(nav_frame, fg_color="#182235", height=1)
+            divider = ctk.CTkFrame(nav_frame, fg_color=UIStyle.COLOR_NAV_DIVIDER, height=1)
             divider.pack(fill="x", padx=(UIStyle.PAD_SM, UIStyle.PAD_SM), pady=(0, UIStyle.PAD_SM))
 
         for group, names in groups:
@@ -1211,6 +1308,27 @@ class App(ctk.CTk):
             font=UIStyle.FONT_SMALL, text_color=UIStyle.COLOR_TEXT_DIM,
         ).pack(side="left", padx=UIStyle.PAD_MD)
 
+    def register_project_selector(self, combo: AppComboBox) -> None:
+        if combo not in self._project_selector_widgets:
+            self._project_selector_widgets.append(combo)
+        self.sync_project_selectors()
+
+    def sync_project_selectors(self) -> None:
+        projects = self.repo.projects()
+        values = [project_selector_value(project) for project in projects]
+        live_widgets: list[AppComboBox] = []
+        for combo in self._project_selector_widgets:
+            if not combo.winfo_exists():
+                continue
+            combo.configure(values=values)
+            live_widgets.append(combo)
+        self._project_selector_widgets = live_widgets
+        project = self.current_project()
+        if not project and projects:
+            self.current_project_id = int(projects[0]["id"])
+            project = projects[0]
+        self.project_selector_var.set(project_selector_value(project))
+
     def show_page(self, name: str) -> None:
         for btn_name, btn in self.nav_buttons.items():
             btn.set_active(btn_name == name)
@@ -1240,6 +1358,7 @@ class App(ctk.CTk):
 
     def set_current_project(self, project_id: int) -> None:
         self.current_project_id = project_id
+        self.sync_project_selectors()
         for page in self.pages.values():
             page.refresh()
 
@@ -1247,26 +1366,66 @@ class App(ctk.CTk):
         self.status_var.set(text or "就绪")
 
     def toast(self, text: str, *, kind: str = "success", duration: int = 3000) -> None:
-        colors = {
-            "success": UIStyle.COLOR_SUCCESS,
-            "info": UIStyle.COLOR_INFO,
-            "warning": UIStyle.COLOR_WARNING,
-            "error": UIStyle.COLOR_ERROR,
+        palette = {
+            "success": (UIStyle.COLOR_SUCCESS, UIStyle.ICON_SUCCESS),
+            "info": (UIStyle.COLOR_INFO, UIStyle.ICON_INFO),
+            "warning": (UIStyle.COLOR_WARNING, UIStyle.ICON_WARNING),
+            "error": (UIStyle.COLOR_ERROR, UIStyle.ICON_ERROR),
         }
-        bg = colors.get(kind, UIStyle.COLOR_SUCCESS)
-        if self._toast_after:
-            self.after_cancel(self._toast_after)
-            self._toast_after = None
-        if self._toast_label:
-            self._toast_label.destroy()
-        self._toast_label = ctk.CTkLabel(
-            self, text=text, fg_color=bg, text_color="white",
-            corner_radius=UIStyle.RADIUS_MD, font=UIStyle.FONT_BODY,
-            padx=UIStyle.PAD_LG, pady=UIStyle.PAD_SM,
+        accent, icon = palette.get(kind, palette["success"])
+        frame = ctk.CTkFrame(
+            self,
+            fg_color=UIStyle.COLOR_TOAST_BG,
+            corner_radius=UIStyle.RADIUS_MD,
+            border_width=1,
+            border_color=accent,
         )
-        self._toast_label.place(relx=1.0, y=UIStyle.PAD_XL, x=-UIStyle.PAD_XL, anchor="ne")
-        self._toast_label.lift()
-        self._toast_after = self.after(duration, self._toast_label.place_forget)
+        ctk.CTkLabel(
+            frame,
+            text=icon,
+            font=UIStyle.FONT_ICON_SM,
+            text_color=accent,
+            width=24,
+        ).pack(side="left", padx=(UIStyle.PAD_MD, UIStyle.PAD_XS), pady=UIStyle.PAD_SM)
+        ctk.CTkLabel(
+            frame,
+            text=text,
+            text_color=UIStyle.COLOR_TEXT_MAIN,
+            font=UIStyle.FONT_BODY,
+            wraplength=420,
+            justify="left",
+        ).pack(side="left", padx=(0, UIStyle.PAD_MD), pady=UIStyle.PAD_SM)
+        self._toast_items.append(frame)
+        self._layout_toasts(offset=28)
+        frame.lift()
+
+        def close_toast() -> None:
+            self._dismiss_toast(frame)
+
+        self.after(duration, close_toast)
+        self.after(20, lambda: self._layout_toasts(offset=0))
+
+    def _layout_toasts(self, *, offset: int = 0) -> None:
+        live_items = [item for item in self._toast_items if item.winfo_exists()]
+        self._toast_items = live_items[-4:]
+        y = UIStyle.PAD_XL
+        for item in self._toast_items:
+            item.update_idletasks()
+            item.place(relx=1.0, y=y, x=-(UIStyle.PAD_XL + offset), anchor="ne")
+            y += item.winfo_reqheight() + UIStyle.PAD_SM
+
+    def _dismiss_toast(self, frame: ctk.CTkFrame) -> None:
+        if frame not in self._toast_items or not frame.winfo_exists():
+            return
+        frame.place_configure(x=-(UIStyle.PAD_XL + 24))
+        self.after(80, lambda: self._destroy_toast(frame))
+
+    def _destroy_toast(self, frame: ctk.CTkFrame) -> None:
+        if frame in self._toast_items:
+            self._toast_items.remove(frame)
+        if frame.winfo_exists():
+            frame.destroy()
+        self._layout_toasts(offset=0)
 
     def run_background(
         self, title: str, work: Callable[[], Any],
@@ -1327,31 +1486,12 @@ class App(ctk.CTk):
 
 def _build_table(parent, columns: tuple[str, ...], row: int = 0) -> ttk.Treeview:
     """在 CTkFrame 内创建深色风格的 Treeview。"""
-    style = ttk.Style()
-    style.theme_use("clam")
-    try:
-        style.layout("CTreeview")
-    except tk.TclError:
-        style.layout("CTreeview", style.layout("Treeview"))
-    style.configure("CTreeview", background=UIStyle.COLOR_TABLE_ROW, foreground=UIStyle.COLOR_TEXT_MAIN,
-                     fieldbackground=UIStyle.COLOR_TABLE_ROW, font=UIStyle.FONT_TABLE,
-                     rowheight=28)
-    try:
-        style.layout("CTreeview.Heading")
-    except tk.TclError:
-        try:
-            style.layout("CTreeview.Heading", style.layout("Treeview.Heading"))
-        except tk.TclError:
-            pass
-    style.configure("CTreeview.Heading", background=UIStyle.COLOR_TABLE_HEADER, foreground=UIStyle.COLOR_TEXT_MAIN,
-                     font=UIStyle.FONT_TABLE, relief="flat")
-    style.map("CTreeview", background=[("selected", UIStyle.COLOR_PRIMARY)],
-              foreground=[("selected", "white")])
-    style.map("CTreeview.Heading", background=[("active", UIStyle.COLOR_NAV_HOVER)])
+    configure_treeview_style(parent)
     tree = ttk.Treeview(parent, columns=columns, show="headings", style="CTreeview")
     for col in columns:
         tree.heading(col, text=col)
         tree.column(col, width=100, anchor="w")
+    tree.tag_configure("has_issues", background=UIStyle.COLOR_ISSUE_BG, foreground=UIStyle.COLOR_TEXT_MAIN)
     tree.grid(row=row, column=0, sticky="nsew")
     parent.grid_rowconfigure(row, weight=1)
     parent.grid_columnconfigure(0, weight=1)
@@ -1372,7 +1512,7 @@ def _set_tree_rows(tree: ttk.Treeview, rows: list[tuple[Any, ...]], tag_key: int
 class ProjectPage(BasePage):
     def __init__(self, master, app: App):
         super().__init__(master, "品类项目", app)
-        self.project_var = ctk.StringVar()
+        self.project_var = app.project_selector_var
         self.workspace_var = ctk.StringVar()
         self.parent_category_var = ctk.StringVar()
         self.child_category_var = ctk.StringVar()
@@ -1399,6 +1539,7 @@ class ProjectPage(BasePage):
         ctk.CTkLabel(sel, text="当前项目", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).pack(side="left")
         self.project_combo = AppComboBox(sel, width=400, variable=self.project_var)
         self.project_combo.pack(side="left", padx=UIStyle.PAD_SM)
+        self.app.register_project_selector(self.project_combo)
         self.project_combo.configure(command=self._select_project)
         PrimaryButton(sel, text="新建", width=80, command=self._new_project).pack(side="left", padx=UIStyle.PAD_XS)
         PrimaryButton(sel, text="保存", width=80, command=self._save_project).pack(side="left", padx=UIStyle.PAD_XS)
@@ -1482,7 +1623,7 @@ class ProjectPage(BasePage):
 
     def _save_project(self) -> None:
         payload = self._payload()
-        payload["id"] = int(self.project_var.get().split(" - ", 1)[0]) if self.project_var.get() else 0
+        payload["id"] = project_id_from_selector_value(self.project_var.get()) or 0
         if not payload["name"]:
             messagebox.showwarning("缺少项目名", "请填写项目名。")
             return
@@ -1505,7 +1646,9 @@ class ProjectPage(BasePage):
         value = self.project_var.get()
         if not value:
             return
-        project_id = int(value.split(" - ", 1)[0])
+        project_id = project_id_from_selector_value(value)
+        if project_id is None:
+            return
         self.app.set_current_project(project_id)
         self._fill(project_id)
 
@@ -1515,7 +1658,7 @@ class ProjectPage(BasePage):
             return
         for key, var in self.fields.items():
             var.set(safe_text(project.get(key)))
-        self.project_var.set(f"{project_id} - {project['name']}")
+        self.project_var.set(project_selector_value(project))
         self.workspace_var.set(safe_text(project.get("workspace_name")))
         self.parent_category_var.set(safe_text(project.get("category_parent_name")))
         self.child_category_var.set(safe_text(project.get("category_name")))
@@ -1591,12 +1734,11 @@ class ProjectPage(BasePage):
 
     def refresh(self) -> None:
         projects = self.repo.projects()
-        values = [f"{item['id']} - {item['name']}" for item in projects]
-        self.project_combo.configure(values=values)
+        self.app.sync_project_selectors()
         if self.app.current_project_id:
             self._fill(self.app.current_project_id)
         elif projects:
-            self.app.current_project_id = projects[0]["id"]
+            self.app.set_current_project(int(projects[0]["id"]))
             self._fill(projects[0]["id"])
         if not self.workspaces:
             self._load_workspaces(force_refresh=False, quiet=True)
@@ -1733,7 +1875,7 @@ class ProjectPage(BasePage):
 class ProjectPageDialog(BasePage):
     def __init__(self, master, app: App):
         super().__init__(master, "品类项目", app)
-        self.project_var = ctk.StringVar()
+        self.project_var = app.project_selector_var
         self.workspaces: list[dict[str, Any]] = []
         self.category_tree: list[dict[str, Any]] = []
         self.schemes: list[dict[str, Any]] = []
@@ -1747,6 +1889,7 @@ class ProjectPageDialog(BasePage):
             "image_root", "video_root", "voice_root", "output_root",
         ]}
         self.display_labels: dict[str, ctk.StringVar] = {}
+        self.display_label_widgets: dict[str, ctk.CTkLabel] = {}
         self._build()
 
     def _build(self) -> None:
@@ -1756,6 +1899,7 @@ class ProjectPageDialog(BasePage):
         ctk.CTkLabel(selector, text="当前项目", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).pack(side="left")
         self.project_combo = AppComboBox(selector, width=400, variable=self.project_var)
         self.project_combo.pack(side="left", padx=UIStyle.PAD_SM)
+        self.app.register_project_selector(self.project_combo)
         self.project_combo.configure(command=self._select_project)
         PrimaryButton(selector, text="新建", width=80, command=self._new_project).pack(side="left", padx=UIStyle.PAD_XS)
         PrimaryButton(selector, text="编辑", width=80, command=self._edit_project).pack(side="left", padx=UIStyle.PAD_XS)
@@ -1801,14 +1945,17 @@ class ProjectPageDialog(BasePage):
         )
         value = ctk.StringVar(value="未配置")
         self.display_labels[key] = value
-        ctk.CTkLabel(
+        value_label = ctk.CTkLabel(
             parent,
             textvariable=value,
             font=UIStyle.FONT_BODY,
+            text_color=UIStyle.COLOR_FIELD_EMPTY_TEXT,
             justify="left",
             anchor="w",
             wraplength=520,
-        ).grid(row=row, column=column + 1, sticky="ew", padx=(0, UIStyle.PAD_MD), pady=UIStyle.PAD_XS)
+        )
+        value_label.grid(row=row, column=column + 1, sticky="ew", padx=(0, UIStyle.PAD_MD), pady=UIStyle.PAD_XS)
+        self.display_label_widgets[key] = value_label
 
     def _browse(self, fields: dict[str, ctk.StringVar], key: str) -> None:
         if key == "md_path":
@@ -1987,7 +2134,9 @@ class ProjectPageDialog(BasePage):
         value = self.project_var.get()
         if not value:
             return
-        project_id = int(value.split(" - ", 1)[0])
+        project_id = project_id_from_selector_value(value)
+        if project_id is None:
+            return
         self.app.set_current_project(project_id)
         self._fill(project_id)
 
@@ -1997,10 +2146,13 @@ class ProjectPageDialog(BasePage):
             return
         for key, var in self.fields.items():
             var.set(safe_text(project.get(key)))
-        self.project_var.set(f"{project_id} - {project['name']}")
+        self.project_var.set(project_selector_value(project))
         for key, var in self.display_labels.items():
             value = safe_text(project.get(key))
             var.set(value or "未配置")
+            widget = self.display_label_widgets.get(key)
+            if widget is not None:
+                widget.configure(text_color=UIStyle.COLOR_TEXT_MAIN if value else UIStyle.COLOR_FIELD_EMPTY_TEXT)
 
     def log(self, text: str) -> None:
         self.log_text.configure(state="normal")
@@ -2072,12 +2224,11 @@ class ProjectPageDialog(BasePage):
 
     def refresh(self) -> None:
         projects = self.repo.projects()
-        values = [f"{item['id']} - {item['name']}" for item in projects]
-        self.project_combo.configure(values=values)
+        self.app.sync_project_selectors()
         if self.app.current_project_id:
             self._fill(self.app.current_project_id)
         elif projects:
-            self.app.current_project_id = projects[0]["id"]
+            self.app.set_current_project(int(projects[0]["id"]))
             self._fill(projects[0]["id"])
         else:
             self.project_var.set("")
@@ -2085,6 +2236,8 @@ class ProjectPageDialog(BasePage):
                 var.set("")
             for var in self.display_labels.values():
                 var.set("未配置")
+            for widget in self.display_label_widgets.values():
+                widget.configure(text_color=UIStyle.COLOR_FIELD_EMPTY_TEXT)
         if not self.workspaces:
             self._load_workspaces(force_refresh=False, quiet=True)
 
@@ -2599,7 +2752,7 @@ class AssetPage(BasePage):
         stat_specs = [
             ("copy", "文案", UIStyle.COLOR_INFO),
             ("image", "图片", UIStyle.COLOR_SUCCESS),
-            ("video", "视频", "#8B5CF6"),
+            ("video", "视频", UIStyle.COLOR_ASSET_VIDEO),
             ("voice", "配音", UIStyle.COLOR_WARNING),
             ("issue", "问题", UIStyle.COLOR_ERROR),
         ]
@@ -2845,11 +2998,11 @@ class AssetPage(BasePage):
     def _configure_asset_tree(self) -> None:
         style = ttk.Style()
         style.configure(
-            "CTreeview",
+            "Asset.CTreeview",
             rowheight=38,
-            background="#131D2B",
-            foreground="#E8EEF8",
-            fieldbackground="#131D2B",
+            background=UIStyle.COLOR_ASSET_TABLE_ROW,
+            foreground=UIStyle.COLOR_ASSET_TABLE_TEXT,
+            fieldbackground=UIStyle.COLOR_ASSET_TABLE_ROW,
             borderwidth=0,
             relief="flat",
             font=UIStyle.FONT_TABLE,
@@ -2858,9 +3011,9 @@ class AssetPage(BasePage):
             darkcolor=UIStyle.COLOR_BORDER,
         )
         style.configure(
-            "CTreeview.Heading",
-            background="#111927",
-            foreground="#D6DFEC",
+            "Asset.CTreeview.Heading",
+            background=UIStyle.COLOR_ASSET_TABLE_HEADER,
+            foreground=UIStyle.COLOR_ASSET_TABLE_HEADING_TEXT,
             borderwidth=0,
             relief="flat",
             font=("Microsoft YaHei", 12, "bold"),
@@ -2868,12 +3021,13 @@ class AssetPage(BasePage):
             lightcolor=UIStyle.COLOR_BORDER,
             darkcolor=UIStyle.COLOR_BORDER,
         )
-        style.map("CTreeview", background=[("selected", "#233247")], foreground=[("selected", "#F7FAFF")])
-        style.map("CTreeview.Heading", background=[("active", "#162233")], foreground=[("active", "#F7FAFF")])
-        self.tree.tag_configure("even", background="#131D2B", foreground="#E8EEF8")
-        self.tree.tag_configure("odd", background="#162233", foreground="#E8EEF8")
-        self.tree.tag_configure("even_issue", background="#3A2426", foreground="#F7D7D9")
-        self.tree.tag_configure("odd_issue", background="#43292C", foreground="#F7D7D9")
+        style.map("Asset.CTreeview", background=[("selected", UIStyle.COLOR_TABLE_SELECTED)], foreground=[("selected", UIStyle.COLOR_TEXT_MAIN)])
+        style.map("Asset.CTreeview.Heading", background=[("active", UIStyle.COLOR_TABLE_ACTIVE)], foreground=[("active", UIStyle.COLOR_TEXT_MAIN)])
+        self.tree.configure(style="Asset.CTreeview")
+        self.tree.tag_configure("even", background=UIStyle.COLOR_ASSET_TABLE_ROW, foreground=UIStyle.COLOR_ASSET_TABLE_TEXT)
+        self.tree.tag_configure("odd", background=UIStyle.COLOR_ASSET_TABLE_ROW_ALT, foreground=UIStyle.COLOR_ASSET_TABLE_TEXT)
+        self.tree.tag_configure("even_issue", background=UIStyle.COLOR_ASSET_ISSUE_ROW, foreground=UIStyle.COLOR_ASSET_ISSUE_TEXT)
+        self.tree.tag_configure("odd_issue", background=UIStyle.COLOR_ASSET_ISSUE_ROW_ALT, foreground=UIStyle.COLOR_ASSET_ISSUE_TEXT)
         widths = {
             "品类": 88,
             "用户": 84,
@@ -3015,7 +3169,7 @@ class SyncStatusCard(ctk.CTkFrame):
 class SyncPage(BasePage):
     def __init__(self, master, app: App):
         super().__init__(master, "同步中心", app)
-        self.project_var = ctk.StringVar()
+        self.project_var = app.project_selector_var
         self.user_var = ctk.StringVar(value="小燃")
         self.asset_paths: dict[str, str] = {}
         self._build()
@@ -3026,6 +3180,7 @@ class SyncPage(BasePage):
         ctk.CTkLabel(top, text="本次同步项目", font=UIStyle.FONT_SMALL, text_color=UIStyle.COLOR_TEXT_DIM).pack(side="left", padx=(0, UIStyle.PAD_SM))
         self.project_combo = AppComboBox(top, width=250, variable=self.project_var)
         self.project_combo.pack(side="left", padx=(0, UIStyle.PAD_MD))
+        self.app.register_project_selector(self.project_combo)
         self.project_combo.configure(command=self._select_project)
         ctk.CTkLabel(top, text="用户", font=UIStyle.FONT_SMALL, text_color=UIStyle.COLOR_TEXT_DIM).pack(side="left", padx=(0, UIStyle.PAD_SM))
         self.user_combo = AppComboBox(top, width=92, variable=self.user_var)
@@ -3089,14 +3244,12 @@ class SyncPage(BasePage):
 
     def refresh(self) -> None:
         projects = self.repo.projects()
-        vals = [f"{p['id']} - {p['name']}" for p in projects]
-        self.project_combo.configure(values=vals)
+        self.app.sync_project_selectors()
         project = self.app.current_project()
         if not project and projects:
-            self.app.current_project_id = projects[0]["id"]
+            self.app.current_project_id = int(projects[0]["id"])
+            self.app.sync_project_selectors()
             project = projects[0]
-        if project:
-            self.project_var.set(f"{project['id']} - {project['name']}")
         users = ["全部"] + [a["label"] for a in self.repo.accounts()]
         self.user_combo.configure(values=users)
         if self.user_var.get() not in users:
@@ -3108,8 +3261,9 @@ class SyncPage(BasePage):
         v = self.project_var.get()
         if not v:
             return
-        self.app.current_project_id = int(v.split(" - ", 1)[0])
-        self.refresh()
+        project_id = project_id_from_selector_value(v)
+        if project_id is not None:
+            self.app.set_current_project(project_id)
 
     def _current_project_or_warn(self) -> dict[str, Any] | None:
         p = self.app.current_project()
@@ -4003,8 +4157,12 @@ class StandaloneVoicePage(BasePage):
             )
 
         def close_service() -> None:
-            if self.workflow.is_tts_service_running(timeout=0.8):
-                self.workflow.shutdown_tts_service()
+            if not self.workflow.is_tts_service_running(timeout=0.8):
+                return
+            killed = self.workflow.shutdown_tts_service()
+            if killed > 0:
+                self.log(f"配音服务已关闭（{killed} 个进程）。")
+                self.app.toast(f"配音服务已关闭（{killed} 个进程）", kind="info")
 
         def on_success(result: WorkflowRunResult) -> None:
             self.log(result.stdout or "")
@@ -4037,7 +4195,7 @@ class WorkflowPage(BasePage):
     def __init__(self, master, app: App, title: str):
         super().__init__(master, title, app)
         self.mode_var = ctk.StringVar(value="standard")
-        self.project_var = ctk.StringVar()
+        self.project_var = app.project_selector_var
         self.account_var = ctk.StringVar()
         self.uid_var = ctk.StringVar()
         self.intro_var = ctk.StringVar(value="1")
@@ -4055,6 +4213,7 @@ class WorkflowPage(BasePage):
         )
         self.project_combo = AppComboBox(sel, width=400, variable=self.project_var)
         self.project_combo.grid(row=0, column=1, sticky="ew", padx=(0, UIStyle.PAD_LG), pady=UIStyle.PAD_MD)
+        self.app.register_project_selector(self.project_combo)
         self.project_combo.configure(command=self._select_project)
 
         # 子页面的表单控件应打包到此 frame 中（在 log 之前）
@@ -4970,11 +5129,8 @@ class WorkflowPage(BasePage):
 
     def refresh(self) -> None:
         project = self.app.current_project()
-        projects = self.repo.projects()
-        vals = [f"{p['id']} - {p['name']}" for p in projects]
-        self.project_combo.configure(values=vals)
+        self.app.sync_project_selectors()
         if project:
-            self.project_var.set(f"{project['id']} - {project['name']}")
             if self.loaded_project_id != project["id"]:
                 self.spoken_md_var.set(safe_text(project.get("spoken_md_path")))
                 self.loaded_project_id = project["id"]
@@ -5008,8 +5164,9 @@ class WorkflowPage(BasePage):
         v = self.project_var.get()
         if not v:
             return
-        pid = int(v.split(" - ", 1)[0])
-        self.app.set_current_project(pid)
+        pid = project_id_from_selector_value(v)
+        if pid is not None:
+            self.app.set_current_project(pid)
 
 
 class VoicePage(WorkflowPage):
@@ -5120,11 +5277,8 @@ class VoicePage(WorkflowPage):
         return tasks
 
     def _project_from_selector_value(self, value: str) -> dict[str, Any] | None:
-        if not value:
-            return None
-        try:
-            project_id = int(value.split(" - ", 1)[0])
-        except (TypeError, ValueError):
+        project_id = project_id_from_selector_value(value)
+        if project_id is None:
             return None
         return self.repo.project(project_id)
 
@@ -5146,9 +5300,9 @@ class VoicePage(WorkflowPage):
         dialog.grab_set()
         dialog.columnconfigure(1, weight=1)
 
-        project_values = [f"{p['id']} - {p['name']}" for p in projects]
+        project_values = [project_selector_value(p) for p in projects]
         current_project = self.app.current_project()
-        project_var = ctk.StringVar(value=f"{current_project['id']} - {current_project['name']}" if current_project else project_values[0])
+        project_var = ctk.StringVar(value=project_selector_value(current_project) if current_project else project_values[0])
         account_var = ctk.StringVar(value=self.account_var.get().strip() if self.account_var.get().strip() in users else users[0])
         target_var = ctk.StringVar()
         output_var = ctk.StringVar(value="")
@@ -5669,12 +5823,9 @@ class SubtitleSrtPage(WorkflowPage):
         self._sync_intro_text_state()
 
     def refresh(self) -> None:
-        projects = self.repo.projects()
-        vals = [f"{p['id']} - {p['name']}" for p in projects]
-        self.project_combo.configure(values=vals)
+        self.app.sync_project_selectors()
         project = self.app.current_project()
         if project:
-            self.project_var.set(f"{project['id']} - {project['name']}")
             if self.loaded_project_id != project["id"]:
                 self.spoken_md_var.set(safe_text(project.get("spoken_md_path")))
                 self.loaded_project_id = project["id"]

@@ -9,6 +9,8 @@ from bworkflow_sql.ui import (
     manifest_missing_assets,
     manifest_product_video_gaps,
     parse_uid_list,
+    project_id_from_selector_value,
+    project_selector_value,
     voice_generation_targets_from_rows,
     voice_state,
 )
@@ -131,6 +133,15 @@ def test_parse_uid_list_accepts_chinese_and_english_commas_only():
         "JP097",
         "JP098",
     ]
+
+
+def test_project_selector_helpers_round_trip_project_ids():
+    value = project_selector_value({"id": 42, "name": "键盘项目"})
+
+    assert value == "42 - 键盘项目"
+    assert project_id_from_selector_value(value) == 42
+    assert project_id_from_selector_value("") is None
+    assert project_id_from_selector_value("未选择") is None
 
 
 def test_spoken_markdown_default_root_is_spoken_copy_folder():

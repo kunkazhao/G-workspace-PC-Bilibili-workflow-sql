@@ -102,7 +102,7 @@ class DangerButton(ctk.CTkButton):
             command=command,
             fg_color=UIStyle.COLOR_ERROR,
             text_color="white",
-            hover_color="#C0392B",
+            hover_color=UIStyle.COLOR_ERROR_HOVER,
             font=UIStyle.FONT_BUTTON,
             height=height,
             corner_radius=UIStyle.RADIUS_MD,
@@ -165,6 +165,12 @@ class AppEntry(ctk.CTkEntry):
     """统一风格的文本输入框。"""
 
     def __init__(self, master, **kwargs):
+        self._highlight_empty = kwargs.pop("highlight_empty", True)
+        empty_placeholder = kwargs.pop("empty_placeholder", "未填写")
+        textvariable = kwargs.get("textvariable")
+        if self._highlight_empty:
+            kwargs.setdefault("placeholder_text", empty_placeholder)
+            kwargs.setdefault("placeholder_text_color", UIStyle.COLOR_FIELD_EMPTY_TEXT)
         super().__init__(
             master,
             fg_color=UIStyle.COLOR_INPUT_BG,
@@ -172,8 +178,25 @@ class AppEntry(ctk.CTkEntry):
             font=UIStyle.FONT_BODY,
             height=UIStyle.INPUT_HEIGHT,
             corner_radius=UIStyle.RADIUS_MD,
-            border_width=0,
+            border_width=1 if self._highlight_empty else 0,
+            border_color=UIStyle.COLOR_FIELD_NORMAL_BORDER,
             **kwargs,
+        )
+        if self._highlight_empty:
+            self._empty_textvariable = textvariable
+            if textvariable is not None:
+                textvariable.trace_add("write", lambda *_args: self._refresh_empty_state())
+            self.bind("<FocusOut>", lambda _event: self._refresh_empty_state(), add="+")
+            self.after_idle(self._refresh_empty_state)
+
+    def _refresh_empty_state(self) -> None:
+        if not self._highlight_empty or not self.winfo_exists():
+            return
+        value = self.get().strip()
+        self.configure(
+            border_color=UIStyle.COLOR_FIELD_EMPTY_BORDER
+            if not value
+            else UIStyle.COLOR_FIELD_NORMAL_BORDER
         )
 
 
@@ -181,6 +204,8 @@ class AppComboBox(ctk.CTkComboBox):
     """统一风格的下拉选择框。点击任意位置弹出下拉菜单，不可编辑文字。"""
 
     def __init__(self, master, values=None, **kwargs):
+        self._highlight_empty = kwargs.pop("highlight_empty", True)
+        variable = kwargs.get("variable")
         super().__init__(
             master,
             values=values or [],
@@ -192,13 +217,19 @@ class AppComboBox(ctk.CTkComboBox):
             dropdown_hover_color=UIStyle.COLOR_NAV_HOVER,
             height=UIStyle.INPUT_HEIGHT,
             corner_radius=UIStyle.RADIUS_MD,
-            border_width=0,
+            border_width=1 if self._highlight_empty else 0,
+            border_color=UIStyle.COLOR_FIELD_NORMAL_BORDER,
             button_color=UIStyle.COLOR_PRIMARY,
             button_hover_color=UIStyle.COLOR_PRIMARY_HOVER,
             **kwargs,
         )
         self._entry.bind("<Button>", self._on_click)
         self._entry.bind("<Key>", lambda e: "break")
+        if self._highlight_empty:
+            self._empty_variable = variable
+            if variable is not None:
+                variable.trace_add("write", lambda *_args: self._refresh_empty_state())
+            self.after_idle(self._refresh_empty_state)
 
     def _on_click(self, event=None):
         self.after_idle(self._safe_open_dropdown)
@@ -214,6 +245,16 @@ class AppComboBox(ctk.CTkComboBox):
             self._dropdown_menu.tk_popup(x, y)
         except Exception:
             pass
+
+    def _refresh_empty_state(self) -> None:
+        if not self._highlight_empty or not self.winfo_exists():
+            return
+        value = self.get().strip()
+        self.configure(
+            border_color=UIStyle.COLOR_FIELD_EMPTY_BORDER
+            if not value
+            else UIStyle.COLOR_FIELD_NORMAL_BORDER
+        )
 
 
 class AppLabel(ctk.CTkLabel):
