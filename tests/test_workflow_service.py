@@ -446,6 +446,58 @@ def test_assembly_prefers_current_category_voice_for_shared_price_transition(tmp
     assert transition["audio_path"] == str(right_voice)
 
 
+def test_assembly_reuses_shared_price_transition_voice_after_script_block_id_changes(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    repo = Repository(db)
+    service = WorkflowService(db)
+    repo.upsert_products_from_master(project_id, [{"uid": "JP071", "title": "狼蛛F87ProV2超神版", "price_label": "359元"}])
+    with db.connect() as conn:
+        conn.execute("UPDATE projects SET name='数码-键盘', category_name='键盘' WHERE id=?", (project_id,))
+        old_cursor = conn.execute(
+            """
+            INSERT INTO script_blocks
+                (project_id, script_type, owner_uid, price_range_label, block_label, script_id, body, text_hash, source, source_anchor, active, created_at, updated_at)
+            VALUES (?, 'price_transition', '', '300-500元-旧', '正文', 'price:300-500:OLD', ?, ?, 'test', '', 0, 'now', 'now')
+            """,
+            (project_id, "300到500元值得重点看。", text_hash("300到500元值得重点看。")),
+        )
+        old_block_id = old_cursor.lastrowid
+        conn.execute(
+            """
+            INSERT INTO script_blocks
+                (project_id, script_type, owner_uid, price_range_label, block_label, script_id, body, text_hash, source, source_anchor, created_at, updated_at)
+            VALUES (?, 'price_transition', '', '300-500元', '正文', 'price:300-500:V001', ?, ?, 'test', '', 'now', 'now')
+            """,
+            (project_id, "300到500元值得重点看。", text_hash("300到500元值得重点看。")),
+        )
+    price_block = next(
+        block
+        for block in repo.script_blocks(project_id)
+        if block["script_type"] == "price_transition" and block["price_range_label"] == "300-500元"
+    )
+    voice_path = tmp_path / "voice" / "数码-键盘" / "小燃" / "0-价格-300-500元.wav"
+    voice_path.parent.mkdir(parents=True)
+    voice_path.write_bytes(b"voice")
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, script_block_id, asset_type, account_label, account_id, block_label, script_id, text_hash, path, status, source_kind, created_at, updated_at)
+            VALUES (?, 'PRICE_TRANSITION', ?, 'voice', '小燃', 'xiaoran', '300-500元', 'price:300-500:V001', ?, ?, 'ready', 'test', 'now', 'now')
+            """,
+            (project_id, old_block_id, price_block["text_hash"], str(voice_path)),
+        )
+
+    result = service.assemble_spoken_script(project_id, account_label="小燃", product_uids=["JP071"])
+
+    assert result.returncode == 0
+    spoken_path = Path(repo.project(project_id)["spoken_md_path"])
+    manifest_path = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "manifests" / f"{spoken_path.stem}.manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    transition = next(entry for entry in payload["entries"] if entry["price_range_label"] == "300-500元")
+    assert transition["audio_path"] == str(voice_path)
+
+
 def test_assembly_writes_reader_friendly_spoken_markdown_without_repeated_price_sections(tmp_path: Path):
     db, project_id = seed_project(tmp_path)
     repo = Repository(db)

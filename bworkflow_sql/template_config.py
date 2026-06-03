@@ -5,14 +5,14 @@ from typing import Any
 # 每个模板的视频展示区域坐标（相对于 1920*1080 画布）
 # 数据来源：G:\workspace\PC-Bilibili-workflow\data\display_video_templates.json
 TEMPLATE_COORDS: dict[str, dict[str, Any]] = {
-    "小博-模板1": {"x": 850, "y": 95, "width": 980, "height": 620, "round_corner": 25},
+    "小博-模板1": {"x": 850, "y": 95, "width": 980, "height": 620},
     "小博-模板2": {"x": 1015, "y": 154, "width": 680, "height": 520},
     "小博-模板3": {"x": 1015, "y": 154, "width": 680, "height": 520},
     "小燃-模板1": {"x": -830, "y": -77, "width": 970, "height": 590, "coordinate_mode": "clip_transform_pixels"},
     "小燃-模板2": {"x": 50, "y": 322, "width": 1004, "height": 588},
-    "小歪-模板1": {"x": -855, "y": 38, "width": 960, "height": 540, "coordinate_mode": "clip_transform_pixels"},
+    "小歪-模板1": {"x": -855, "y": -22, "width": 960, "height": 540, "coordinate_mode": "clip_transform_pixels"},
     "小歪-模板2": {"x": -843, "y": -34, "width": 1037, "height": 528, "coordinate_mode": "clip_transform_pixels"},
-    "知了-模板1": {"x": 67, "y": 185, "width": 990, "height": 576, "round_corner": 22},
+    "知了-模板1": {"x": 67, "y": 185, "width": 990, "height": 576},
 }
 
 # 每个用户对应的可用模板列表

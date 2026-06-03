@@ -10,7 +10,6 @@ def test_zhiliao_template_preset_available() -> None:
         "y": 185,
         "width": 990,
         "height": 576,
-        "round_corner": 22,
     }
 
 
@@ -21,7 +20,7 @@ def test_hyphen_template_still_uses_template_suffix() -> None:
 def test_xiaowai_template_1_uses_jianying_panel_coordinates() -> None:
     assert get_template_slot("小歪-模板1") == {
         "x": -855,
-        "y": 38,
+        "y": -22,
         "width": 960,
         "height": 540,
         "coordinate_mode": "clip_transform_pixels",

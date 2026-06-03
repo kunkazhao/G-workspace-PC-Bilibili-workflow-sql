@@ -1,0 +1,61 @@
+{
+  "version": 2,
+  "source": "codex-alpha-flow-smoke",
+  "generated_at": "2026-06-03 21:14:29",
+  "entries": [
+    {
+      "type": "product",
+      "order_index": 1,
+      "section": "product",
+      "product_uid": "EJLY061",
+      "product_name": "音贝奇ClipAir",
+      "price_label": "139元",
+      "text": "音贝奇ClipAir 圆角透明链路测试。",
+      "audio_path": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_alpha_flow\\20260603-211421\\audio\\01-EJLY061-voice.wav",
+      "image_path": "G:\\2026项目-b站\\素材-商品ppt图片\\数码-耳夹蓝牙耳机\\小博\\模板1\\139-EJLY061-音贝奇ClipAir.png",
+      "display_video_path": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_alpha_flow\\20260603-211421\\rounded_mov\\01-EJLY061-音贝奇ClipAir-rounded-alpha.mov",
+      "display_video_slot": {
+        "x": 850,
+        "y": 95,
+        "width": 980,
+        "height": 620
+      }
+    },
+    {
+      "type": "product",
+      "order_index": 2,
+      "section": "product",
+      "product_uid": "EJLY059",
+      "product_name": "熙彼儿EC200",
+      "price_label": "148元",
+      "text": "熙彼儿EC200 圆角透明链路测试。",
+      "audio_path": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_alpha_flow\\20260603-211421\\audio\\02-EJLY059-voice.wav",
+      "image_path": "G:\\2026项目-b站\\素材-商品ppt图片\\数码-耳夹蓝牙耳机\\小博\\模板1\\148-EJLY059-熙彼儿EC200.png",
+      "display_video_path": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_alpha_flow\\20260603-211421\\rounded_mov\\02-EJLY059-熙彼儿EC200-rounded-alpha.mov",
+      "display_video_slot": {
+        "x": 850,
+        "y": 95,
+        "width": 980,
+        "height": 620
+      }
+    },
+    {
+      "type": "product",
+      "order_index": 3,
+      "section": "product",
+      "product_uid": "EJJE051",
+      "product_name": "iKF Air Clip",
+      "price_label": "149元",
+      "text": "iKF Air Clip 圆角透明链路测试。",
+      "audio_path": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_alpha_flow\\20260603-211421\\audio\\03-EJJE051-voice.wav",
+      "image_path": "G:\\2026项目-b站\\素材-商品ppt图片\\数码-耳夹蓝牙耳机\\小博\\模板1\\149-EJJE051-iKF Air Clip.png",
+      "display_video_path": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_alpha_flow\\20260603-211421\\rounded_mov\\03-EJJE051-iKF Air Clip-rounded-alpha.mov",
+      "display_video_slot": {
+        "x": 850,
+        "y": 95,
+        "width": 980,
+        "height": 620
+      }
+    }
+  ]
+}

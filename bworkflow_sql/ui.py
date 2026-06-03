@@ -529,7 +529,7 @@ def default_spoken_markdown_path(project: dict[str, Any], account_label: str = "
         "品类名称",
     )
     user_label = safe_file_component(account_label, "用户")
-    return DEFAULT_SPOKEN_MD_ROOT / project_name / f"5月-{user_label}.md"
+    return DEFAULT_SPOKEN_MD_ROOT / project_name / f"6月-{user_label}.md"
 
 
 def is_default_spoken_markdown_path(path_text: str) -> bool:
@@ -541,7 +541,7 @@ def is_default_spoken_markdown_path(path_text: str) -> bool:
 
 def account_label_from_spoken_path(path_text: str) -> str:
     stem = Path(path_text).stem if safe_text(path_text) else ""
-    match = re.match(r"^5月-(?P<label>.+)$", stem)
+    match = re.match(r"^6月-(?P<label>.+)$", stem)
     return safe_text(match.group("label")) if match else ""
 
 
@@ -723,7 +723,14 @@ def show_precheck_dialog(
         if can_continue:
             PrimaryButton(buttons, text=confirm_text, command=lambda: close(True)).grid(row=0, column=2)
         else:
-            GhostButton(buttons, text=confirm_text, command=lambda: close(False)).grid(row=0, column=2)
+            blocked_text = confirm_text if confirm_text != "确认继续" else "修正后再继续"
+            ctk.CTkLabel(
+                buttons,
+                text="存在阻塞项，请先按检查结果修正。",
+                font=UIStyle.FONT_SMALL,
+                text_color=UIStyle.COLOR_TEXT_DIM,
+            ).grid(row=0, column=0, sticky="w")
+            PrimaryButton(buttons, text=blocked_text, state="disabled").grid(row=0, column=2)
     dialog.protocol("WM_DELETE_WINDOW", lambda: close(False))
     _center_dialog(dialog)
     dialog.wait_window()
@@ -5052,7 +5059,7 @@ class WorkflowPage(BasePage):
         if intro_video_path is not None:
             result_items.append(f"引言成片视频：{'已找到' if intro_video_path.exists() else f'不存在：{intro_video_path}'}")
         if missing_files:
-            result_items.append(f"manifest 中有 {len(missing_files)} 个文件路径不存在")
+            result_items.append(f"manifest 中有 {len(missing_files)} 个文件路径不存在；缺音频会阻塞生成，缺图片/视频会尝试兜底")
         if missing_by_type["audio"]:
             result_items.append(f"缺配音：manifest 中有 {len(missing_by_type['audio'])} 条已选文案没有音频，请先生成或同步这些配音。")
         if missing_by_type["image"]:
@@ -5098,7 +5105,7 @@ class WorkflowPage(BasePage):
                     ("引言视频", str(intro_video_path) if intro_video_path else "未选择，将使用 manifest 内的引言配音"),
                     ("缺失文件", f"音频 {len(missing_by_type['audio'])}，图片 {len(missing_by_type['image'])}，视频 {len(missing_by_type['video'])}"),
                 ],
-                items=preview_lines(asset_detail_items or missing_examples or ["当前没有可见的素材路径。"], limit=100),
+                items=preview_lines((missing_examples + asset_detail_items) or ["当前没有可见的素材路径。"], limit=100),
             ),
             DialogSection(
                 title="检查结果",
@@ -5107,7 +5114,7 @@ class WorkflowPage(BasePage):
                 items=result_items,
             ),
             DialogSection(
-                title="数据库缺口",
+                title="数据库资产总览",
                 step="4",
                 tone="info",
                 rows=[
@@ -5116,6 +5123,7 @@ class WorkflowPage(BasePage):
                     ("缺配音", str(len(issues["missing_voice"]))),
                     ("配音过期", str(len(issues["expired_voice"]))),
                 ],
+                helper="这里按当前项目数据库资产统计；本次剪映实际阻塞以 manifest 检查为准。缺视频不阻塞，会用商品图兜底。",
             ),
         ]
         can_continue = (
@@ -5495,15 +5503,17 @@ class AssemblePage(WorkflowPage):
         ctk.CTkLabel(form, text="组合方式", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
             row=0, column=2, sticky="w", padx=(0, UIStyle.PAD_SM), pady=(UIStyle.PAD_LG, UIStyle.PAD_XS)
         )
-        mode_combo = AppComboBox(form, variable=self.mode_var, values=["标准模式", "Top 模式"])
+        mode_combo = AppComboBox(form, variable=self.mode_var, values=["标准模式", "Top 模式"], highlight_empty=False)
         mode_combo.grid(row=0, column=3, sticky="ew", padx=(0, UIStyle.PAD_LG), pady=(UIStyle.PAD_LG, UIStyle.PAD_XS))
+        mode_combo.configure(border_width=1, border_color=UIStyle.COLOR_PRIMARY)
         self.mode_var.set("标准模式")
 
         ctk.CTkLabel(form, text="引言", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
             row=0, column=4, sticky="w", padx=(0, UIStyle.PAD_SM), pady=(UIStyle.PAD_LG, UIStyle.PAD_XS)
         )
-        self.intro_combo = AppComboBox(form, variable=self.intro_choice_var)
+        self.intro_combo = AppComboBox(form, variable=self.intro_choice_var, highlight_empty=False)
         self.intro_combo.grid(row=0, column=5, sticky="ew", padx=(0, UIStyle.PAD_LG), pady=(UIStyle.PAD_LG, UIStyle.PAD_XS))
+        self.intro_combo.configure(border_width=1, border_color=UIStyle.COLOR_PRIMARY)
         self.intro_combo.configure(command=lambda _=None: self._sync_intro_index())
 
         ctk.CTkLabel(form, text="Top 商品UID（可不填）", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
@@ -5520,7 +5530,9 @@ class AssemblePage(WorkflowPage):
         ctk.CTkLabel(form, text="口播稿输出 MD", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
             row=2, column=0, sticky="w", padx=(UIStyle.PAD_LG, UIStyle.PAD_SM), pady=(UIStyle.PAD_XS, 0)
         )
-        AppEntry(form, textvariable=self.spoken_md_var).grid(row=2, column=1, columnspan=4, sticky="ew", padx=(0, UIStyle.PAD_SM), pady=(UIStyle.PAD_XS, 0))
+        self.spoken_md_entry = AppEntry(form, textvariable=self.spoken_md_var, highlight_empty=False)
+        self.spoken_md_entry.grid(row=2, column=1, columnspan=4, sticky="ew", padx=(0, UIStyle.PAD_SM), pady=(UIStyle.PAD_XS, 0))
+        self.spoken_md_entry.configure(border_width=1, border_color=UIStyle.COLOR_PRIMARY)
         GhostButton(form, text="选", width=52, command=self._browse_spoken_md).grid(row=2, column=5, sticky="e", padx=(0, UIStyle.PAD_LG), pady=(UIStyle.PAD_XS, 0))
         ctk.CTkLabel(
             form,

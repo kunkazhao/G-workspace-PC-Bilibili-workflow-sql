@@ -71,7 +71,6 @@ DEFAULT_DISPLAY_VIDEO_SLOT = {
     "y": 178,
     "width": 410,
     "height": 258,
-    "round_corner": 0.08,
 }
 DEFAULT_CLOSING_TEXT = "如果你看完这些还是拿不准该选哪款，或者不知道你的预算最适合哪个，按老规矩在评论区留预算和需求，我看到都会回复。"
 SUBTITLE_ASR_MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
@@ -472,6 +471,7 @@ class WorkflowService:
     def __init__(self, db: Database):
         self.db = db
         self.repo = Repository(db)
+        self._tts_log_handles: list[Any] = []
 
     def export_project_markdown(self, project_id: int, target_path: str | Path | None = None) -> Path:
         project = self.repo.project(project_id)
@@ -632,6 +632,12 @@ class WorkflowService:
             )
             if completed.returncode == 0:
                 killed += 1
+        for handle in self._tts_log_handles:
+            try:
+                handle.close()
+            except Exception:
+                pass
+        self._tts_log_handles.clear()
         return killed
 
     def voice_generation_counts(
@@ -1661,6 +1667,7 @@ class WorkflowService:
         log_dir.mkdir(parents=True, exist_ok=True)
         stdout_log = (log_dir / "bworkflow-sql-api-server.stdout.log").open("ab")
         stderr_log = (log_dir / "bworkflow-sql-api-server.stderr.log").open("ab")
+        self._tts_log_handles = [stdout_log, stderr_log]
         subprocess.Popen(
             [str(python_path), "-s", str(api_server_path)],
             cwd=str(DEFAULT_INDEXTTS_DIR),
@@ -1737,6 +1744,27 @@ class WorkflowService:
             )
         if not voice:
             voice = self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label, script_block_id=int(block["id"]), text_hash=safe_text(block["text_hash"]))
+        if not voice and uid in {"INTRO", "PRICE_TRANSITION"}:
+            shared_label = safe_text(block.get("block_label")) if uid == "INTRO" else safe_text(block.get("price_range_label"))
+            if preferred_voice_path_contains:
+                voice = self._ready_asset(
+                    assets,
+                    asset_type="voice",
+                    uid=uid,
+                    account_label=account_label,
+                    text_hash=safe_text(block["text_hash"]),
+                    block_label=shared_label,
+                    path_contains=preferred_voice_path_contains,
+                )
+            if not voice:
+                voice = self._ready_asset(
+                    assets,
+                    asset_type="voice",
+                    uid=uid,
+                    account_label=account_label,
+                    text_hash=safe_text(block["text_hash"]),
+                    block_label=shared_label,
+                )
         if not voice and block["script_type"] == "product":
             if preferred_voice_path_contains:
                 voice = self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label, path_contains=preferred_voice_path_contains)
@@ -1827,6 +1855,7 @@ class WorkflowService:
         account_label: str = "",
         script_block_id: int = 0,
         text_hash: str = "",
+        block_label: str = "",
         path_contains: str = "",
     ) -> dict[str, Any] | None:
         for asset in assets:
@@ -1835,6 +1864,8 @@ class WorkflowService:
             if uid and safe_text(asset.get("uid")) != uid:
                 continue
             if account_label and safe_text(asset.get("account_label")) != account_label:
+                continue
+            if block_label and safe_text(asset.get("block_label")) != block_label:
                 continue
             if path_contains and path_contains not in safe_text(asset.get("path")):
                 continue
@@ -2008,6 +2039,16 @@ def format_jianying_run_stdout(stdout: str) -> str:
     skipped_entries = payload.get("skipped_entries")
     if isinstance(skipped_entries, list) and skipped_entries:
         lines.append(f"有 {len(skipped_entries)} 个条目因缺少素材被跳过，请检查口播稿清单。")
+
+    skipped_display_videos = payload.get("skipped_display_videos")
+    if isinstance(skipped_display_videos, list) and skipped_display_videos:
+        lines.append(f"有 {len(skipped_display_videos)} 个商品展示视频因文件缺失或格式不支持被跳过：")
+        for item in skipped_display_videos[:8]:
+            name = safe_text(item.get("product_name")) or safe_text(item.get("product_uid")) or f"条目 {item.get('index')}"
+            reason = safe_text(item.get("reason"))
+            lines.append(f"  - {name}（{reason}）")
+        if len(skipped_display_videos) > 8:
+            lines.append(f"  ……等共 {len(skipped_display_videos)} 个")
 
     missing_subtitle_texts = payload.get("missing_subtitle_texts")
     if isinstance(missing_subtitle_texts, list) and missing_subtitle_texts:
@@ -2503,7 +2544,10 @@ def first_number(text: str) -> float | None:
 
 
 def price_in_range(price: float, label: str) -> bool:
-    numbers = [float(item) for item in re.findall(r"\d+(?:\.\d+)?", label)]
+    try:
+        numbers = [float(item) for item in re.findall(r"\d+(?:\.\d+)?", label)]
+    except (ValueError, OverflowError):
+        return False
     if not numbers:
         return False
     if len(numbers) == 1:
