@@ -473,3 +473,69 @@ def test_voice_asset_sync_ignores_other_category_account_folders(tmp_path: Path)
     assert result["matched_items"][0]["path"] == str(right)
     assets = repo.asset_bindings(project_id)
     assert [asset["path"] for asset in assets if asset["asset_type"] == "voice"] == [str(right)]
+
+
+def test_manual_voice_binding_marks_current_script_ready_and_survives_resync(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    voice_root = tmp_path / "voice"
+    manual_audio = voice_root / "数码-键盘" / "小燃" / "external-audio.mp3"
+    manual_audio.parent.mkdir(parents=True)
+    manual_audio.write_bytes(b"manual voice")
+    project_id = db.upsert_project({"name": "数码-键盘", "category_name": "键盘", "voice_root": str(voice_root)})
+    parsed = parse_markdown_text(
+        """
+## 商品文案
+
+### Alpha-JP071-99元
+#### 正文
+新的正文
+""".strip()
+    )
+    repo.upsert_products_from_master(project_id, [{"uid": "JP071", "title": "Alpha", "price_label": "99元"}])
+    SyncService(db).sync_markdown_payload(project_id, parsed)
+    block = repo.script_blocks(project_id)[0]
+    stale_audio = voice_root / "数码-键盘" / "小燃" / "old-JP071.wav"
+    stale_audio.write_bytes(b"old voice")
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO accounts (label, account_id, created_at, updated_at)
+            VALUES ('小燃', 'xiaoran', 'now', 'now')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, script_block_id, asset_type, account_label, account_id, block_label, script_id, text_hash, path, status, source_kind, file_size, file_mtime, confirmed, created_at, updated_at)
+            VALUES (?, 'JP071', ?, 'voice', '小燃', 'xiaoran', '正文', ?, 'old-hash', ?, 'ready', 'generated', 1, 'now', 1, 'now', 'now')
+            """,
+            (project_id, block["id"], block["script_id"], str(stale_audio)),
+        )
+
+    result = SyncService(db).manual_bind_voice_asset(project_id, script_block_id=block["id"], account_label="小燃", path=manual_audio)
+
+    assert result["source_kind"] == "manual"
+    ready = db.fetchone(
+        "SELECT * FROM asset_bindings WHERE project_id=? AND path=?",
+        (project_id, str(manual_audio)),
+    )
+    old = db.fetchone(
+        "SELECT status FROM asset_bindings WHERE project_id=? AND path=?",
+        (project_id, str(stale_audio)),
+    )
+    assert ready["status"] == "ready"
+    assert ready["source_kind"] == "manual"
+    assert ready["confirmed"] == 1
+    assert ready["text_hash"] == block["text_hash"]
+    assert old["status"] == "expired"
+
+    resync = SyncService(db).sync_assets(project_id, asset_type="voice", root_override=voice_root)
+
+    preserved = db.fetchone(
+        "SELECT status, source_kind FROM asset_bindings WHERE project_id=? AND path=?",
+        (project_id, str(manual_audio)),
+    )
+    assert dict(preserved) == {"status": "ready", "source_kind": "manual"}
+    assert resync["unmatched"] == 0
+    assert resync["unmatched_items"] == []

@@ -679,6 +679,7 @@ def test_jianying_generation_summarizes_json_stdout_for_users(tmp_path: Path, mo
                     "has_intro_video": True,
                     "intro_duration_sec": 47.68,
                     "display_video_segments": 2,
+                    "price_transition_title_segments": 2,
                     "image_fallback": {"resolved_count": 1, "missing_uids": ["A001"]},
                     "missing_subtitle_texts": [],
                 },
@@ -703,6 +704,7 @@ def test_jianying_generation_summarizes_json_stdout_for_users(tmp_path: Path, mo
     assert "草稿总时长约 2 分 5 秒。" in draft.stdout
     assert "已使用引言成片视频，时长约 48 秒。" in draft.stdout
     assert "已插入 2 段商品展示视频。" in draft.stdout
+    assert "已插入 2 段价格过渡标题。" in draft.stdout
     assert "仍有 1 个商品没有找到可用图片：A001" in draft.stdout
 
 

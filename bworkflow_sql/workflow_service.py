@@ -2023,6 +2023,10 @@ def format_jianying_run_stdout(stdout: str) -> str:
     if display_video_segments:
         lines.append(f"已插入 {display_video_segments} 段商品展示视频。")
 
+    price_transition_title_segments = int(payload.get("price_transition_title_segments") or 0)
+    if price_transition_title_segments:
+        lines.append(f"已插入 {price_transition_title_segments} 段价格过渡标题。")
+
     subtitle_segments = int(payload.get("subtitle_segments") or 0)
     if subtitle_segments:
         lines.append(f"已生成 {subtitle_segments} 段字幕。")

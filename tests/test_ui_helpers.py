@@ -4,6 +4,8 @@ from bworkflow_sql.ui import (
     ProjectPageDialog,
     asset_folder_paths,
     build_project_issue_summary,
+    collect_voice_status,
+    entry_asset_issue_lines,
     is_valid_windows_filename,
     manifest_account_label,
     manifest_missing_assets,
@@ -185,6 +187,57 @@ def test_manifest_missing_assets_reports_selected_copy_without_audio():
     assert missing["audio"] == ["#2 transition PRICE_TRANSITION 价格过渡 200元以下 价格过渡 200元以下：路径为空"]
 
 
+def test_entry_asset_issue_lines_hides_ready_asset_details(tmp_path):
+    audio = tmp_path / "voice.wav"
+    image = tmp_path / "image.png"
+    video = tmp_path / "video.mp4"
+    for path in (audio, image, video):
+        path.write_bytes(b"ok")
+
+    lines = entry_asset_issue_lines(
+        [
+            {
+                "type": "product",
+                "section": "product",
+                "order_index": 1,
+                "product_uid": "A1",
+                "product_name": "Alpha",
+                "audio_path": str(audio),
+                "image_path": str(image),
+                "display_video_path": str(video),
+            }
+        ]
+    )
+
+    assert lines == []
+
+
+def test_entry_asset_issue_lines_reports_only_problem_assets(tmp_path):
+    audio = tmp_path / "voice.wav"
+    audio.write_bytes(b"ok")
+    missing_video = tmp_path / "missing.mp4"
+
+    lines = entry_asset_issue_lines(
+        [
+            {
+                "type": "product",
+                "section": "product",
+                "order_index": 2,
+                "product_uid": "B2",
+                "product_name": "Beta",
+                "audio_path": str(audio),
+                "image_path": "",
+                "display_video_path": str(missing_video),
+            }
+        ]
+    )
+
+    assert lines == [
+        "#2 商品文案 B2 Beta｜图片：未匹配",
+        f"#2 商品文案 B2 Beta｜视频路径不存在：{missing_video}",
+    ]
+
+
 def test_asset_folder_paths_prefer_current_category_user_and_global_video(tmp_path):
     image_root = tmp_path / "images"
     video_root = tmp_path / "videos"
@@ -284,6 +337,28 @@ def test_issue_summary_reports_voice_gaps_per_script_block():
     assert issues["missing_copy"] == []
     assert issues["missing_image"] == []
     assert issues["missing_video"] == []
+
+
+def test_voice_status_rows_include_script_block_id_for_manual_mapping():
+    rows = collect_voice_status(
+        [
+            {
+                "id": 42,
+                "script_type": "product",
+                "owner_uid": "JP071",
+                "block_label": "正文",
+                "price_range_label": "",
+                "script_id": "product:JP071:V001",
+                "text_hash": text_hash("body"),
+            }
+        ],
+        [],
+        [{"label": "小燃"}],
+        {"JP071": {"title": "Keyboard"}},
+        selected_user="小燃",
+    )
+
+    assert rows["missing"][0]["script_block_id"] == "42"
 
 
 def test_voice_generation_targets_prefers_unique_product_uids_then_script_ids():

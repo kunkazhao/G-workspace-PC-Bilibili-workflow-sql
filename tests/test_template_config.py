@@ -13,6 +13,18 @@ def test_zhiliao_template_preset_available() -> None:
     }
 
 
+def test_rongrong_template_preset_available() -> None:
+    assert available_templates("荣荣") == ["荣荣-模板1"]
+    assert user_for_template("荣荣-模板1") == "荣荣"
+    assert image_set_for_template("荣荣-模板1") == "模板1"
+    assert get_template_slot("荣荣-模板1") == {
+        "x": 115,
+        "y": 200,
+        "width": 941,
+        "height": 554,
+    }
+
+
 def test_hyphen_template_still_uses_template_suffix() -> None:
     assert image_set_for_template("小歪-模板2") == "模板2"
 

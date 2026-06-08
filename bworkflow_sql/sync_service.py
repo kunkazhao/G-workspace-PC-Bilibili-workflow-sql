@@ -13,7 +13,9 @@ from .settings import DEFAULT_IMAGE_ROOT, DEFAULT_VIDEO_ROOT, DEFAULT_VOICE_ROOT
 from .utils import file_metadata, now_iso, safe_text, text_hash
 
 
-AUDIO_SUFFIXES = {".wav"}
+AUTOSCAN_AUDIO_SUFFIXES = {".wav"}
+MANUAL_AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg"}
+AUDIO_SUFFIXES = AUTOSCAN_AUDIO_SUFFIXES
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi"}
 UID_BOUNDARY_PATTERN = r"(?<![A-Za-z0-9])({uid})(?![A-Za-z0-9])"
@@ -426,6 +428,8 @@ class SyncService:
                             "path": str(path),
                         }
                     )
+        if "voice" in checked_types:
+            matched_voice_targets.update(self._current_ready_voice_targets(project_id, script_blocks))
         for current_type in checked_types:
             if not current_type:
                 continue
@@ -467,6 +471,7 @@ class SyncService:
             item
             for key, item in before_keys.items()
             if key not in matched_keys and self._asset_is_in_scanned_scope(item, scanned_roots)
+            and safe_text(item.get("source_kind")) != "manual"
         ]
         removed_items = [self._asset_item_from_binding(item) for item in removed_bindings]
         if removed_items:
@@ -506,6 +511,106 @@ class SyncService:
 
     def _asset_type_label(self, asset_type: str) -> str:
         return {"image": "图片", "video": "视频", "voice": "配音"}.get(asset_type, "素材")
+
+    def manual_bind_voice_asset(self, project_id: int, *, script_block_id: int, account_label: str, path: str | Path) -> dict[str, Any]:
+        project = self.repo.project(project_id)
+        if not project:
+            raise ValueError("请先创建或选择品类项目。")
+        audio_path = Path(path)
+        if not audio_path.exists() or not audio_path.is_file():
+            raise ValueError(f"配音文件不存在：{audio_path}")
+        if audio_path.suffix.casefold() not in MANUAL_AUDIO_SUFFIXES:
+            allowed = "、".join(sorted(MANUAL_AUDIO_SUFFIXES))
+            raise ValueError(f"暂不支持的配音格式：{audio_path.suffix}。支持：{allowed}")
+        block = self.db.fetchone(
+            "SELECT * FROM script_blocks WHERE project_id=? AND id=? AND active=1",
+            (project_id, script_block_id),
+        )
+        if not block:
+            raise ValueError("没有找到要绑定的文案块，请先同步 MD。")
+        account = self.db.fetchone("SELECT * FROM accounts WHERE label=?", (safe_text(account_label),))
+        if not account:
+            raise ValueError(f"没有找到用户：{account_label}")
+        block_dict = dict(block)
+        account_dict = dict(account)
+        uid = self._voice_block_uid(block_dict)
+        block_label = safe_text(block_dict.get("price_range_label")) if block_dict["script_type"] == "price_transition" else safe_text(block_dict.get("block_label"))
+        meta = file_metadata(audio_path)
+        ts = now_iso()
+        with self.db.connect() as conn:
+            conn.execute(
+                """
+                UPDATE asset_bindings
+                SET status='expired', updated_at=?
+                WHERE project_id=?
+                  AND script_block_id=?
+                  AND asset_type='voice'
+                  AND account_label=?
+                  AND text_hash<>?
+                """,
+                (ts, project_id, block_dict["id"], safe_text(account_dict.get("label")), safe_text(block_dict.get("text_hash"))),
+            )
+            conn.execute(
+                """
+                INSERT INTO asset_bindings
+                    (project_id, uid, script_block_id, asset_type, account_label, account_id, block_label, script_id, text_hash, path, status, source_kind, file_size, file_mtime, confirmed, created_at, updated_at)
+                VALUES (?, ?, ?, 'voice', ?, ?, ?, ?, ?, ?, 'ready', 'manual', ?, ?, 1, ?, ?)
+                ON CONFLICT(project_id, uid, script_block_id, asset_type, account_label, block_label, path)
+                DO UPDATE SET
+                    account_id=excluded.account_id,
+                    script_id=excluded.script_id,
+                    text_hash=excluded.text_hash,
+                    status='ready',
+                    source_kind='manual',
+                    file_size=excluded.file_size,
+                    file_mtime=excluded.file_mtime,
+                    confirmed=1,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    project_id,
+                    uid,
+                    block_dict["id"],
+                    safe_text(account_dict.get("label")),
+                    safe_text(account_dict.get("account_id")),
+                    block_label,
+                    safe_text(block_dict.get("script_id")) or f"script-{block_dict['id']}",
+                    safe_text(block_dict.get("text_hash")),
+                    str(audio_path),
+                    meta["file_size"],
+                    meta["file_mtime"],
+                    ts,
+                    ts,
+                ),
+            )
+        result = {
+            "asset_type": "voice",
+            "uid": uid,
+            "title": self._voice_block_title(block_dict),
+            "account_label": safe_text(account_dict.get("label")),
+            "block_label": block_label,
+            "script_block_id": int(block_dict["id"]),
+            "path": str(audio_path),
+            "status": "ready",
+            "source_kind": "manual",
+        }
+        self.db.log_event(
+            project_id,
+            "manual_voice_bind",
+            "success",
+            f"手动绑定配音：{result['account_label']} / {result['title']}",
+            [
+                {
+                    "item_kind": "script_block",
+                    "uid": uid,
+                    "title": result["title"],
+                    "status": "ready",
+                    "message": "手动绑定本地配音文件",
+                    "path": str(audio_path),
+                }
+            ],
+        )
+        return result
 
     def _asset_binding_key(self, item: dict[str, Any]) -> tuple[str, str, int, str, str, str]:
         return (
@@ -551,6 +656,23 @@ class SyncService:
             return True
         except ValueError:
             return False
+
+    def _current_ready_voice_targets(self, project_id: int, blocks: list[dict[str, Any]]) -> set[tuple[str, str]]:
+        blocks_by_id = {int(block.get("id") or 0): block for block in blocks}
+        targets: set[tuple[str, str]] = set()
+        for asset in self.repo.asset_bindings(project_id):
+            if safe_text(asset.get("asset_type")) != "voice" or safe_text(asset.get("status")) != "ready":
+                continue
+            path_text = safe_text(asset.get("path"))
+            if not path_text or not Path(path_text).exists():
+                continue
+            block = blocks_by_id.get(int(asset.get("script_block_id") or 0))
+            if not block:
+                continue
+            if safe_text(asset.get("text_hash")) != safe_text(block.get("text_hash")):
+                continue
+            targets.add(self._voice_target_key(block))
+        return targets
 
     def _voice_block_from_path(self, path: Path, blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
         text = _compact_identity(path.stem)

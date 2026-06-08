@@ -1,9 +1,16 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.codex_tmp/
+build/
+dist/
 data/*.db
 data/*.db-*
 data/*.sqlite
 data/*.sqlite-*
 data/workspace/*
 !data/workspace/.gitkeep
+data/manual_voice_outputs/
+data/tmp_jianying_price_title_demo/
+data/tmp_jianying_price_transition_title/
+data/tmp_rongrong_template_probe/

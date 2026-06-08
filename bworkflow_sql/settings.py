@@ -24,6 +24,8 @@ LEGACY_PROJECT_ROOT = Path(r"G:\workspace\PC-Bilibili-workflow")
 B_WORKFLOW_SKILL_SCRIPTS = Path(r"C:\Users\zhaoer\.codex\skills\b-workflow\scripts")
 DEFAULT_INDEXTTS_DIR = Path(r"G:\Tools\IndexTTS2.0")
 DEFAULT_TTS_API_BASE_URL = "http://127.0.0.1:7861"
+DEFAULT_MASTER_API_BASE_URL = "http://127.0.0.1:8000"
+DEFAULT_MASTER_SERVICE_ROOT = Path(r"G:\workspace\bilibili-newTools-next-master")
 
 DEFAULT_MARKDOWN_ROOT = Path(r"G:\WriteSpace\B站-文案脚本\10_b站文案\3.商品文案")
 DEFAULT_IMAGE_ROOT = Path(r"G:\2026项目-b站\素材-商品ppt图片")

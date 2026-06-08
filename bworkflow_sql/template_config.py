@@ -13,6 +13,7 @@ TEMPLATE_COORDS: dict[str, dict[str, Any]] = {
     "小歪-模板1": {"x": -855, "y": -22, "width": 960, "height": 540, "coordinate_mode": "clip_transform_pixels"},
     "小歪-模板2": {"x": -843, "y": -34, "width": 1037, "height": 528, "coordinate_mode": "clip_transform_pixels"},
     "知了-模板1": {"x": 67, "y": 185, "width": 990, "height": 576},
+    "荣荣-模板1": {"x": 115, "y": 200, "width": 941, "height": 554},
 }
 
 # 每个用户对应的可用模板列表
@@ -21,6 +22,7 @@ USER_TEMPLATES: dict[str, list[str]] = {
     "小燃": ["小燃-模板1", "小燃-模板2"],
     "小歪": ["小歪-模板1", "小歪-模板2"],
     "知了": ["知了-模板1"],
+    "荣荣": ["荣荣-模板1"],
 }
 
 

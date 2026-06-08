@@ -32,6 +32,7 @@ from .copy_writer import preview_copy_write, write_copy_blocks_to_markdown
 from .db import Database
 from .legacy_import import LegacyImportService
 from .master_data import MasterDataService, display_name
+from .master_service import MasterServiceManager, is_master_connection_error
 from .outline_service import OutlineService
 from .repositories import Repository
 from .settings import (
@@ -280,6 +281,7 @@ def collect_voice_status(
                     "block_label": voice_block_match_label(block),
                     "script_id": safe_text(block.get("script_id")),
                     "script_type": safe_text(block.get("script_type")),
+                    "script_block_id": str(block.get("id") or ""),
                     "state": state,
                 }
             )
@@ -314,6 +316,19 @@ def voice_generation_targets_from_rows(rows: list[dict[str, str]]) -> list[str]:
             script_ids.append(script_id)
             seen_scripts.add(script_id)
     return product_uids + script_ids
+
+
+def voice_row_choice_label(row: dict[str, Any]) -> str:
+    state_label = {"missing": "缺配音", "expired": "配音过期", "ready": "已就绪"}.get(safe_text(row.get("state")), safe_text(row.get("state")))
+    return " / ".join(
+        part
+        for part in [
+            safe_text(row.get("account_label")),
+            safe_text(row.get("display")),
+            state_label,
+        ]
+        if part
+    )
 
 
 def build_project_gap_details(
@@ -745,6 +760,8 @@ def show_action_sections_dialog(
     *,
     action_text: str,
     action_enabled: bool,
+    secondary_action_text: str = "",
+    secondary_action_enabled: bool = False,
     close_text: str = "关闭",
 ) -> str:
     dialog = ctk.CTkToplevel(parent)
@@ -770,11 +787,18 @@ def show_action_sections_dialog(
         result["action"] = action
         dialog.destroy()
 
+    column = 1
+    if secondary_action_text:
+        secondary_button = GhostButton(buttons, text=secondary_action_text, command=lambda: close("secondary"), width=140)
+        secondary_button.grid(row=0, column=column, padx=(0, UIStyle.PAD_SM))
+        if not secondary_action_enabled:
+            secondary_button.configure(state="disabled")
+        column += 1
     action_button = PrimaryButton(buttons, text=action_text, command=lambda: close("action"))
-    action_button.grid(row=0, column=1, padx=(0, UIStyle.PAD_SM))
+    action_button.grid(row=0, column=column, padx=(0, UIStyle.PAD_SM))
     if not action_enabled:
         action_button.configure(state="disabled")
-    GhostButton(buttons, text=close_text, command=lambda: close("close"), width=140).grid(row=0, column=2)
+    GhostButton(buttons, text=close_text, command=lambda: close("close"), width=140).grid(row=0, column=column + 1)
     dialog.protocol("WM_DELETE_WINDOW", lambda: close("close"))
     _center_dialog(dialog)
     dialog.wait_window()
@@ -1170,6 +1194,40 @@ def entry_asset_lines(entries: list[dict[str, Any]], *, include_intro: bool = Tr
     return lines
 
 
+def entry_asset_issue_lines(entries: list[dict[str, Any]], *, include_intro: bool = True) -> list[str]:
+    lines: list[str] = []
+
+    def append_issue(label: str, asset_label: str, path: str) -> None:
+        if not path:
+            lines.append(f"{label}｜{asset_label}：未匹配")
+        elif not Path(path).exists():
+            lines.append(f"{label}｜{asset_label}路径不存在：{path}")
+
+    for entry in entries:
+        section = safe_text(entry.get("section"))
+        entry_type = safe_text(entry.get("type"))
+        if not include_intro and section == "intro":
+            continue
+        label = " ".join(
+            part
+            for part in [
+                f"#{entry.get('order_index') or entry.get('index')}" if entry.get("order_index") or entry.get("index") else "",
+                TYPE_LABELS.get(section) or entry_type,
+                safe_text(entry.get("product_uid")),
+                safe_text(entry.get("product_name")),
+                safe_text(entry.get("source_label")),
+            ]
+            if part
+        )
+        label = label or "未命名段落"
+        append_issue(label, "配音", safe_text(entry.get("audio_path")))
+        if entry_type == "product":
+            append_issue(label, "图片", safe_text(entry.get("image_path")))
+            video_path = safe_text(entry.get("display_video_path")) or safe_text(entry.get("video_path"))
+            append_issue(label, "视频", video_path)
+    return lines
+
+
 COLUMN_WIDTHS = {
     "品类": 80,
     "类型": 80,
@@ -1200,6 +1258,7 @@ class App(ctk.CTk):
         self.repo = Repository(self.db)
         self.sync = SyncService(self.db)
         self.workflow = WorkflowService(self.db)
+        self.master_service = MasterServiceManager()
         self.outline = OutlineService(self.db)
         self.legacy_import = LegacyImportService(self.db)
         self.master_data = MasterDataService()
@@ -3358,7 +3417,47 @@ class SyncPage(BasePage):
         self.app.run_background("预览 Master 变化",
             lambda: self.sync.sync_master_scheme(project["id"], apply_changes=False),
             on_success=lambda r: self._confirm_and_sync_master(project["id"], r),
+            on_error=lambda exc, tb: self._handle_master_sync_error(project["id"], exc, tb),
             success_message="")
+
+    def _handle_master_sync_error(self, project_id: int, exc: Exception, _tb: str) -> None:
+        if not is_master_connection_error(exc):
+            messagebox.showerror("预览 Master 变化失败", str(exc), parent=self)
+            return
+        sections = [
+            DialogSection(
+                title="Master 服务未启动",
+                step="1",
+                tone="warning",
+                rows=[
+                    ("接口地址", self.app.master_service.api_base_url),
+                    ("服务项目", str(self.app.master_service.service_root)),
+                ],
+                items=["当前无法连接 Master 方案接口。", "确认后会启动本地 Master 后端服务，并自动重试本次同步。"],
+            )
+        ]
+        if not show_confirmation_dialog(
+            self,
+            "Master 接口不可用",
+            "同步 Master 需要本地 Master 后端服务。",
+            sections,
+            confirm_text="启动服务并重试",
+        ):
+            self.toast("已取消同步 Master。", kind="warning")
+            return
+
+        def work():
+            self.app.master_service.ensure_running()
+            return self.sync.sync_master_scheme(project_id, apply_changes=False)
+
+        self.app.run_background(
+            "启动 Master 服务",
+            work,
+            on_success=lambda r: self._confirm_and_sync_master(project_id, r),
+            on_error=lambda retry_exc, _retry_tb: messagebox.showerror("Master 服务启动失败", str(retry_exc), parent=self),
+            success_message="",
+            show_success_toast=False,
+        )
 
     def _confirm_and_sync_master(self, pid: int, preview: dict[str, Any]) -> None:
         sections = [
@@ -3557,14 +3656,7 @@ class SyncPage(BasePage):
                 )
             )
         if not missing_voice and not expired_voice:
-            sections.append(
-                DialogSection(
-                    title="缺口列表",
-                    step="2",
-                    tone="success",
-                    items=["当前用户没有缺配音或过期配音。"],
-                )
-            )
+            sections[0].helper = "当前用户没有缺配音或过期配音。"
         action = show_action_sections_dialog(
             self,
             "配音检查结果",
@@ -3572,10 +3664,14 @@ class SyncPage(BasePage):
             sections,
             action_text="立即配音",
             action_enabled=bool(missing_voice or expired_voice),
+            secondary_action_text="手动映射音频",
+            secondary_action_enabled=bool(missing_voice or expired_voice),
             close_text="关闭",
         )
         if action == "action":
             self._open_voice_generation_for_missing(project["id"], account_label, missing_voice + expired_voice)
+        elif action == "secondary":
+            self._open_manual_voice_binding_dialog(project["id"], account_label, missing_voice + expired_voice)
 
     def _open_voice_generation_for_missing(self, project_id: int, account_label: str, missing_voice: list[dict[str, str]]) -> None:
         targets = voice_generation_targets_from_rows(missing_voice)
@@ -3595,6 +3691,80 @@ class SyncPage(BasePage):
         page._update_voice_output_dir(force=True)
         page.log(f"已从配音检查填入缺配音目标：{'，'.join(targets)}")
         self.toast(f"已填入 {len(targets)} 个缺配音目标")
+
+    def _open_manual_voice_binding_dialog(self, project_id: int, account_label: str, rows: list[dict[str, str]]) -> None:
+        if not rows:
+            self.toast("当前没有可手动映射的配音缺口。", kind="warning")
+            return
+        choice_rows = [row for row in rows if safe_text(row.get("script_block_id"))]
+        if not choice_rows:
+            self.toast("缺口里没有可定位的文案块，请先同步 MD。", kind="warning")
+            return
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("手动映射配音")
+        dialog.geometry("860x360")
+        dialog.minsize(760, 320)
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()
+        dialog.columnconfigure(1, weight=1)
+        ctk.CTkLabel(dialog, text="选择文案块", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
+            row=0, column=0, sticky="w", padx=UIStyle.PAD_XL, pady=(UIStyle.PAD_XL, UIStyle.PAD_SM)
+        )
+        choices = [voice_row_choice_label(row) for row in choice_rows]
+        choice_var = ctk.StringVar(value=choices[0])
+        combo = AppComboBox(dialog, variable=choice_var, values=choices, width=620)
+        combo.grid(row=0, column=1, sticky="ew", padx=(0, UIStyle.PAD_XL), pady=(UIStyle.PAD_XL, UIStyle.PAD_SM))
+        ctk.CTkLabel(dialog, text="本地音频", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
+            row=1, column=0, sticky="w", padx=UIStyle.PAD_XL, pady=UIStyle.PAD_SM
+        )
+        path_var = ctk.StringVar(value="")
+        path_entry = AppEntry(dialog, textvariable=path_var)
+        path_entry.grid(row=1, column=1, sticky="ew", padx=(0, UIStyle.PAD_XL), pady=UIStyle.PAD_SM)
+
+        def browse_audio() -> None:
+            initial = self.asset_paths.get("voice") or safe_text((self.app.current_project() or {}).get("voice_root")) or str(DEFAULT_VOICE_ROOT)
+            selected = filedialog.askopenfilename(
+                parent=dialog,
+                title="选择要映射的本地配音文件",
+                initialdir=initial,
+                filetypes=[("Audio", "*.wav *.mp3 *.m4a *.aac *.flac *.ogg"), ("All", "*.*")],
+            )
+            if selected:
+                path_var.set(selected)
+
+        def bind_selected() -> None:
+            selected_path = safe_text(path_var.get())
+            if not selected_path:
+                messagebox.showwarning("缺少音频文件", "请先选择一个本地配音文件。", parent=dialog)
+                return
+            index = choices.index(choice_var.get()) if choice_var.get() in choices else 0
+            row = choice_rows[index]
+            try:
+                result = self.sync.manual_bind_voice_asset(
+                    project_id,
+                    script_block_id=int(row["script_block_id"]),
+                    account_label=account_label,
+                    path=selected_path,
+                )
+            except Exception as exc:
+                messagebox.showerror("手动映射失败", str(exc), parent=dialog)
+                return
+            dialog.destroy()
+            self.toast(f"已手动映射配音：{result['title']}")
+            self.refresh()
+
+        GhostButton(dialog, text="选择文件", command=browse_audio, width=100).grid(row=2, column=1, sticky="w", padx=(0, UIStyle.PAD_XL), pady=(UIStyle.PAD_SM, UIStyle.PAD_MD))
+        helper = "会把所选音频直接绑定到当前文案块，并用当前文案 hash 标记为已就绪。"
+        ctk.CTkLabel(dialog, text=helper, font=UIStyle.FONT_SMALL, text_color=UIStyle.COLOR_TEXT_DIM, anchor="w").grid(
+            row=3, column=0, columnspan=2, sticky="ew", padx=UIStyle.PAD_XL, pady=(0, UIStyle.PAD_MD)
+        )
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.grid(row=4, column=0, columnspan=2, sticky="ew", padx=UIStyle.PAD_XL, pady=(0, UIStyle.PAD_XL))
+        buttons.columnconfigure(0, weight=1)
+        GhostButton(buttons, text="取消", command=dialog.destroy, width=100).grid(row=0, column=1, padx=(0, UIStyle.PAD_SM))
+        PrimaryButton(buttons, text="确认映射", command=bind_selected, width=120).grid(row=0, column=2)
+        _center_dialog(dialog)
+        dialog.wait_window()
 
     def _show_all_gaps(self) -> None:
         project = self._current_project_or_warn()
@@ -3638,6 +3808,8 @@ class SyncPage(BasePage):
         step = 2
         for key, label in labels:
             items = issues.get(key) or []
+            if not items:
+                continue
             target = {
                 "missing_copy": "商品文案 MD",
                 "missing_image": "图片目录",
@@ -3649,12 +3821,14 @@ class SyncPage(BasePage):
                 DialogSection(
                     title=label,
                     step=str(step),
-                    tone="warning" if items else "success",
-                    items=items or ["无"],
+                    tone="warning",
+                    items=items,
                     helper=f"补齐位置：{target}" if target else "",
                 )
             )
             step += 1
+        if step == 2:
+            sections[0].helper = "当前项目和筛选用户下没有明显素材与文案缺口。"
         show_precheck_dialog(
             self,
             "全部缺口明细",
@@ -3721,15 +3895,8 @@ class SyncPage(BasePage):
                 title="新匹配的素材",
                 step="2",
                 tone="success" if changed_lines else "info",
-                items=preview_lines(changed_lines, limit=40),
-                helper="这里只显示本次同步相比同步前新增或减少的素材。",
-            ),
-            DialogSection(
-                title="目前匹配的所有素材",
-                step="3",
-                tone="primary",
-                items=preview_lines([item_line(item) for item in current_items], limit=80),
-                helper="用于查看当前数据库中可用素材的总览。",
+                items=preview_lines(changed_lines, limit=40) if changed_lines else [],
+                helper="这里只显示本次同步相比同步前新增或减少的素材；本次无变化则不展开正常素材。",
             ),
         ]
         if unmatched_items:
@@ -4117,7 +4284,7 @@ class StandaloneVoicePage(BasePage):
                 title="阻塞项",
                 step="3",
                 tone="warning" if blocked else "success",
-                items=preview_lines(blocked),
+                items=preview_lines(blocked) if blocked else [],
                 helper="" if blocked else "当前没有发现阻塞项，可以继续生成配音。",
             ),
         ]
@@ -4763,19 +4930,14 @@ class WorkflowPage(BasePage):
                 title=f"{prefix}待生成明细",
                 step=str(step_start + 2),
                 tone="info",
-                items=preview_lines(pending),
-            ),
-            DialogSection(
-                title=f"{prefix}已有跳过",
-                step=str(step_start + 3),
-                tone="info",
-                items=preview_lines(skipped),
+                items=preview_lines(pending) if pending else [],
+                helper="" if pending else "当前没有需要生成或重生成的配音。",
             ),
             DialogSection(
                 title=f"{prefix}阻塞与缺口",
-                step=str(step_start + 4),
+                step=str(step_start + 3),
                 tone="warning" if blocked else "success",
-                items=preview_lines(blocked),
+                items=preview_lines(blocked) if blocked else [],
                 helper="" if blocked else "当前没有发现阻塞项，可以继续生成配音。",
             ),
         ]
@@ -4917,15 +5079,7 @@ class WorkflowPage(BasePage):
                 )
             )
             asset_order += 1
-        asset_detail_items = entry_asset_lines(asset_entries)
-        top_titles = [
-            f"{safe_text(product.get('uid'))} {safe_text(product.get('title'))}".strip()
-            for _block, product, _is_top in top_product_blocks
-        ]
-        other_preview = [
-            f"{safe_text(product.get('uid'))} {safe_text(product.get('title'))}".strip()
-            for _block, product, _is_top in other_product_blocks[:5]
-        ]
+        asset_issue_items = entry_asset_issue_lines(asset_entries)
         blockers: list[str] = []
         if not output_path:
             blockers.append("还没有选择口播稿输出 MD。")
@@ -4937,12 +5091,6 @@ class WorkflowPage(BasePage):
             blockers.append("填写的 Top UID 没有匹配到任何商品文案。")
         if missing_top:
             blockers.append(f"这些 Top UID 没有对应文案：{'、'.join(missing_top)}")
-        hit_items: list[str] = []
-        if top_titles:
-            hit_items.append("Top 优先：" + "；".join(top_titles[:6]))
-        if other_preview:
-            suffix = f"；另有 {len(other_product_blocks) - len(other_preview)} 条" if len(other_product_blocks) > len(other_preview) else ""
-            hit_items.append("其余继续组合：" + "；".join(other_preview) + suffix)
         gap_items: list[str] = []
         if missing_voice:
             gap_items.append("缺配音：" + "；".join(missing_voice[:5]))
@@ -4966,13 +5114,14 @@ class WorkflowPage(BasePage):
             DialogSection(
                 title="组合范围",
                 step="2",
-                tone="success",
+                tone="warning" if asset_issue_items else "success",
                 rows=[
                     ("预计段落", f"约 {expected_blocks + 1} 段（引言 {len(selected_intro)}，价格过渡 {len(used_price_blocks)}，商品文案 {len(ordered_blocks)}，结尾 1）"),
                     ("商品范围", f"共 {len(selected_products)} 个；Top 命中文案 {len(top_product_blocks)} 条；其他商品文案 {len(other_product_blocks)} 条"),
                     ("素材缺口", f"缺配音 {len(missing_voice)}，缺图片 {len(missing_image)}，缺视频 {len(missing_video)}"),
                 ],
-                items=preview_lines((hit_items or ["无"]) + asset_detail_items, limit=80),
+                items=preview_lines(asset_issue_items, limit=80) if asset_issue_items else [],
+                helper="这里只显示缺配音、缺图片、缺视频或路径不存在的记录；正常匹配不再展开。",
             ),
             DialogSection(
                 title="缺口示例",
@@ -4984,7 +5133,8 @@ class WorkflowPage(BasePage):
                 title="阻塞问题",
                 step="4",
                 tone="warning" if blockers else "success",
-                items=blockers or ["可以继续组合口播稿。"],
+                items=blockers,
+                helper="" if blockers else "当前没有阻塞问题，可以继续组合口播稿。",
             ),
         ]
         return sections, not blockers
@@ -5052,12 +5202,10 @@ class WorkflowPage(BasePage):
             result_items.append("背景图：缺失，G:\\2026项目-b站\\素材-剪辑\\1-背景图 目录下没有可用图片。")
         if missing_manifest:
             result_items.append("manifest：缺失，还没有组合口播稿，不能生成剪映草稿。")
-        else:
-            result_items.append("manifest：已找到")
         if manifest_error:
             result_items.append(f"manifest 读取失败：{manifest_error}")
-        if intro_video_path is not None:
-            result_items.append(f"引言成片视频：{'已找到' if intro_video_path.exists() else f'不存在：{intro_video_path}'}")
+        if intro_video_path is not None and not intro_video_path.exists():
+            result_items.append(f"引言成片视频不存在：{intro_video_path}")
         if missing_files:
             result_items.append(f"manifest 中有 {len(missing_files)} 个文件路径不存在；缺音频会阻塞生成，缺图片/视频会尝试兜底")
         if missing_by_type["audio"]:
@@ -5068,21 +5216,9 @@ class WorkflowPage(BasePage):
             result_items.append(f"manifest 中有 {len(missing_by_type['video'])} 条视频路径缺失；商品展示视频缺失时会用商品图兜底")
         if missing_product_videos:
             result_items.append(f"{len(missing_product_videos)} 个商品没有展示视频，将用商品图兜底")
-        missing_examples: list[str] = []
-        for label, items in (
-            ("缺配音（先生成或同步）", missing_by_type["audio"]),
-            ("缺图片", missing_by_type["image"]),
-            ("缺视频", missing_by_type["video"]),
-        ):
-            if items:
-                missing_examples.append(f"{label}：{items[0]}")
-                if len(missing_examples) >= 6:
-                    break
-        if missing_product_videos:
-            missing_examples.extend(missing_product_videos[: max(0, 6 - len(missing_examples))])
-        asset_detail_items = entry_asset_lines(entries)
-        if intro_video_path is not None:
-            asset_detail_items.insert(0, f"引言视频：{intro_video_path}")
+        asset_issue_items = entry_asset_issue_lines(entries)
+        if intro_video_path is not None and not intro_video_path.exists():
+            asset_issue_items.insert(0, f"引言视频路径不存在：{intro_video_path}")
         sections = [
             DialogSection(
                 title="项目信息",
@@ -5105,13 +5241,15 @@ class WorkflowPage(BasePage):
                     ("引言视频", str(intro_video_path) if intro_video_path else "未选择，将使用 manifest 内的引言配音"),
                     ("缺失文件", f"音频 {len(missing_by_type['audio'])}，图片 {len(missing_by_type['image'])}，视频 {len(missing_by_type['video'])}"),
                 ],
-                items=preview_lines((missing_examples + asset_detail_items) or ["当前没有可见的素材路径。"], limit=100),
+                items=preview_lines(asset_issue_items, limit=100) if asset_issue_items else [],
+                helper="这里只显示缺配音、缺图片、缺视频或路径不存在的记录；正常素材路径不再展开。",
             ),
             DialogSection(
                 title="检查结果",
                 step="3",
                 tone="warning" if (missing_manifest or manifest_error or missing_by_type['audio']) else "success",
                 items=result_items,
+                helper="" if result_items else "当前没有阻塞项，可以继续生成剪映草稿。",
             ),
             DialogSection(
                 title="数据库资产总览",
@@ -5458,7 +5596,7 @@ class VoicePage(WorkflowPage):
                 target_text=task.target_text,
                 output_dir_text=task.output_dir,
                 task_title=f"任务 {index}",
-                step_start=2 + (index - 1) * 5,
+                step_start=2 + (index - 1) * 4,
             )
             for key in totals:
                 totals[key] += stats[key]
@@ -5654,7 +5792,6 @@ class RollBRenamePage(WorkflowPage):
         counts = preview.get("counts") or {}
         items = [item for item in preview.get("items", []) if isinstance(item, dict)]
         rename_items = [item for item in items if safe_text(item.get("status")) == "rename"]
-        unchanged_items = [item for item in items if safe_text(item.get("status")) == "unchanged"]
         skipped_items = [item for item in items if safe_text(item.get("status")) == "skipped"]
         blocked_items = [item for item in items if safe_text(item.get("status")) == "blocked"]
         blockers = [safe_text(item) for item in preview.get("blockers") or [] if safe_text(item)]
@@ -5664,7 +5801,7 @@ class RollBRenamePage(WorkflowPage):
         ]
         skipped_lines = [
             f"{safe_text(item.get('source_name'))}：{safe_text(item.get('message'))}"
-            for item in skipped_items + unchanged_items
+            for item in skipped_items
         ]
         blocked_lines = blockers + [
             f"{safe_text(item.get('source_name'))}：{safe_text(item.get('message'))}"
@@ -5703,7 +5840,8 @@ class RollBRenamePage(WorkflowPage):
                 title="跳过和阻塞",
                 step="4",
                 tone="warning" if blocked_lines else "success",
-                items=preview_lines((blocked_lines + skipped_lines) or ["当前没有阻塞项。"], limit=120),
+                items=preview_lines(blocked_lines + skipped_lines, limit=120) if (blocked_lines or skipped_lines) else [],
+                helper="" if (blocked_lines or skipped_lines) else "当前没有阻塞项；已是目标格式的文件不再展开。",
             ),
         ]
 
@@ -5999,13 +6137,14 @@ class SubtitleSrtPage(WorkflowPage):
                     ("缺字幕文本", str(len(missing_text))),
                     ("缺配音文件", str(len(missing_audio))),
                 ],
-                items=preview_lines((missing_text + missing_audio)[:12]) if (missing_text or missing_audio) else ["当前没有发现字幕文本或配音文件缺口。"],
+                items=preview_lines((missing_text + missing_audio)[:12]) if (missing_text or missing_audio) else [],
+                helper="" if (missing_text or missing_audio) else "当前没有发现字幕文本或配音文件缺口。",
             ),
             DialogSection(
                 title="阻塞与提醒",
                 step="3",
                 tone="warning" if warnings or blocked else "success",
-                items=preview_lines(blocked + warnings),
+                items=preview_lines(blocked + warnings) if (blocked or warnings) else [],
                 helper="" if blocked else "当前没有阻塞项，可以继续导出字幕 SRT。",
             ),
         ]
