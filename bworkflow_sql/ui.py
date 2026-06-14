@@ -1440,7 +1440,7 @@ class App(ctk.CTk):
         title = ctk.CTkLabel(
             sidebar,
             text="B-Workflow",
-            font=("Microsoft YaHei", 13, "bold"),
+            font=("Noto Sans SC", 13, "bold"),
             text_color=UIStyle.COLOR_TEXT_MAIN,
         )
         title.pack(pady=(UIStyle.PAD_LG, UIStyle.PAD_SM), padx=UIStyle.PAD_LG, anchor="w")
@@ -2625,11 +2625,12 @@ class AssetPage(BasePage):
         for column, (key, title, accent) in enumerate(stat_specs):
             card = ctk.CTkFrame(stats, fg_color=UIStyle.COLOR_SURFACE_SOFT, corner_radius=UIStyle.RADIUS_MD)
             card.grid(row=0, column=column, sticky="ew", padx=(UIStyle.PAD_LG if column == 0 else 0, UIStyle.PAD_LG), pady=UIStyle.PAD_LG)
-            ctk.CTkLabel(card, text=title, font=UIStyle.FONT_H3, text_color=UIStyle.COLOR_TEXT_DIM).pack(
-                anchor="center", pady=(UIStyle.PAD_MD, 2)
-            )
+            bar = ctk.CTkFrame(card, fg_color=accent, height=4, corner_radius=999)
+            bar.pack(fill="x", padx=UIStyle.PAD_LG, pady=(UIStyle.PAD_MD, UIStyle.PAD_SM))
+            bar.pack_propagate(False)
+            ctk.CTkLabel(card, text=title, font=UIStyle.FONT_SMALL, text_color=UIStyle.COLOR_TEXT_DIM).pack(anchor="center")
             value = ctk.CTkLabel(card, text="0", font=UIStyle.FONT_STAT, text_color=accent)
-            value.pack(anchor="center", pady=(0, UIStyle.PAD_MD))
+            value.pack(anchor="center", pady=(2, UIStyle.PAD_MD))
             self.stat_value_labels[key] = value
             self.stat_hint_labels[key] = ctk.CTkLabel(card, text="", font=UIStyle.FONT_SMALL, text_color=UIStyle.COLOR_TEXT_DIM)
 

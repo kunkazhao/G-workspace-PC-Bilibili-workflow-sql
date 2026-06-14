@@ -55,34 +55,34 @@ class UIStyle:
     COLOR_TOAST_BG = "#121A28"
 
     # ── 几何参数 ──
-    RADIUS_LG = 8
+    RADIUS_LG = 10
     RADIUS_MD = 6
     RADIUS_SM = 6
-    PAD_XL = 20
-    PAD_LG = 16
-    PAD_MD = 12
-    PAD_SM = 8
+    PAD_XL = 24
+    PAD_LG = 20
+    PAD_MD = 14
+    PAD_SM = 10
     PAD_XS = 4
     SIDEBAR_WIDTH = 202
     INPUT_HEIGHT = 36
     BUTTON_HEIGHT = 36
 
     # ── 字体规范（标准 Tkinter 元组格式：(family, size, style)）──
-    FONT_DISPLAY = ("Microsoft YaHei", 26, "bold")  # 运行对话框 hero 大标题
-    FONT_H1 = ("Microsoft YaHei", 20, "bold")
-    FONT_H2 = ("Microsoft YaHei", 16, "bold")
-    FONT_H3 = ("Microsoft YaHei", 14, "bold")
-    FONT_STAT = ("Microsoft YaHei", 24, "bold")  # 统计卡大数字
-    FONT_BODY = ("Microsoft YaHei", 13)
-    FONT_SMALL = ("Microsoft YaHei", 12)
-    FONT_LABEL_STRONG = ("Microsoft YaHei", 12, "bold")  # 小号粗标签（日志 tag、表头）
-    FONT_NAV_GROUP = ("Microsoft YaHei", 12, "bold")
+    FONT_DISPLAY = ("Noto Sans SC", 26, "bold")  # 运行对话框 hero 大标题
+    FONT_H1 = ("Noto Sans SC", 20, "bold")
+    FONT_H2 = ("Noto Sans SC", 16, "bold")
+    FONT_H3 = ("Noto Sans SC", 14, "bold")
+    FONT_STAT = ("Noto Sans SC", 24, "bold")  # 统计卡大数字
+    FONT_BODY = ("Noto Sans SC", 13)
+    FONT_SMALL = ("Noto Sans SC", 12)
+    FONT_LABEL_STRONG = ("Noto Sans SC", 12, "bold")  # 小号粗标签（日志 tag、表头）
+    FONT_NAV_GROUP = ("Noto Sans SC", 12, "bold")
     FONT_NAV_ICON = ("Segoe MDL2 Assets", 15)
     FONT_ICON_LG = ("Segoe MDL2 Assets", 52)
     FONT_ICON_MD = ("Segoe MDL2 Assets", 20)
     FONT_ICON_SM = ("Segoe MDL2 Assets", 13)
-    FONT_TABLE = ("Microsoft YaHei", 12)
-    FONT_BUTTON = ("Microsoft YaHei", 13, "bold")
+    FONT_TABLE = ("Noto Sans SC", 12)
+    FONT_BUTTON = ("Noto Sans SC", 13, "bold")
 
     # ── Segoe MDL2 图标 ──
     ICON_PROGRESS = "\uE9F5"
