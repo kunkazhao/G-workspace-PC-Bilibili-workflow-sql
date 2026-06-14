@@ -1,0 +1,97 @@
+{
+ "version":2,
+ "source": "bworkflow-sql",
+ "project_id":3,
+ "project_name": "小博-模板2位置测试",
+ "category": "键盘",
+ "mode": "xiaobo2_position_probe",
+ "account_label": "小博",
+ "account_id": "小博",
+ "closing_text": "如果你看完这些还是拿不准该选哪款，按老规矩在评论区留预算和需求，我看到都会回复。",
+ "created_at": "2026-06-10T00:25:00Z",
+ "entries": [
+ {
+ "type": "product",
+ "order_index":1,
+ "section": "product",
+ "section_order":1,
+ "product_uid": "JP016",
+ "product_name": "雷柏KG3089R",
+ "price_label": "99.0",
+ "price_range_label": "",
+ "source_label": "正文",
+ "text": "雷柏KG3089R。百元内机械键盘的稳妥选择，全键无冲防鬼键，游戏连招更稳。",
+ "audio_path": "G:\\2026项目-b站\\素材-配音\\公共-结尾\\小博\\结尾-小博.wav",
+ "image_path": "G:\\2026项目-b站\\素材-商品ppt图片\\数码-键盘\\小博\\模板2\\99-JP016-雷神KG3089R.png",
+ "video_path": "",
+ "display_video_path": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_probe\\xiaowai2-slot-test.mp4",
+ "display_video_slot": {
+ "x":1015,
+ "y":154,
+ "width":884,
+ "height":676
+ },
+ "account_id": "小博",
+ "account_label": "小博",
+ "text_hash": "probe-xiaobo2-001"
+ },
+ {
+ "type": "product",
+ "order_index":2,
+ "section": "product",
+ "section_order":2,
+ "product_uid": "JP018",
+ "product_name": "凌豹K98",
+ "price_label": "149.0",
+ "price_range_label": "",
+ "source_label": "正文2",
+ "text": "凌豹K98。150元价位98配列三模无线，8000mAh大电池，办公党的桌面利器。",
+ "audio_path": "G:\\2026项目-b站\\素材-配音\\公共-结尾\\小博\\结尾-小博.wav",
+ "image_path": "G:\\2026项目-b站\\素材-商品ppt图片\\数码-键盘\\小博\\模板2\\149-JP018-凌豹K98.png",
+ "video_path": "",
+ "display_video_path": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_probe\\xiaowai2-slot-test.mp4",
+ "display_video_slot": {
+ "x":1015,
+ "y":154,
+ "width":884,
+ "height":676
+ },
+ "account_id": "小博",
+ "account_label": "小博",
+ "text_hash": "probe-xiaobo2-002"
+ },
+ {
+ "type": "product",
+ "order_index":3,
+ "section": "product",
+ "section_order":3,
+ "product_uid": "JP069",
+ "product_name": "狼蛛F87",
+ "price_label": "149.0",
+ "price_range_label": "",
+ "source_label": "正文3",
+ "text": "狼蛛F87。149元价位87键紧凑配列，热插拔轴体可玩性高，入门机械键盘的好选择。",
+ "audio_path": "G:\\2026项目-b站\\素材-配音\\公共-结尾\\小博\\结尾-小博.wav",
+ "image_path": "G:\\2026项目-b站\\素材-商品ppt图片\\数码-键盘\\小博\\模板2\\149-JP069-狼蛛F87.png",
+ "video_path": "",
+ "display_video_path": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_probe\\xiaowai2-slot-test.mp4",
+ "display_video_slot": {
+ "x":1015,
+ "y":154,
+ "width":884,
+ "height":676
+ },
+ "account_id": "小博",
+ "account_label": "小博",
+ "text_hash": "probe-xiaobo2-003"
+ }
+ ],
+ "created_from": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_probe\\xiaoran1-three-products.manifest.json",
+ "probe_note": "Xiaobo template2 position probe.",
+ "display_video_slot": {
+ "x":1015,
+ "y":154,
+ "width":884,
+ "height":676
+ }
+}

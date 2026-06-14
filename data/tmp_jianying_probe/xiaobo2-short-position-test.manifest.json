@@ -1,0 +1,44 @@
+{
+  "version": 2,
+  "source": "template2-position-probe",
+  "project_id": 0,
+  "project_name": "小博-模板2 单条位置测试",
+  "category": "probe",
+  "mode": "template2_position_probe",
+  "account_label": "小博",
+  "account_id": "小博",
+  "entries": [
+    {
+      "type": "product",
+      "order_index": 1,
+      "section": "product",
+      "section_order": 1,
+      "product_uid": "POSITION-PROBE",
+      "product_name": "小博-模板2 位置测试",
+      "price_label": "",
+      "source_label": "正文",
+      "text": "小博-模板2 视频位置测试。",
+      "audio_path": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_probe\\template2-position-assets\\position-probe-4s.wav",
+      "image_path": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_probe\\template2-position-assets\\xiaobo2-template2-canvas-1920x1080.png",
+      "video_path": "",
+      "display_video_path": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_probe\\xiaowai2-slot-test.mp4",
+      "display_video_slot": {
+        "x": 1015,
+        "y": 154,
+        "width": 680,
+        "height": 520,
+        "display_scale": 0.52
+      },
+      "account_id": "小博",
+      "account_label": "小博",
+      "text_hash": "position-probe-小博-模板2"
+    }
+  ],
+  "display_video_slot": {
+    "x": 1015,
+    "y": 154,
+    "width": 680,
+    "height": 520,
+    "display_scale": 0.52
+  }
+}

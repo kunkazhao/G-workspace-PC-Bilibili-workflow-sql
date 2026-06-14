@@ -11,7 +11,7 @@ class Repository:
         self.db = db
 
     def projects(self) -> list[dict[str, Any]]:
-        return [dict(row) for row in self.db.fetchall("SELECT * FROM projects ORDER BY updated_at DESC, id DESC")]
+        return [dict(row) for row in self.db.fetchall("SELECT * FROM projects ORDER BY name COLLATE NOCASE ASC, id ASC")]
 
     def project(self, project_id: int) -> dict[str, Any] | None:
         row = self.db.fetchone("SELECT * FROM projects WHERE id=?", (project_id,))

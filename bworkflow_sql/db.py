@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     label TEXT NOT NULL UNIQUE,
     account_id TEXT NOT NULL DEFAULT '',
     voice_id TEXT NOT NULL DEFAULT '',
+    minimax_voice_id TEXT NOT NULL DEFAULT '',
     voice_name TEXT NOT NULL DEFAULT '',
     media_identity TEXT NOT NULL DEFAULT '',
     closing_audio_path TEXT NOT NULL DEFAULT '',
@@ -179,6 +180,10 @@ class Database:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
         if "spoken_md_path" not in columns:
             conn.execute("ALTER TABLE projects ADD COLUMN spoken_md_path TEXT DEFAULT ''")
+        account_columns = {row[1] for row in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+        if "minimax_voice_id" not in account_columns:
+            conn.execute("ALTER TABLE accounts ADD COLUMN minimax_voice_id TEXT NOT NULL DEFAULT ''")
+            self._migrate_minimax_voice_ids(conn)
         asset_columns = {row[1] for row in conn.execute("PRAGMA table_info(asset_bindings)").fetchall()}
         for column, ddl in {
             "media_identity": "TEXT NOT NULL DEFAULT ''",
@@ -194,6 +199,23 @@ class Database:
             conn.execute("ALTER TABLE script_blocks ADD COLUMN script_id TEXT NOT NULL DEFAULT ''")
         self._migrate_script_hashes(conn)
         self._migrate_script_ids(conn)
+
+    def _migrate_minimax_voice_ids(self, conn: sqlite3.Connection) -> None:
+        aliases = {
+            "知了": "bilibili-zhiliao",
+            "蓉蓉": "rongrong-v2",
+            "荣荣": "rongrong-v2",
+        }
+        rows = conn.execute("SELECT id, label, voice_id FROM accounts").fetchall()
+        for row in rows:
+            candidates = [safe_text(row[1]), safe_text(row[2])]
+            minimax_voice_id = ""
+            for candidate in candidates:
+                if candidate in aliases:
+                    minimax_voice_id = aliases[candidate]
+                    break
+            if minimax_voice_id:
+                conn.execute("UPDATE accounts SET minimax_voice_id=? WHERE id=?", (minimax_voice_id, row[0]))
 
     def _migrate_script_hashes(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute("SELECT id, body, text_hash FROM script_blocks").fetchall()

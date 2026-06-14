@@ -8,12 +8,12 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import wave
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -49,6 +49,26 @@ DEFAULT_TTS_FIELDS = {
     "max_mel_tokens": 1800,
     "verbose": False,
 }
+VOICE_PROVIDER_INDEXTTS = "indextts"
+VOICE_PROVIDER_MINIMAX = "minimax"
+VOICE_PROVIDER_LABELS = {
+    VOICE_PROVIDER_INDEXTTS: "IndexTTS 本地服务",
+    VOICE_PROVIDER_MINIMAX: "MiniMax API",
+}
+MINIMAX_API_BASE_URL = "https://api.minimaxi.com"
+MINIMAX_T2A_URL = f"{MINIMAX_API_BASE_URL}/v1/t2a_v2"
+MINIMAX_VOICE_LIST_URL = f"{MINIMAX_API_BASE_URL}/v1/get_voice"
+MINIMAX_T2A_MODEL = "speech-2.8-hd"
+MINIMAX_VOICE_ALIASES = {
+    "知了": "bilibili-zhiliao",
+    "蓉蓉": "rongrong-v2",
+    "荣荣": "rongrong-v2",
+    "小博": "xiaobo-v2",
+    "小燃": "xiaoran-v2",
+    "小歪": "xiaowai-v4",
+}
+MINIMAX_KNOWN_LOCAL_VOICE_IDS = set(MINIMAX_VOICE_ALIASES.values())
+MINIMAX_SKILL_ENV_PATH = Path(r"C:\Users\zhaoer\.codex\skills\minimax-tts\.env")
 DEFAULT_SILENCE_THRESHOLD_DB = -45.0
 DEFAULT_MIN_SILENCE_MS = 300
 DEFAULT_KEEP_SILENCE_MS = 220
@@ -65,6 +85,8 @@ DEFAULT_SUBTITLE_ASR_BEAM_SIZE = 2
 DEFAULT_SUBTITLE_ASR_WORKERS = 3
 DEFAULT_SUBTITLE_SPEECH_SNAP_WINDOW_SEC = 0.5
 DEFAULT_SUBTITLE_OVERLAP_GAP_SEC = 0.02
+DEFAULT_SUBTITLE_ASR_PYTHON = Path(__file__).resolve().parents[1] / ".venv-asr" / "Scripts" / "python.exe"
+DEFAULT_SUBTITLE_ASR_WORKER = Path(__file__).resolve().parents[1] / "scripts" / "subtitle_asr_worker.py"
 INTERNAL_PREFIX = "internal:"
 DEFAULT_DISPLAY_VIDEO_SLOT = {
     "x": 1100,
@@ -73,9 +95,6 @@ DEFAULT_DISPLAY_VIDEO_SLOT = {
     "height": 258,
 }
 DEFAULT_CLOSING_TEXT = "如果你看完这些还是拿不准该选哪款，或者不知道你的预算最适合哪个，按老规矩在评论区留预算和需求，我看到都会回复。"
-SUBTITLE_ASR_MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
-
-
 @dataclass
 class WorkflowRunResult:
     args: list[str]
@@ -126,6 +145,65 @@ class RollBRenameItem:
 
 def seconds_to_frames(seconds: float, frame_rate: int) -> int:
     return max(0, int(round(seconds * frame_rate)))
+
+
+def normalize_voice_provider(value: str) -> str:
+    text = safe_text(value).casefold()
+    if text in {"minimax", "minimax api", "minimax-api", "minimax_api", "api", "MiniMax API".casefold()}:
+        return VOICE_PROVIDER_MINIMAX
+    return VOICE_PROVIDER_INDEXTTS
+
+
+def voice_provider_label(provider: str) -> str:
+    return VOICE_PROVIDER_LABELS.get(normalize_voice_provider(provider), VOICE_PROVIDER_LABELS[VOICE_PROVIDER_INDEXTTS])
+
+
+def resolve_minimax_voice_id(value: str) -> str:
+    text = safe_text(value)
+    return MINIMAX_VOICE_ALIASES.get(text, text)
+
+
+def account_voice_id_for_provider(account: dict[str, Any], provider: str) -> str:
+    normalized = normalize_voice_provider(provider)
+    if normalized == VOICE_PROVIDER_MINIMAX:
+        explicit = safe_text(account.get("minimax_voice_id"))
+        if explicit:
+            return resolve_minimax_voice_id(explicit)
+        for key in ("label", "voice_name", "voice_id", "account_id"):
+            resolved = resolve_minimax_voice_id(safe_text(account.get(key)))
+            if resolved in MINIMAX_KNOWN_LOCAL_VOICE_IDS:
+                return resolved
+        return ""
+    return safe_text(account.get("voice_id") or account.get("account_id"))
+
+
+def _load_env_file_value(path: Path, key: str) -> str:
+    if not path.exists():
+        return ""
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return ""
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        if name.strip() != key:
+            continue
+        return value.strip().strip('"').strip("'")
+    return ""
+
+
+def load_minimax_api_key() -> str:
+    env_value = os.environ.get("MINIMAX_API_KEY", "").strip()
+    if env_value:
+        return env_value
+    for candidate in (MINIMAX_SKILL_ENV_PATH, Path.cwd() / ".env"):
+        value = _load_env_file_value(candidate, "MINIMAX_API_KEY")
+        if value:
+            return value
+    raise ValueError(f"找不到 MINIMAX_API_KEY。请配置系统环境变量，或写入：{MINIMAX_SKILL_ENV_PATH}")
 
 
 def dbfs_for_chunk(chunk: bytes, sample_width: int) -> float:
@@ -531,8 +609,12 @@ class WorkflowService:
         account_label: str = "",
         uids: list[str] | None = None,
         script_ids: list[str] | None = None,
+        voice_provider: str = VOICE_PROVIDER_INDEXTTS,
     ) -> list[str]:
         cmd = [f"{INTERNAL_PREFIX}voice", "--project-id", str(project_id)]
+        provider = normalize_voice_provider(voice_provider)
+        if provider != VOICE_PROVIDER_INDEXTTS:
+            cmd += ["--voice-provider", provider]
         if account_label:
             cmd += ["--account-label", account_label]
         if uids:
@@ -660,6 +742,7 @@ class WorkflowService:
         project_id: int,
         *,
         account_label: str = "",
+        voice_provider: str = VOICE_PROVIDER_INDEXTTS,
         uids: list[str] | None = None,
         script_ids: list[str] | None = None,
         output_dir: str | Path | None = None,
@@ -676,9 +759,11 @@ class WorkflowService:
         account = self._resolve_account(account_label)
         if not account:
             raise ValueError("请先在用户管理里配置配音用户。")
-        voice_id = safe_text(account.get("voice_id") or account.get("account_id"))
+        provider = normalize_voice_provider(voice_provider)
+        voice_id = account_voice_id_for_provider(account, provider)
         if not voice_id:
-            raise ValueError(f"用户“{account.get('label') or account_label}”缺少音色标识。")
+            missing_field = "MiniMax 音色标识" if provider == VOICE_PROVIDER_MINIMAX else "IndexTTS 音色标识"
+            raise ValueError(f"用户“{account.get('label') or account_label}”缺少{missing_field}。请到用户管理里补齐。")
         out_dir = Path(output_dir) if safe_text(output_dir) else self._voice_output_dir(project, account=account, account_label=account_label)
         out_dir.mkdir(parents=True, exist_ok=True)
         jobs = self._voice_jobs(project_id, uids=uids, script_ids=script_ids)
@@ -691,21 +776,33 @@ class WorkflowService:
             return WorkflowRunResult([f"{INTERNAL_PREFIX}voice"], stdout="\n".join(logs) + "\n")
 
         http = JsonHttpClient(timeout=600.0)
-        self._ensure_tts_api_ready(http, logs=logs, start_if_needed=start_service_if_needed, progress_hook=progress_hook)
-        self._ensure_registered_voice(http, voice_id=voice_id, account=account, logs=logs, progress_hook=progress_hook)
+        if provider == VOICE_PROVIDER_INDEXTTS:
+            self._ensure_tts_api_ready(http, logs=logs, start_if_needed=start_service_if_needed, progress_hook=progress_hook)
+            self._ensure_registered_voice(http, voice_id=voice_id, account=account, logs=logs, progress_hook=progress_hook)
+        else:
+            voice_id = self._prepare_minimax_voice(voice_id, logs=logs, progress_hook=progress_hook)
         generated = 0
         failures: list[str] = []
         for position, job in enumerate(pending, start=1):
             try:
                 emit(f"[生成 {position}/{len(pending)}] {job.product_name} / {job.block['block_label']}")
-                path = self._generate_one_voice(
-                    http,
-                    job=job,
-                    account=account,
-                    voice_id=voice_id,
-                    output_dir=out_dir,
-                    overwrite_expired=self._has_existing_stale_voice_file(project_id, job=job, account=account),
-                )
+                overwrite_expired = self._has_existing_stale_voice_file(project_id, job=job, account=account)
+                if provider == VOICE_PROVIDER_INDEXTTS:
+                    path = self._generate_one_voice(
+                        http,
+                        job=job,
+                        account=account,
+                        voice_id=voice_id,
+                        output_dir=out_dir,
+                        overwrite_expired=overwrite_expired,
+                    )
+                else:
+                    path = self._generate_one_minimax_voice(
+                        job=job,
+                        voice_id=voice_id,
+                        output_dir=out_dir,
+                        overwrite_expired=overwrite_expired,
+                    )
                 self._upsert_voice_asset(project_id, job=job, account=account, path=path)
                 generated += 1
                 emit(f"[成功] {path}")
@@ -717,7 +814,7 @@ class WorkflowService:
             project_id,
             "voice_generate",
             status,
-            f"数据库配音生成完成：新增 {generated}，失败 {len(failures)}，跳过 {len(existing)}",
+            f"{voice_provider_label(provider)} 配音生成完成：新增 {generated}，失败 {len(failures)}，跳过 {len(existing)}",
             [{"item_kind": "voice", "status": "failed", "message": item} for item in failures],
         )
         return WorkflowRunResult(
@@ -733,6 +830,7 @@ class WorkflowService:
         *,
         account_label: str = "",
         reference_audio_path: str | Path | None = None,
+        voice_provider: str = VOICE_PROVIDER_INDEXTTS,
         output_dir: str | Path | None = None,
         output_name: str = "",
         source_label: str = "",
@@ -745,8 +843,11 @@ class WorkflowService:
 
         account_label = safe_text(account_label)
         reference_text = safe_text(reference_audio_path)
-        if bool(account_label) == bool(reference_text):
+        provider = normalize_voice_provider(voice_provider)
+        if provider == VOICE_PROVIDER_INDEXTTS and bool(account_label) == bool(reference_text):
             raise ValueError("请选择一个已配置用户音色，或上传一个参考音频文件，二者必须且只能选一个。")
+        if provider == VOICE_PROVIDER_MINIMAX and not account_label:
+            raise ValueError("MiniMax API 配音需要选择一个已配置用户音色，用它的 voice_id 调用云端配音。")
 
         logs: list[str] = []
 
@@ -757,6 +858,31 @@ class WorkflowService:
 
         out_dir = Path(output_dir) if safe_text(output_dir) else DEFAULT_STANDALONE_VOICE_ROOT
         out_dir.mkdir(parents=True, exist_ok=True)
+
+        if provider == VOICE_PROVIDER_MINIMAX:
+            account = self._resolve_account(account_label)
+            if not account:
+                raise ValueError(f"未找到配音用户：{account_label}")
+            voice_id = account_voice_id_for_provider(account, provider)
+            if not voice_id:
+                raise ValueError(f"用户“{account_label}”缺少 MiniMax 音色标识。请到用户管理里补齐 minimax_voice_id。")
+            voice_id = self._prepare_minimax_voice(voice_id, logs=logs, progress_hook=progress_hook)
+            voice_label = safe_text(account.get("voice_name") or account.get("label") or voice_id)
+            filename = safe_text(output_name) or standalone_voice_filename(
+                voice_label=voice_label,
+                source_label=source_label,
+                text=body,
+            )
+            filename_stem = Path(filename).stem if Path(filename).suffix else filename
+            final_path = unique_path(out_dir / f"{safe_path_component(filename_stem)}.mp3")
+            emit(f"[配音任务] MiniMax API 文本 {len(body)} 字，输出目录：{out_dir}")
+            output_path = self._synthesize_minimax_to_path(body, voice_id=voice_id, final_path=final_path)
+            emit(f"[成功] {output_path}")
+            return WorkflowRunResult(
+                [f"{INTERNAL_PREFIX}standalone-voice", "--voice-provider", VOICE_PROVIDER_MINIMAX],
+                stdout="\n".join(logs) + "\n",
+            )
+
         http = JsonHttpClient(timeout=600.0)
         self._ensure_tts_api_ready(http, logs=logs, start_if_needed=start_service_if_needed, progress_hook=progress_hook)
 
@@ -764,9 +890,9 @@ class WorkflowService:
             account = self._resolve_account(account_label)
             if not account:
                 raise ValueError(f"未找到配音用户：{account_label}")
-            voice_id = safe_text(account.get("voice_id") or account.get("account_id"))
+            voice_id = account_voice_id_for_provider(account, VOICE_PROVIDER_INDEXTTS)
             if not voice_id:
-                raise ValueError(f"用户“{account_label}”缺少音色标识。")
+                raise ValueError(f"用户“{account_label}”缺少 IndexTTS 音色标识。请到用户管理里补齐。")
             self._ensure_registered_voice(http, voice_id=voice_id, account=account, logs=logs, progress_hook=progress_hook)
             voice_label = safe_text(account.get("voice_name") or account.get("label") or voice_id)
             endpoint = f"{DEFAULT_TTS_API_BASE_URL.rstrip('/')}/v1/clone/voice"
@@ -948,6 +1074,7 @@ class WorkflowService:
             "mode": mode,
             "account_label": account_label,
             "account_id": account_id,
+            "display_template": display_template,
             "spoken_markdown_path": str(output_markdown),
             "closing_text": DEFAULT_CLOSING_TEXT,
             "created_at": now_iso(),
@@ -1014,6 +1141,7 @@ class WorkflowService:
             return self.generate_voice(
                 project_id,
                 account_label=args.get("account-label", ""),
+                voice_provider=args.get("voice-provider", VOICE_PROVIDER_INDEXTTS),
                 uids=split_csv(args.get("uids", "")) or None,
                 script_ids=split_csv(args.get("script-ids", "")) or None,
                 output_dir=args.get("output-dir", ""),
@@ -1202,8 +1330,8 @@ class WorkflowService:
         )
         if align_with_asr:
             stdout += (
-                f"字幕对齐：ASR（faster-whisper {subtitle_asr_model}，"
-                f"beam={DEFAULT_SUBTITLE_ASR_BEAM_SIZE}，并行 {max(1, int(subtitle_asr_workers or 1))} 路）\n"
+                f"字幕对齐：独立 ASR 子进程（faster-whisper {subtitle_asr_model}，"
+                f"beam={DEFAULT_SUBTITLE_ASR_BEAM_SIZE}，CPU 线程 {max(1, int(subtitle_asr_workers or 1))}）\n"
             )
         if intro_video is not None:
             stdout += f"引言成片偏移：{initial_offset:.3f} 秒\n"
@@ -1491,6 +1619,131 @@ class WorkflowService:
             raise ValueError(f"配音接口返回成功，但没有找到音频文件：{generated_path}")
         return self._finalize_generated_voice(generated_path, final_path)
 
+    def _prepare_minimax_voice(
+        self,
+        voice_id: str,
+        *,
+        logs: list[str],
+        progress_hook: Callable[[str], None] | None = None,
+    ) -> str:
+        resolved = resolve_minimax_voice_id(voice_id)
+        if not resolved:
+            raise ValueError("MiniMax 配音需要配置 voice_id。")
+        def emit(message: str) -> None:
+            logs.append(message)
+            if progress_hook:
+                progress_hook(message)
+
+        api_key = load_minimax_api_key()
+        emit(f"[MiniMax] 使用云端 API，无需启动本地 IndexTTS 服务。")
+        if resolved in MINIMAX_KNOWN_LOCAL_VOICE_IDS:
+            emit(f"[MiniMax] 使用本地已知音色：{resolved}")
+            return resolved
+        try:
+            payload = JsonHttpClient(timeout=30.0).post(
+                MINIMAX_VOICE_LIST_URL,
+                json_payload={"voice_type": "all"},
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+        except Exception as exc:
+            raise ValueError(f"MiniMax 音色校验失败：{exc}") from exc
+        available: list[str] = []
+        if isinstance(payload, dict):
+            for key in ("system_voice", "voice_cloning", "voice_generation"):
+                for item in payload.get(key) or []:
+                    value = safe_text(item.get("voice_id") if isinstance(item, dict) else "")
+                    if value:
+                        available.append(value)
+        if resolved not in available:
+            preview = "、".join(available[:8])
+            raise ValueError(f"MiniMax voice_id 不存在：{resolved}。可用音色示例：{preview}")
+        emit(f"[MiniMax] 已确认音色：{resolved}")
+        return resolved
+
+    def _generate_one_minimax_voice(
+        self,
+        *,
+        job: VoiceJob,
+        voice_id: str,
+        output_dir: Path,
+        overwrite_expired: bool = False,
+    ) -> Path:
+        filename = Path(self._voice_filename(job)).with_suffix(".mp3").name
+        final_path = output_dir / filename if overwrite_expired else unique_path(output_dir / filename)
+        return self._synthesize_minimax_to_path(
+            safe_text(job.block.get("body")),
+            voice_id=voice_id,
+            final_path=final_path,
+        )
+
+    def _synthesize_minimax_to_path(
+        self,
+        text: str,
+        *,
+        voice_id: str,
+        final_path: Path,
+        speed: float = 1.2,
+        emotion: str = "",
+        text_normalization: bool = True,
+    ) -> Path:
+        body = safe_text(text).strip()
+        if not body:
+            raise ValueError("MiniMax 配音文本为空。")
+        if len(body) > 10000:
+            raise ValueError(f"MiniMax 单段文本超过 10000 字符（实际 {len(body)}），请拆分后再生成。")
+        api_key = load_minimax_api_key()
+        payload: dict[str, Any] = {
+            "model": MINIMAX_T2A_MODEL,
+            "text": body,
+            "stream": False,
+            "voice_setting": {
+                "voice_id": resolve_minimax_voice_id(voice_id),
+                "speed": speed,
+                "vol": 1.0,
+                "pitch": 0,
+                "text_normalization": text_normalization,
+            },
+            "audio_setting": {
+                "sample_rate": 32000,
+                "bitrate": 128000,
+                "format": "mp3",
+                "channel": 1,
+            },
+        }
+        if safe_text(emotion):
+            payload["voice_setting"]["emotion"] = safe_text(emotion)
+        last_error = ""
+        for attempt, delay in enumerate((2, 5, 10), start=1):
+            try:
+                result = JsonHttpClient(timeout=180.0).post(
+                    MINIMAX_T2A_URL,
+                    json_payload=payload,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+            except Exception as exc:
+                last_error = str(exc)
+                if attempt < 3:
+                    time.sleep(delay)
+                    continue
+                raise ValueError(f"MiniMax 配音请求失败：{last_error}") from exc
+            if not isinstance(result, dict):
+                raise ValueError(f"MiniMax 配音接口返回异常：{result}")
+            base_resp = result.get("base_resp", {}) or {}
+            code = base_resp.get("status_code")
+            if code == 0:
+                audio_hex = (result.get("data") or {}).get("audio", "")
+                if not audio_hex:
+                    raise ValueError("MiniMax 响应里没有 audio 字段。")
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                final_path.write_bytes(bytes.fromhex(audio_hex))
+                return final_path
+            last_error = f"[{code}] {base_resp.get('status_msg', '未知错误')}"
+            if code in (1001, 1002, 1039) and attempt < 3:
+                time.sleep(delay)
+                continue
+            raise ValueError(f"MiniMax 配音失败：{last_error}")
+        raise ValueError(f"MiniMax 配音失败：{last_error}")
+
     def _finalize_generated_voice(self, generated_path: Path, final_path: Path) -> Path:
         final_path.parent.mkdir(parents=True, exist_ok=True)
         if generated_path.resolve() != final_path.resolve():
@@ -1774,13 +2027,10 @@ class WorkflowService:
         display_user = user_for_template(display_template)
         image = None
         if product:
-            image = self._ready_asset(assets, asset_type="image", uid=uid, account_label=display_user, path_contains=template_suffix)
-            if not image:
+            if display_template:
+                image = self._ready_asset(assets, asset_type="image", uid=uid, account_label=display_user, path_contains=template_suffix)
+            else:
                 image = self._ready_asset(assets, asset_type="image", uid=uid, account_label=display_user)
-            if not image:
-                image = self._ready_asset(assets, asset_type="image", uid=uid, path_contains=template_suffix)
-            if not image:
-                image = self._ready_asset(assets, asset_type="image", uid=uid)
         video = self._ready_asset(assets, asset_type="video", uid=uid) if product else None
         video_slot = None
         if video:
@@ -2107,16 +2357,24 @@ class JsonHttpClient:
     def __init__(self, timeout: float = 60.0) -> None:
         self.timeout = timeout
 
-    def request(self, method: str, url: str, *, params: dict[str, Any] | None = None, json_payload: Any | None = None) -> Any:
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_payload: Any | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
         if params:
             query = urllib.parse.urlencode([(key, str(value)) for key, value in params.items()], doseq=True)
             url = f"{url}?{query}"
         body: bytes | None = None
-        headers: dict[str, str] = {}
+        request_headers: dict[str, str] = dict(headers or {})
         if json_payload is not None:
             body = json.dumps(json_payload, ensure_ascii=False).encode("utf-8")
-            headers["Content-Type"] = "application/json; charset=utf-8"
-        request = urllib.request.Request(url=url, data=body, method=method.upper(), headers=headers)
+            request_headers.setdefault("Content-Type", "application/json; charset=utf-8")
+        request = urllib.request.Request(url=url, data=body, method=method.upper(), headers=request_headers)
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 raw = response.read()
@@ -2135,8 +2393,8 @@ class JsonHttpClient:
     def get(self, url: str, *, params: dict[str, Any] | None = None) -> Any:
         return self.request("GET", url, params=params)
 
-    def post(self, url: str, *, json_payload: Any | None = None) -> Any:
-        return self.request("POST", url, json_payload=json_payload)
+    def post(self, url: str, *, json_payload: Any | None = None, headers: dict[str, str] | None = None) -> Any:
+        return self.request("POST", url, json_payload=json_payload, headers=headers)
 
 
 def split_csv(value: str) -> list[str]:
@@ -2313,17 +2571,61 @@ def _expand_asr_unit(start: float, end: float, text: str) -> list[dict[str, Any]
     ]
 
 
-def _subtitle_asr_model(model_name: str):
-    device = "cpu"
-    compute_type = "int8"
-    key = (model_name, device, compute_type)
-    if key not in SUBTITLE_ASR_MODEL_CACHE:
-        try:
-            from faster_whisper import WhisperModel
-        except ImportError as exc:
-            raise ValueError("当前环境缺少 faster-whisper，无法执行 ASR 字幕对齐。") from exc
-        SUBTITLE_ASR_MODEL_CACHE[key] = WhisperModel(model_name, device=device, compute_type=compute_type)
-    return SUBTITLE_ASR_MODEL_CACHE[key]
+def subtitle_asr_python_path() -> Path:
+    configured = safe_text(os.environ.get("BWORKFLOW_ASR_PYTHON"))
+    return Path(configured) if configured else DEFAULT_SUBTITLE_ASR_PYTHON
+
+
+def run_subtitle_asr_worker(
+    jobs: list[dict[str, Any]],
+    *,
+    model_name: str,
+    language: str,
+    beam_size: int,
+    workers: int,
+) -> list[list[dict[str, Any]]]:
+    python_exe = subtitle_asr_python_path()
+    if not python_exe.exists():
+        raise ValueError(
+            f"独立 ASR 环境不存在：{python_exe}\n"
+            "请运行 scripts\\setup_subtitle_asr.ps1 安装项目专用 Python 3.11 环境。"
+        )
+    if not DEFAULT_SUBTITLE_ASR_WORKER.exists():
+        raise ValueError(f"ASR 子进程脚本不存在：{DEFAULT_SUBTITLE_ASR_WORKER}")
+
+    payload = {
+        "model_name": model_name,
+        "language": language,
+        "beam_size": max(1, int(beam_size or 1)),
+        "cpu_threads": max(1, int(workers or 1)),
+        "jobs": [{"audio_path": safe_text(job.get("audio_path"))} for job in jobs],
+    }
+    with tempfile.TemporaryDirectory(prefix="bworkflow-asr-") as temp_dir:
+        request_path = Path(temp_dir) / "request.json"
+        response_path = Path(temp_dir) / "response.json"
+        request_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        completed = subprocess.run(
+            [str(python_exe), str(DEFAULT_SUBTITLE_ASR_WORKER), str(request_path), str(response_path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3600,
+            creationflags=creationflags,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            raise ValueError(f"独立 ASR 子进程失败（退出码 {completed.returncode}）：{detail or '没有错误输出'}")
+        if not response_path.exists():
+            raise ValueError("独立 ASR 子进程没有生成结果文件。")
+        response = json.loads(response_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(response, dict) or not isinstance(response.get("results"), list):
+        raise ValueError("独立 ASR 子进程返回格式无效。")
+    results = response["results"]
+    if len(results) != len(jobs):
+        raise ValueError(f"独立 ASR 返回条数不匹配：任务 {len(jobs)}，结果 {len(results)}。")
+    return [result if isinstance(result, list) else [] for result in results]
 
 
 def run_subtitle_alignment_asr(
@@ -2336,23 +2638,13 @@ def run_subtitle_alignment_asr(
     path = Path(audio_path)
     if not path.exists():
         raise ValueError(f"音频文件不存在：{path}")
-    model = _subtitle_asr_model(model_name)
-    segments, _info = model.transcribe(
-        str(path),
-        language=language or None,
-        vad_filter=True,
-        word_timestamps=True,
-        beam_size=max(1, int(beam_size or 1)),
-    )
-    units: list[dict[str, Any]] = []
-    for segment in segments:
-        words = getattr(segment, "words", None) or []
-        if words:
-            for word in words:
-                units.extend(_expand_asr_unit(float(word.start), float(word.end), safe_text(word.word)))
-            continue
-        units.extend(_expand_asr_unit(float(segment.start), float(segment.end), safe_text(segment.text)))
-    return units
+    return run_subtitle_asr_worker(
+        [{"audio_path": str(path)}],
+        model_name=model_name,
+        language=language,
+        beam_size=beam_size,
+        workers=1,
+    )[0]
 
 
 def subtitle_speech_ranges(audio_path: str | Path) -> list[tuple[float, float]]:
@@ -2435,6 +2727,15 @@ def align_subtitle_text_with_asr(
     if not chunks:
         return []
     units = run_subtitle_alignment_asr(audio_path, model_name=model_name, language=language, beam_size=beam_size)
+    return align_subtitle_text_with_units(audio_path, chunks, units, offset_sec)
+
+
+def align_subtitle_text_with_units(
+    audio_path: str | Path,
+    chunks: list[str],
+    units: list[dict[str, Any]],
+    offset_sec: float,
+) -> list[tuple[float, float, str]]:
     if not units:
         raise ValueError(f"ASR 未识别到可对齐语音：{audio_path}")
 
@@ -2468,17 +2769,6 @@ def align_subtitle_text_with_asr(
     return snap_subtitle_segments_to_speech(audio_path, aligned, offset)
 
 
-def _align_subtitle_job_worker(job: dict[str, Any], model_name: str, language: str, beam_size: int) -> list[tuple[float, float, str]]:
-    return align_subtitle_text_with_asr(
-        safe_text(job.get("audio_path")),
-        safe_text(job.get("text")),
-        float(job.get("offset_sec") or 0.0),
-        model_name=model_name,
-        language=language,
-        beam_size=beam_size,
-    )
-
-
 def align_subtitle_jobs_with_asr(
     jobs: list[dict[str, Any]],
     *,
@@ -2489,28 +2779,28 @@ def align_subtitle_jobs_with_asr(
 ) -> list[tuple[float, float, str]]:
     if not jobs:
         return []
-    requested_workers = max(1, int(workers or 1))
-    worker_count = min(requested_workers, len(jobs))
-    if requested_workers <= 1:
-        results = [_align_subtitle_job_worker(job, model_name, language, beam_size) for job in jobs]
-    else:
-        results: list[list[tuple[float, float, str]] | None] = [None] * len(jobs)
-        with ProcessPoolExecutor(max_workers=worker_count) as executor:
-            futures = {
-                executor.submit(_align_subtitle_job_worker, job, model_name, language, beam_size): index
-                for index, job in enumerate(jobs)
-            }
-            for future in as_completed(futures):
-                index = futures[future]
-                try:
-                    results[index] = future.result()
-                except Exception as exc:
-                    label = safe_text(jobs[index].get("label")) or f"字幕段 {index + 1}"
-                    raise ValueError(f"{label} ASR 字幕对齐失败：{exc}") from exc
+    unit_results = run_subtitle_asr_worker(
+        jobs,
+        model_name=model_name,
+        language=language,
+        beam_size=beam_size,
+        workers=workers,
+    )
     merged: list[tuple[float, float, str]] = []
-    for result in results:
-        if result:
-            merged.extend(result)
+    for index, (job, units) in enumerate(zip(jobs, unit_results)):
+        label = safe_text(job.get("label")) or f"字幕段 {index + 1}"
+        chunks = split_subtitle_text(safe_text(job.get("text")))
+        try:
+            merged.extend(
+                align_subtitle_text_with_units(
+                    safe_text(job.get("audio_path")),
+                    chunks,
+                    units,
+                    float(job.get("offset_sec") or 0.0),
+                )
+            )
+        except Exception as exc:
+            raise ValueError(f"{label} ASR 字幕对齐失败：{exc}") from exc
     return merged
 
 

@@ -139,6 +139,8 @@ class AppCard(ctk.CTkFrame):
             master,
             fg_color=UIStyle.COLOR_CARD_BG,
             corner_radius=UIStyle.RADIUS_LG,
+            border_width=1,
+            border_color=UIStyle.COLOR_BORDER,
             **kwargs,
         )
         self.pack(fill="x", pady=(0, UIStyle.PAD_MD), padx=0)

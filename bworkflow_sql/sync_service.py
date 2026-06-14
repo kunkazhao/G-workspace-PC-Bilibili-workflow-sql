@@ -13,7 +13,7 @@ from .settings import DEFAULT_IMAGE_ROOT, DEFAULT_VIDEO_ROOT, DEFAULT_VOICE_ROOT
 from .utils import file_metadata, now_iso, safe_text, text_hash
 
 
-AUTOSCAN_AUDIO_SUFFIXES = {".wav"}
+AUTOSCAN_AUDIO_SUFFIXES = {".wav", ".mp3"}
 MANUAL_AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg"}
 AUDIO_SUFFIXES = AUTOSCAN_AUDIO_SUFFIXES
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -429,7 +429,7 @@ class SyncService:
                         }
                     )
         if "voice" in checked_types:
-            matched_voice_targets.update(self._current_ready_voice_targets(project_id, script_blocks))
+            matched_voice_targets.update(self._current_ready_voice_targets(project_id, script_blocks, project, accounts))
         for current_type in checked_types:
             if not current_type:
                 continue
@@ -470,9 +470,25 @@ class SyncService:
         removed_bindings = [
             item
             for key, item in before_keys.items()
-            if key not in matched_keys and self._asset_is_in_scanned_scope(item, scanned_roots)
-            and safe_text(item.get("source_kind")) != "manual"
+            if key not in matched_keys
+            and (
+                not self._asset_path_exists(item)
+                or (
+                    self._asset_is_in_scanned_scope(item, scanned_roots)
+                    and safe_text(item.get("source_kind")) != "manual"
+                )
+            )
         ]
+        if "voice" in checked_types:
+            accounts_by_label = {safe_text(account.get("label")): account for account in accounts}
+            removed_bindings.extend(
+                item
+                for item in before_assets
+                if safe_text(item.get("asset_type")) == "voice"
+                and safe_text(item.get("source_kind")) != "manual"
+                and item not in removed_bindings
+                and not self._voice_asset_in_project_scope(item, project, accounts_by_label)
+            )
         removed_items = [self._asset_item_from_binding(item) for item in removed_bindings]
         if removed_items:
             removed_ids = [int(item.get("id") or 0) for item in removed_bindings if int(item.get("id") or 0)]
@@ -487,6 +503,8 @@ class SyncService:
             self._asset_item_from_binding(item)
             for item in self.repo.asset_bindings(project_id)
             if item.get("asset_type") in checked_types and safe_text(item.get("status")) == "ready"
+            and self._asset_path_exists(item)
+            and self._asset_is_in_scanned_scope(item, scanned_roots)
         ]
         for item in current_assets:
             product = products.get(safe_text(item.get("uid"))) or {}
@@ -657,14 +675,27 @@ class SyncService:
         except ValueError:
             return False
 
-    def _current_ready_voice_targets(self, project_id: int, blocks: list[dict[str, Any]]) -> set[tuple[str, str]]:
+    def _asset_path_exists(self, item: dict[str, Any]) -> bool:
+        path_text = safe_text(item.get("path"))
+        return bool(path_text and Path(path_text).is_file())
+
+    def _current_ready_voice_targets(
+        self,
+        project_id: int,
+        blocks: list[dict[str, Any]],
+        project: dict[str, Any],
+        accounts: list[dict[str, Any]],
+    ) -> set[tuple[str, str]]:
         blocks_by_id = {int(block.get("id") or 0): block for block in blocks}
+        accounts_by_label = {safe_text(account.get("label")): account for account in accounts}
         targets: set[tuple[str, str]] = set()
         for asset in self.repo.asset_bindings(project_id):
             if safe_text(asset.get("asset_type")) != "voice" or safe_text(asset.get("status")) != "ready":
                 continue
             path_text = safe_text(asset.get("path"))
             if not path_text or not Path(path_text).exists():
+                continue
+            if safe_text(asset.get("source_kind")) != "manual" and not self._voice_asset_in_project_scope(asset, project, accounts_by_label):
                 continue
             block = blocks_by_id.get(int(asset.get("script_block_id") or 0))
             if not block:
@@ -674,11 +705,29 @@ class SyncService:
             targets.add(self._voice_target_key(block))
         return targets
 
+    def _voice_asset_in_project_scope(
+        self,
+        asset: dict[str, Any],
+        project: dict[str, Any],
+        accounts_by_label: dict[str, dict[str, Any]],
+    ) -> bool:
+        path_text = safe_text(asset.get("path"))
+        if not path_text:
+            return False
+        account_label = safe_text(asset.get("account_label"))
+        account = accounts_by_label.get(account_label, {"label": account_label})
+        return self._voice_path_in_project_scope(Path(path_text), project, account)
+
     def _voice_block_from_path(self, path: Path, blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
         text = _compact_identity(path.stem)
+        stem_segments = {_compact_identity(part) for part in re.split(r"[\s_\-—/&]+", path.stem) if part.strip()}
         intro_blocks = [block for block in blocks if block["script_type"] == "intro"]
         price_blocks = [block for block in blocks if block["script_type"] == "price_transition"]
         if "引言" in path.stem:
+            for block in intro_blocks:
+                block_label = _compact_identity(safe_text(block.get("block_label")))
+                if block_label and block_label in stem_segments:
+                    return block
             for block in intro_blocks:
                 if self._voice_block_matches_path(block, text):
                     return block
@@ -689,6 +738,10 @@ class SyncService:
                 for block in price_blocks
                 if safe_text(block.get("price_range_label")) and _compact_identity(block.get("price_range_label")) in text
             ]
+            for block in matched_ranges:
+                block_label = _compact_identity(safe_text(block.get("block_label")))
+                if block_label and block_label in stem_segments:
+                    return block
             for block in matched_ranges:
                 if self._voice_block_matches_path(block, text, include_price=False):
                     return block

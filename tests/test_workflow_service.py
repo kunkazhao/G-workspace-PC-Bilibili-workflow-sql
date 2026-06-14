@@ -14,6 +14,7 @@ from bworkflow_sql.utils import now_iso, text_hash
 import bworkflow_sql.workflow_service as workflow_service_module
 from bworkflow_sql.workflow_service import (
     DEFAULT_CLOSING_TEXT,
+    VOICE_PROVIDER_MINIMAX,
     VoiceJob,
     WorkflowService,
     compress_internal_silence,
@@ -67,8 +68,8 @@ def seed_project(tmp_path: Path):
     with db.connect() as conn:
         conn.execute(
             """
-            INSERT INTO accounts (label, account_id, voice_id, voice_name, created_at, updated_at)
-            VALUES ('小燃', 'xiaoran', 'voice-1', '小燃音色', 'now', 'now')
+            INSERT INTO accounts (label, account_id, voice_id, minimax_voice_id, voice_name, created_at, updated_at)
+            VALUES ('小燃', 'xiaoran', 'voice-1', 'minimax-voice-1', '小燃音色', 'now', 'now')
             """
         )
     return db, project_id
@@ -114,6 +115,9 @@ def test_workflow_commands_use_internal_tasks(tmp_path: Path):
     script_voice = service.build_voice_command(project_id, account_label="Сȼ", script_ids=["product:YXEJ002:V001"])
     assert "--script-ids" in script_voice
     assert "product:YXEJ002:V001" in script_voice
+    minimax_voice = service.build_voice_command(project_id, account_label="小燃", voice_provider=VOICE_PROVIDER_MINIMAX)
+    assert "--voice-provider" in minimax_voice
+    assert VOICE_PROVIDER_MINIMAX in minimax_voice
 
     assembly = service.build_assembly_command(project_id, mode="top", top_uids=["YXEJ002"], account_label="小燃", intro_index=1)
     assert assembly[0] == "internal:assembly"
@@ -397,6 +401,44 @@ def test_assembly_generates_spoken_markdown_and_internal_manifest_from_database(
     intro_entry = next(entry for entry in payload["entries"] if entry["section"] == "intro")
     assert intro_entry["image_path"] == ""
     assert intro_entry["video_path"] == ""
+
+
+def test_assembly_does_not_fallback_to_other_template_images(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    repo = Repository(db)
+    service = WorkflowService(db)
+    project = repo.project(project_id)
+    template1_image = Path(project["image_root"]) / "有线耳机" / "小燃" / "模板1" / "59-YXEJ002-竹林鸟夜莺Z1.png"
+    template1_image.parent.mkdir(parents=True)
+    template1_image.write_bytes(b"template1 image")
+
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, asset_type, account_label, account_id, path, status, source_kind, created_at, updated_at)
+            VALUES (?, 'YXEJ002', 'image', '小燃', 'xiaoran', ?, 'ready', 'test', 'now', 'now')
+            """,
+            (project_id, str(template1_image)),
+        )
+
+    result = service.run_command(
+        service.build_assembly_command(
+            project_id,
+            mode="standard",
+            account_label="小燃",
+            intro_index=1,
+            display_template="小燃-模板2",
+        )
+    )
+
+    assert result.returncode == 0
+    spoken_path = Path(project["spoken_md_path"])
+    manifest_path = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "manifests" / f"{spoken_path.stem}.manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    product_entry = next(entry for entry in payload["entries"] if entry["type"] == "product")
+    assert payload["display_template"] == "小燃-模板2"
+    assert product_entry["image_path"] == ""
 
 
 def test_assembly_prefers_current_category_voice_for_shared_price_transition(tmp_path: Path):
@@ -966,7 +1008,7 @@ def test_export_subtitle_srt_uses_asr_alignment_when_enabled(tmp_path: Path, mon
     )
 
     assert result.returncode == 0
-    assert "字幕对齐：ASR" in result.stdout
+    assert "字幕对齐：独立 ASR 子进程" in result.stdout
     text = output.read_text(encoding="utf-8-sig")
     assert "00:00:00,200 --> 00:00:00,900" in text
     assert "00:00:00,900 --> 00:00:01,800" in text
@@ -996,6 +1038,36 @@ def test_asr_alignment_snaps_subtitle_start_after_breath_pause(tmp_path: Path, m
     assert items[0] == (0.0, 0.4, "第一句")
     assert items[1][0] == 0.7
     assert items[1][2] == "第二句"
+
+
+def test_asr_alignment_runs_all_jobs_in_one_isolated_worker(tmp_path: Path, monkeypatch):
+    first_audio = tmp_path / "first.wav"
+    second_audio = tmp_path / "second.wav"
+    write_test_wav(first_audio, [(1.0, 0.5)])
+    write_test_wav(second_audio, [(1.0, 0.5)])
+    jobs = [
+        {"label": "first", "audio_path": str(first_audio), "text": "第一句。", "offset_sec": 0.0},
+        {"label": "second", "audio_path": str(second_audio), "text": "第二句。", "offset_sec": 1.0},
+    ]
+    calls = []
+
+    def fake_worker(worker_jobs, *, model_name, language, beam_size, workers):
+        calls.append(worker_jobs)
+        assert model_name == workflow_service_module.DEFAULT_SUBTITLE_ASR_MODEL
+        assert language == workflow_service_module.DEFAULT_SUBTITLE_ASR_LANGUAGE
+        assert beam_size == workflow_service_module.DEFAULT_SUBTITLE_ASR_BEAM_SIZE
+        assert workers == 3
+        return [
+            [{"start": 0.1, "end": 0.8, "text": "第一句"}],
+            [{"start": 0.2, "end": 0.9, "text": "第二句"}],
+        ]
+
+    monkeypatch.setattr(workflow_service_module, "run_subtitle_asr_worker", fake_worker)
+
+    items = workflow_service_module.align_subtitle_jobs_with_asr(jobs, workers=3)
+
+    assert len(calls) == 1
+    assert items == [(0.1, 0.8, "第一句"), (1.2, 1.9, "第二句")]
 
 
 def test_default_subtitle_srt_path_prefixes_spoken_md_name(tmp_path: Path):
@@ -1231,6 +1303,43 @@ def test_generate_one_voice_runs_new_project_audio_postprocess(tmp_path: Path, m
         assert round(reader.getnframes() * 1000 / reader.getframerate()) == 900
 
 
+def test_generate_voice_with_minimax_writes_mp3_and_binds_asset(tmp_path: Path, monkeypatch):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    called = {"prepare": False}
+
+    def fake_prepare(self, voice_id: str, **kwargs):
+        called["prepare"] = True
+        assert voice_id == "minimax-voice-1"
+        return "minimax-voice-1"
+
+    def fake_synthesize(self, text: str, *, voice_id: str, final_path: Path, **kwargs):
+        assert voice_id == "minimax-voice-1"
+        assert text.strip()
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        final_path.write_bytes(b"mp3")
+        return final_path
+
+    monkeypatch.setattr(WorkflowService, "_prepare_minimax_voice", fake_prepare)
+    monkeypatch.setattr(WorkflowService, "_synthesize_minimax_to_path", fake_synthesize)
+    monkeypatch.setattr(WorkflowService, "_ensure_tts_api_ready", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("IndexTTS should not start")))
+
+    result = service.generate_voice(
+        project_id,
+        account_label="小燃",
+        voice_provider=VOICE_PROVIDER_MINIMAX,
+        output_dir=tmp_path / "voice-out",
+    )
+
+    assert result.returncode == 0
+    assert called["prepare"]
+    output_files = list((tmp_path / "voice-out").glob("*.mp3"))
+    assert output_files
+    asset = db.fetchone("SELECT * FROM asset_bindings WHERE project_id=? AND asset_type='voice'", (project_id,))
+    assert asset is not None
+    assert Path(asset["path"]).suffix == ".mp3"
+
+
 def test_markdown_file_to_voice_text_keeps_document_as_single_text(tmp_path: Path):
     md = tmp_path / "稿件.md"
     md.write_text(
@@ -1299,6 +1408,52 @@ def test_synthesize_standalone_voice_with_configured_account_does_not_bind_asset
     output_files = list((tmp_path / "standalone").glob("*.wav"))
     assert len(output_files) == 1
     assert output_files[0].name.startswith("单独配音-小燃音色-粘贴文本-")
+    assert db.fetchone("SELECT COUNT(*) AS c FROM asset_bindings WHERE asset_type='voice'")["c"] == 0
+
+
+def test_synthesize_standalone_voice_with_minimax_writes_mp3_without_local_service(tmp_path: Path, monkeypatch):
+    db, _project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    account = Repository(db).accounts()[0]
+    called = {"prepare": False, "synthesize": False}
+
+    def fake_prepare(self, voice_id: str, **kwargs):
+        called["prepare"] = True
+        assert voice_id == "minimax-voice-1"
+        return "minimax-voice-1"
+
+    def fake_synthesize(self, text: str, *, voice_id: str, final_path: Path, **kwargs):
+        called["synthesize"] = True
+        assert voice_id == "minimax-voice-1"
+        assert "standalone minimax text" in text
+        assert final_path.suffix == ".mp3"
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        final_path.write_bytes(b"mp3")
+        return final_path
+
+    monkeypatch.setattr(WorkflowService, "_prepare_minimax_voice", fake_prepare)
+    monkeypatch.setattr(WorkflowService, "_synthesize_minimax_to_path", fake_synthesize)
+    monkeypatch.setattr(
+        WorkflowService,
+        "_ensure_tts_api_ready",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("IndexTTS should not start")),
+    )
+
+    result = service.synthesize_standalone_voice(
+        "standalone minimax text",
+        account_label=account["label"],
+        voice_provider=VOICE_PROVIDER_MINIMAX,
+        output_dir=tmp_path / "standalone",
+        source_label="manual",
+        start_service_if_needed=True,
+    )
+
+    assert result.returncode == 0
+    assert result.args == ["internal:standalone-voice", "--voice-provider", VOICE_PROVIDER_MINIMAX]
+    assert called == {"prepare": True, "synthesize": True}
+    output_files = list((tmp_path / "standalone").glob("*.mp3"))
+    assert len(output_files) == 1
+    assert output_files[0].read_bytes() == b"mp3"
     assert db.fetchone("SELECT COUNT(*) AS c FROM asset_bindings WHERE asset_type='voice'")["c"] == 0
 
 

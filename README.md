@@ -86,6 +86,15 @@ Legacy migration helpers are available in `资产中心` and `用户管理`:
 - `导入旧项目用户/音色` imports old account and voice-profile data into SQLite.
 - `导入屏幕挂灯资产` imports the existing `数码-屏幕挂灯` project, MD copy, images, videos, and voice mappings from the old workflow folders.
 
+Project and sync rules:
+
+- Project names are unique. Creating or saving a project with an existing name shows a warning instead of silently creating a duplicate.
+- Project dropdowns show the Chinese project name only, without the numeric database id. The internal selector map still resolves the selected name back to the correct project id.
+- Project dropdowns are sorted by project name.
+- Master sync previews changes first. If the local Master API is unavailable, the sync page asks whether to start the local Master backend from `G:\workspace\bilibili-newTools-next-master` and then retries the preview.
+- The sync center voice check reports both missing voice files and expired voice mappings. For either case, `手动映射音频` can bind a local audio file directly to the selected script block for the current user.
+- Manual voice mapping writes a ready `asset_bindings` row with `source_kind='manual'`, stores the current script hash, and marks older mismatched voice rows for the same script block as expired. Later asset resync keeps manual voice bindings.
+
 Output rules:
 
 - `商品文案 MD` is the source copy document.
@@ -97,6 +106,15 @@ Output rules:
 
 ## Voice Generation Notes
 
+- `生成配音` and `单独配音` both support two providers:
+  - `IndexTTS 本地服务`: uses the local IndexTTS API, registers the selected account's `voice_id`, and writes WAV output.
+  - `MiniMax API`: uses cloud TTS, does not start IndexTTS, requires `MINIMAX_API_KEY`, and writes MP3 output.
+- User selection is still by the same visible account label such as `小博`, `小燃`, or `小歪`. The account row stores provider-specific ids:
+  - `voice_id` for IndexTTS.
+  - `minimax_voice_id` for MiniMax.
+- MiniMax API keys are read from the `MINIMAX_API_KEY` environment variable first, then from `C:\Users\zhaoer\.codex\skills\minimax-tts\.env`.
+- Known MiniMax voice aliases include `小博 -> xiaobo-v2`, `小燃 -> xiaoran-v2`, `小歪 -> xiaowai-v2`, `知了 -> bilibili-zhiliao`, and `荣荣/蓉蓉 -> rongrong-v2`.
+- MiniMax standalone voice generation requires a configured user voice. Uploading a one-off reference audio file is an IndexTTS-only mode.
 - Project voice generation writes SQLite asset bindings for matched script blocks.
 - Standalone voice generation accepts either a configured user voice or one uploaded reference audio file. The two voice sources are mutually exclusive.
 - Standalone MD input supports `.md` files only and sends the whole cleaned document as one dubbing job.

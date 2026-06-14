@@ -277,6 +277,33 @@ def test_asset_sync_ignores_extra_files_and_reports_missing_scheme_products(tmp_
     assert result["unmatched_items"][0]["asset_type"] == "image"
 
 
+def test_image_asset_sync_reports_missing_when_selected_template_folder_has_no_image(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    image_root = tmp_path / "images"
+    template1 = image_root / "数码-键盘" / "小燃" / "模板1"
+    template2 = image_root / "数码-键盘" / "小燃" / "模板2"
+    template1.mkdir(parents=True)
+    template2.mkdir(parents=True)
+    (template1 / "1-JP096-狼蛛F75Max.png").write_bytes(b"template1")
+    project_id = db.upsert_project({"name": "数码-键盘", "category_name": "键盘", "image_root": str(image_root)})
+    repo.upsert_products_from_master(project_id, [{"uid": "JP096", "title": "狼蛛F75Max", "price_label": "279元"}])
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO accounts (label, account_id, created_at, updated_at)
+            VALUES ('小燃', 'xiaoran', 'now', 'now')
+            """
+        )
+
+    result = SyncService(db).sync_assets(project_id, asset_type="image", root_override=template2)
+
+    assert result["image"] == 0
+    assert result["unmatched"] == 1
+    assert result["unmatched_items"][0]["uid"] == "JP096"
+    assert result["scanned_roots"] == {"image": str(template2)}
+
+
 def test_video_asset_sync_matches_overlapping_uid_tokens(tmp_path: Path):
     db = Database(tmp_path / "test.db")
     repo = Repository(db)
@@ -393,6 +420,46 @@ def test_asset_sync_reports_added_removed_and_current_items(tmp_path: Path):
     assert repo.asset_bindings(project_id)[0]["status"] == "stale"
 
 
+def test_video_sync_stales_missing_legacy_binding_outside_current_root(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    old_root = tmp_path / "old-videos"
+    current_root = tmp_path / "current-videos"
+    old_root.mkdir()
+    current_root.mkdir()
+    current_video = current_root / "199-AB001-Keyboard.mp4"
+    current_video.write_bytes(b"current")
+    missing_old_video = old_root / "old-AB001-Keyboard.mp4"
+    project_id = db.upsert_project({"name": "keyboard", "video_root": str(current_root)})
+    repo.upsert_products_from_master(
+        project_id,
+        [{"uid": "AB001", "title": "Keyboard", "price_label": "199"}],
+    )
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, asset_type, account_label, path, status, source_kind, created_at, updated_at)
+            VALUES (?, 'AB001', 'video', '', ?, 'ready', 'legacy_folder_scan', 'now', 'now')
+            """,
+            (project_id, str(missing_old_video)),
+        )
+
+    result = SyncService(db).sync_assets(project_id, asset_type="video", root_override=current_root)
+
+    assert result["video"] == 1
+    assert [item["path"] for item in result["current_items"]] == [str(current_video)]
+    assert [item["path"] for item in result["removed_items"]] == [str(missing_old_video)]
+    rows = db.fetchall(
+        "SELECT path, status FROM asset_bindings WHERE project_id=? AND asset_type='video' ORDER BY path",
+        (project_id,),
+    )
+    assert {row["path"]: row["status"] for row in rows} == {
+        str(current_video): "ready",
+        str(missing_old_video): "stale",
+    }
+
+
 def test_voice_asset_sync_includes_intro_and_price_transition_blocks(tmp_path: Path):
     db = Database(tmp_path / "test.db")
     repo = Repository(db)
@@ -439,6 +506,61 @@ def test_voice_asset_sync_includes_intro_and_price_transition_blocks(tmp_path: P
     assert any(asset["uid"] == "PRICE_TRANSITION" and asset["block_label"] == "200元以下" for asset in assets)
 
 
+def test_voice_asset_sync_matches_price_transition_version_labels_exactly(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    voice_root = tmp_path / "voice"
+    account_dir = voice_root / "数码-键盘" / "小博"
+    account_dir.mkdir(parents=True)
+    paths = {
+        "正文": account_dir / "0-价格-200元以下-正文.mp3",
+        "正文2": account_dir / "0-价格-200元以下-正文2.mp3",
+        "正文3": account_dir / "0-价格-200元以下-正文3-1.mp3",
+    }
+    for path in paths.values():
+        path.write_bytes(b"voice")
+    project_id = db.upsert_project({"name": "数码-键盘", "category_name": "键盘", "voice_root": str(voice_root)})
+    parsed = parse_markdown_text(
+        """
+## 价格过渡文案
+
+### 200元以下
+#### 正文
+第一版
+#### 正文2
+第二版
+#### 正文3
+第三版
+""".strip()
+    )
+    SyncService(db).sync_markdown_payload(project_id, parsed)
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO accounts (label, account_id, created_at, updated_at)
+            VALUES ('小博', 'xiaobo', 'now', 'now')
+            """
+        )
+
+    result = SyncService(db).sync_assets(project_id, asset_type="voice", root_override=voice_root)
+
+    blocks = {block["block_label"]: block for block in repo.script_blocks(project_id)}
+    assets = [
+        asset
+        for asset in repo.asset_bindings(project_id)
+        if asset["asset_type"] == "voice" and asset["account_label"] == "小博" and asset["status"] == "ready"
+    ]
+    assert result["voice"] == 3
+    assert result["unmatched"] == 0
+    assert {
+        Path(asset["path"]).name: (int(asset["script_block_id"]), asset["text_hash"])
+        for asset in assets
+    } == {
+        path.name: (int(blocks[label]["id"]), blocks[label]["text_hash"])
+        for label, path in paths.items()
+    }
+
+
 def test_voice_asset_sync_ignores_other_category_account_folders(tmp_path: Path):
     db = Database(tmp_path / "test.db")
     repo = Repository(db)
@@ -473,6 +595,94 @@ def test_voice_asset_sync_ignores_other_category_account_folders(tmp_path: Path)
     assert result["matched_items"][0]["path"] == str(right)
     assets = repo.asset_bindings(project_id)
     assert [asset["path"] for asset in assets if asset["asset_type"] == "voice"] == [str(right)]
+
+
+def test_voice_asset_sync_marks_other_category_ready_binding_stale(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    voice_root = tmp_path / "voice"
+    wrong = voice_root / "数码-有线耳机" / "小燃" / "0-价格-300-500元.wav"
+    wrong.parent.mkdir(parents=True)
+    wrong.write_bytes(b"wrong category")
+    project_id = db.upsert_project({"name": "数码-键盘", "category_name": "键盘", "voice_root": str(voice_root)})
+    parsed = parse_markdown_text(
+        """
+## 价格过渡文案
+
+### 300-500元
+这个价位
+""".strip()
+    )
+    SyncService(db).sync_markdown_payload(project_id, parsed)
+    block = repo.script_blocks(project_id)[0]
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO accounts (label, account_id, created_at, updated_at)
+            VALUES ('小燃', 'xiaoran', 'now', 'now')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, script_block_id, asset_type, account_label, account_id, block_label, script_id, text_hash, path, status, source_kind, file_size, file_mtime, confirmed, created_at, updated_at)
+            VALUES (?, 'PRICE_TRANSITION', ?, 'voice', '小燃', 'xiaoran', '300-500元', ?, ?, ?, 'ready', 'scan', 1, 'now', 0, 'now', 'now')
+            """,
+            (project_id, block["id"], block["script_id"], block["text_hash"], str(wrong)),
+        )
+
+    result = SyncService(db).sync_assets(project_id, asset_type="voice", root_override=voice_root)
+
+    assert result["voice"] == 0
+    assert result["unmatched"] == 1
+    assert [item["uid"] for item in result["removed_items"]] == ["PRICE_TRANSITION"]
+    row = db.fetchone(
+        "SELECT status FROM asset_bindings WHERE project_id=? AND path=?",
+        (project_id, str(wrong)),
+    )
+    assert row["status"] == "stale"
+
+
+def test_voice_asset_sync_marks_deleted_ready_voice_stale(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    voice_root = tmp_path / "voice"
+    audio = voice_root / "数码-键盘" / "小燃" / "99-JP071-Alpha-正文.wav"
+    audio.parent.mkdir(parents=True)
+    audio.write_bytes(b"voice")
+    project_id = db.upsert_project({"name": "数码-键盘", "category_name": "键盘", "voice_root": str(voice_root)})
+    repo.upsert_products_from_master(project_id, [{"uid": "JP071", "title": "Alpha", "price_label": "99元"}])
+    parsed = parse_markdown_text(
+        """
+## 商品文案
+
+### Alpha-JP071-99元
+#### 正文
+新的正文
+""".strip()
+    )
+    SyncService(db).sync_markdown_payload(project_id, parsed)
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO accounts (label, account_id, created_at, updated_at)
+            VALUES ('小燃', 'xiaoran', 'now', 'now')
+            """
+        )
+
+    first = SyncService(db).sync_assets(project_id, asset_type="voice", root_override=voice_root)
+    audio.unlink()
+    second = SyncService(db).sync_assets(project_id, asset_type="voice", root_override=voice_root)
+
+    assert first["voice"] == 1
+    assert first["unmatched"] == 0
+    assert [item["uid"] for item in second["removed_items"]] == ["JP071"]
+    assert second["unmatched"] == 1
+    row = db.fetchone(
+        "SELECT status FROM asset_bindings WHERE project_id=? AND path=?",
+        (project_id, str(audio)),
+    )
+    assert row["status"] == "stale"
 
 
 def test_manual_voice_binding_marks_current_script_ready_and_survives_resync(tmp_path: Path):
