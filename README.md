@@ -86,6 +86,8 @@ Legacy migration helpers are available in `资产中心` and `用户管理`:
 - `导入旧项目用户/音色` imports old account and voice-profile data into SQLite.
 - `导入屏幕挂灯资产` imports the existing `数码-屏幕挂灯` project, MD copy, images, videos, and voice mappings from the old workflow folders.
 
+Operational notes for voice changes, closing audio, dialog placement, and subtitle checks are maintained in `docs/operator-runbook.md`.
+
 Project and sync rules:
 
 - Project names are unique. Creating or saving a project with an existing name shows a warning instead of silently creating a duplicate.
@@ -113,7 +115,8 @@ Output rules:
   - `voice_id` for IndexTTS.
   - `minimax_voice_id` for MiniMax.
 - MiniMax API keys are read from the `MINIMAX_API_KEY` environment variable first, then from `C:\Users\zhaoer\.codex\skills\minimax-tts\.env`.
-- Known MiniMax voice aliases include `小博 -> xiaobo-v2`, `小燃 -> xiaoran-v2`, `小歪 -> xiaowai-v2`, `知了 -> bilibili-zhiliao`, and `荣荣/蓉蓉 -> rongrong-v2`.
+- Known MiniMax voice aliases include `小博 -> xiaobo-v2`, `小燃 -> xiaoran-v2`, `小歪 -> xiaowai-v6`, `知了 -> bilibili-zhiliao`, and `荣荣/蓉蓉 -> rongrong-v2`.
+- Replacing a user's voice should use `scripts/swap_voice.py`. The script updates IndexTTS (`voice_profiles` plus `voices.json`) and clones a new MiniMax voice id; MiniMax voice ids are not overwritten in place.
 - MiniMax standalone voice generation requires a configured user voice. Uploading a one-off reference audio file is an IndexTTS-only mode.
 - Project voice generation writes SQLite asset bindings for matched script blocks.
 - Standalone voice generation accepts either a configured user voice or one uploaded reference audio file. The two voice sources are mutually exclusive.
@@ -130,11 +133,13 @@ Output rules:
 ## Jianying Draft Notes
 
 - Draft generation is delegated to `C:\Users\zhaoer\.codex\skills\b-workflow\scripts\generate_jianying_draft.py`.
+- Closing voice clips come from `accounts.closing_audio_path`. Current 小歪 closing audio is `G:\2026项目-b站\素材-配音\公共-结尾\小歪\结尾-小歪.mp3`.
 - Product images remain on the main media track. Product videos are also written as `display_video_path` and placed on the separate `display_video` track.
 - Voice clips use a `100ms` timeline gap between adjacent clips.
 - Template slots normally use 1920x1080 canvas rectangle coordinates: `x`, `y`, `width`, and `height`.
 - `小燃-模板1` uses Jianying position-panel coordinates instead: `x=-830`, `y=-77`, `width=970`, `height=590`, with `coordinate_mode="clip_transform_pixels"`.
 - For fast alignment checks, regenerate `data/tmp_jianying_probe/xiaoran1-three-products.manifest.json` and run `data/tmp_jianying_probe/run_xiaoran1_three_product_draft.py`. The smoke draft contains 3 products and skips subtitles.
+- Subtitle export uses semantic line breaking for long clauses: it keeps decimal numbers, number-unit phrases, English model names, and `的/地/得` structures together where possible.
 
 ## Markdown Contract
 

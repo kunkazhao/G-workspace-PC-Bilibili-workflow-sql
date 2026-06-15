@@ -797,6 +797,23 @@ def test_split_subtitle_text_keeps_decimal_dot():
     assert chunks == ["蓝牙6.0也非常好用", "降噪也稳"]
 
 
+def test_split_subtitle_text_semantic_keeps_units_and_de():
+    text = "这款咖啡机用的是20bar的萃取压力还有93度的恒温控制每天早上都能稳定出一杯好咖啡"
+    chunks = split_subtitle_text(text)
+
+    assert all(len(chunk) <= 24 for chunk in chunks)
+    assert "".join(chunks) == text  # 不改字、不删字、不加字
+    assert any("20bar" in chunk for chunk in chunks)  # 英文型号不拆
+    assert any("93度" in chunk for chunk in chunks)  # 数字+单位不拆
+    assert all(not chunk.startswith(("的", "地", "得")) for chunk in chunks)  # 的字不落行首
+
+
+def test_split_subtitle_text_semantic_breaks_before_conjunction():
+    chunks = split_subtitle_text("这台机器加热速度非常快而且操作也很简单适合家里每个人用")
+
+    assert chunks == ["这台机器加热速度非常快", "而且操作也很简单适合家里每个人用"]
+
+
 def test_export_subtitle_srt_from_manifest_text_and_audio(tmp_path: Path):
     db, project_id = seed_project(tmp_path)
     service = WorkflowService(db)

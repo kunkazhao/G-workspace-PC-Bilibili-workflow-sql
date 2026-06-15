@@ -737,9 +737,27 @@ def confirm_project_markdown_path(parent: tk.Widget, project: dict[str, Any], pa
 
 def _center_dialog(dialog: ctk.CTkToplevel) -> None:
     dialog.update_idletasks()
+    parent = getattr(dialog, "_parent_toplevel", None)
+    if parent is None:
+        master = getattr(dialog, "master", None)
+        parent = master.winfo_toplevel() if master is not None else None
+
+    try:
+        if parent is not None and parent.winfo_exists():
+            parent.update_idletasks()
+            parent_width = parent.winfo_width()
+            parent_height = parent.winfo_height()
+            if parent_width > 1 and parent_height > 1:
+                x = parent.winfo_rootx() + (parent_width - dialog.winfo_width()) // 2
+                y = parent.winfo_rooty() + (parent_height - dialog.winfo_height()) // 2
+                dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+                return
+    except tk.TclError:
+        pass
+
     x = dialog.winfo_screenwidth() // 2 - dialog.winfo_width() // 2
     y = dialog.winfo_screenheight() // 2 - dialog.winfo_height() // 2
-    dialog.geometry(f"+{x}+{y}")
+    dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
 
 
 def _restore_window(win: tk.Misc) -> None:
@@ -981,6 +999,7 @@ def show_text_dialog(parent: tk.Widget, title: str, message: str) -> None:
     GhostButton(buttons, text="关闭", command=dialog.destroy).grid(row=0, column=1)
     dialog.lift()
     dialog.focus_set()
+    _center_dialog(dialog)
 
 
 class TaskProgressDialog(ctk.CTkToplevel):
@@ -2393,10 +2412,7 @@ class CopyPage(BasePage):
         txt.insert("1.0", text)
         txt.configure(state="disabled")
         GhostButton(dialog, text="关闭", command=dialog.destroy).pack(pady=(0, UIStyle.PAD_MD))
-        dialog.update_idletasks()
-        x = dialog.winfo_screenwidth() // 2 - dialog.winfo_width() // 2
-        y = dialog.winfo_screenheight() // 2 - dialog.winfo_height() // 2
-        dialog.geometry(f"+{x}+{y}")
+        _center_dialog(dialog)
 
     def _open_copy_writer(self) -> None:
         project = self.app.current_project()

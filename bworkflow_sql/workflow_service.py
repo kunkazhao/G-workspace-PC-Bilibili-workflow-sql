@@ -65,7 +65,7 @@ MINIMAX_VOICE_ALIASES = {
     "荣荣": "rongrong-v2",
     "小博": "xiaobo-v2",
     "小燃": "xiaoran-v2",
-    "小歪": "xiaowai-v4",
+    "小歪": "xiaowai-v6",
 }
 MINIMAX_KNOWN_LOCAL_VOICE_IDS = set(MINIMAX_VOICE_ALIASES.values())
 MINIMAX_SKILL_ENV_PATH = Path(r"C:\Users\zhaoer\.codex\skills\minimax-tts\.env")
@@ -2516,6 +2516,80 @@ SUBTITLE_DROP_PUNCT_RE = re.compile(r"[，,。!！?？；;：:]|……|…")
 SUBTITLE_ALIGN_DROP_RE = re.compile(r"[\s，,。.!！?？；;：:、/\\\-—_~·`\"“”'‘’（）()【】\[\]{}《》<>]+|……|…")
 
 
+# 语义断行：分句仍超长时二次切分用，避免切在数字+单位、英文型号、“的/地/得”结构中间，并优先在连词/转折词前断。
+_SUBTITLE_BREAK_CONJUNCTIONS = (
+    "但是", "不过", "所以", "因为", "因此", "而且", "并且", "于是",
+    "然后", "其实", "另外", "如果", "虽然", "同时", "比如", "除了",
+    "不仅", "只是", "就是", "这样", "那么",
+)
+_SUBTITLE_CJK_DIGITS = set("〇零一二两三四五六七八九十百千万亿点")
+_SUBTITLE_NO_BREAK_CHARS = set("的地得")  # 这些字前后都不断，保住偏正/状中结构
+
+
+def _subtitle_is_digit(ch: str) -> bool:
+    return ch.isdigit() or ch in _SUBTITLE_CJK_DIGITS
+
+
+def _subtitle_is_alpha(ch: str) -> bool:
+    return ch.isascii() and ch.isalpha()
+
+
+def _subtitle_can_break(left: str, right: str) -> bool:
+    """left 落行尾、right 落下一行行首时，这里是否允许断开。"""
+    if not left or not right:
+        return True
+    if left in _SUBTITLE_NO_BREAK_CHARS or right in _SUBTITLE_NO_BREAK_CHARS:
+        return False
+    if (left == "." and _subtitle_is_digit(right)) or (_subtitle_is_digit(left) and right == "."):
+        return False  # 小数：6.0
+    left_num, right_num = _subtitle_is_digit(left), _subtitle_is_digit(right)
+    left_alpha, right_alpha = _subtitle_is_alpha(left), _subtitle_is_alpha(right)
+    if left_num and (right_num or right_alpha or not right.isascii()):
+        return False  # 数字串 / 数字+单位量词：20bar、60到65度、4种、三十秒
+    if left_alpha and (right_alpha or right_num):
+        return False  # 英文单词 / 型号：App、LDAC、A3
+    return True
+
+
+def _subtitle_choose_cut(text: str, lo: int, hi: int, prefer: int) -> int | None:
+    """在 [lo, hi] 区间里挑一个合法断点，优先连词前，其次离 prefer 最近、靠后。"""
+    candidates = [cut for cut in range(max(lo, 1), min(hi, len(text) - 1) + 1)]
+    if not candidates:
+        return None
+    conj_cuts = [
+        cut
+        for cut in candidates
+        if _subtitle_can_break(text[cut - 1], text[cut])
+        and any(text.startswith(word, cut) for word in _SUBTITLE_BREAK_CONJUNCTIONS)
+    ]
+    pool = conj_cuts or [cut for cut in candidates if _subtitle_can_break(text[cut - 1], text[cut])]
+    if not pool:
+        return None
+    return min(pool, key=lambda cut: (abs(cut - prefer), -cut))
+
+
+def _break_long_clause(clause: str, max_chars: int) -> list[str]:
+    """把一条无句标点的超长分句按语义切成多行，每行尽量 ≤ max_chars。"""
+    min_head = min(4, max_chars)
+    lines: list[str] = []
+    rest = clause
+    while len(rest) > max_chars:
+        if len(rest) <= max_chars * 2:
+            # 再切一次就能放下：在中点附近断，让两行更均衡（下行不短于上行）
+            lo = max(min_head, len(rest) - max_chars)
+            hi = min(max_chars, len(rest) - min_head)
+            cut = _subtitle_choose_cut(rest, lo, hi, (len(rest) + 1) // 2)
+        else:
+            cut = _subtitle_choose_cut(rest, min_head, max_chars, max_chars)
+        if not cut:
+            cut = max_chars  # 兜底：实在找不到合法断点才硬切
+        lines.append(rest[:cut])
+        rest = rest[cut:]
+    if rest:
+        lines.append(rest)
+    return lines
+
+
 def split_subtitle_text(text: str, *, max_chars: int = 24) -> list[str]:
     body = re.sub(r"\s+", "", safe_text(text))
     if not body:
@@ -2525,7 +2599,7 @@ def split_subtitle_text(text: str, *, max_chars: int = 24) -> list[str]:
     chunks: list[str] = []
     for clause in clauses or [body]:
         if len(clause) > max_chars:
-            chunks.extend(clause[index : index + max_chars] for index in range(0, len(clause), max_chars))
+            chunks.extend(_break_long_clause(clause, max_chars))
             continue
         chunks.append(clause)
     return [chunk for chunk in chunks if chunk]
