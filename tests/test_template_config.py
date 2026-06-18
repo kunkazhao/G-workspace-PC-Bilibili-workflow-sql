@@ -26,11 +26,11 @@ def test_rongrong_template_preset_available() -> None:
         "height": 554,
     }
     assert get_template_slot("荣荣-模板2") == {
-        "x": 42,
-        "y": 89,
+        "x": 44,
+        "y": 172,
         "width": 851,
         "height": 436,
-        "display_scale": 0.44,
+        "display_scale": 0.42,
     }
 
 

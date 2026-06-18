@@ -4,6 +4,13 @@ from typing import Any
 
 # 每个模板的视频展示区域坐标（相对于 1920*1080 画布）
 # 数据来源：G:\workspace\PC-Bilibili-workflow\data\display_video_templates.json
+#
+# ── 剪映 UI 参数 ↔ 本文件坐标的转换公式 ──
+# 剪映X = (center_x - 960) × 2      center_x = 960 + 剪映X / 2
+# 剪映Y = (540 - center_y) × 2      center_y = 540 - 剪映Y / 2
+# 剪映缩放% = display_scale × 100
+# 其中 center_x = x + width/2, center_y = y + height/2
+# 注意：乘/除 2，不是乘/除 960/540，之前在这里踩过坑。
 TEMPLATE_COORDS: dict[str, dict[str, Any]] = {
     "小博-模板1": {"x": 850, "y": 95, "width": 980, "height": 620},
     "小博-模板2": {"x": 1015, "y": 154, "width": 680, "height": 520, "display_scale": 0.52},
@@ -14,7 +21,7 @@ TEMPLATE_COORDS: dict[str, dict[str, Any]] = {
     "小歪-模板2": {"x": -29, "y": 202, "width": 1132, "height": 676, "display_scale": 0.53},
     "知了-模板1": {"x": 67, "y": 185, "width": 990, "height": 576},
     "荣荣-模板1": {"x": 115, "y": 200, "width": 941, "height": 554},
-    "荣荣-模板2": {"x": 42, "y": 89, "width": 851, "height": 436, "display_scale": 0.44},
+    "荣荣-模板2": {"x": 44, "y": 172, "width": 851, "height": 436, "display_scale": 0.42},
 }
 
 # 每个用户对应的可用模板列表
