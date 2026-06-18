@@ -161,7 +161,7 @@ def render_price_transitions(transitions: list[Any]) -> list[str]:
             for script in price.scripts:
                 lines += [f"#### {script.label}", script.body, ""]
         return lines
-    return lines + ["### 0-100元", "", "", "### 100-200元", "", ""]
+    return lines + ["### 0-100元", "", "#### 正文1", "", "", "### 100-200元", "", "#### 正文1", "", ""]
 
 
 def render_section(title: str, section_lines: list[str]) -> list[str]:

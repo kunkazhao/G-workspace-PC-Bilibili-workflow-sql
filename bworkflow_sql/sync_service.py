@@ -724,10 +724,12 @@ class SyncService:
         intro_blocks = [block for block in blocks if block["script_type"] == "intro"]
         price_blocks = [block for block in blocks if block["script_type"] == "price_transition"]
         if "引言" in path.stem:
-            for block in intro_blocks:
-                block_label = _compact_identity(safe_text(block.get("block_label")))
-                if block_label and block_label in stem_segments:
-                    return block
+            segment_hits = [
+                block for block in intro_blocks
+                if (bl := _compact_identity(safe_text(block.get("block_label")))) and bl in stem_segments
+            ]
+            if segment_hits:
+                return max(segment_hits, key=lambda b: len(safe_text(b.get("block_label"))))
             for block in intro_blocks:
                 if self._voice_block_matches_path(block, text):
                     return block
@@ -738,10 +740,12 @@ class SyncService:
                 for block in price_blocks
                 if safe_text(block.get("price_range_label")) and _compact_identity(block.get("price_range_label")) in text
             ]
-            for block in matched_ranges:
-                block_label = _compact_identity(safe_text(block.get("block_label")))
-                if block_label and block_label in stem_segments:
-                    return block
+            range_segment_hits = [
+                block for block in matched_ranges
+                if (bl := _compact_identity(safe_text(block.get("block_label")))) and bl in stem_segments
+            ]
+            if range_segment_hits:
+                return max(range_segment_hits, key=lambda b: len(safe_text(b.get("block_label"))))
             for block in matched_ranges:
                 if self._voice_block_matches_path(block, text, include_price=False):
                     return block
@@ -756,11 +760,12 @@ class SyncService:
             block for block in blocks
             if block["script_type"] == "product" and safe_text(block.get("owner_uid")).casefold() == uid.casefold()
         ]
-        # 优先按 block_label 精确匹配（文件名中的独立段落）
-        for block in product_blocks:
-            bl = _compact_identity(safe_text(block.get("block_label")))
-            if bl and bl in stem_segments:
-                return block
+        segment_hits = [
+            block for block in product_blocks
+            if (bl := _compact_identity(safe_text(block.get("block_label")))) and bl in stem_segments
+        ]
+        if segment_hits:
+            return max(segment_hits, key=lambda b: len(safe_text(b.get("block_label"))))
         # 其次用原有模糊匹配
         for block in product_blocks:
             if self._voice_block_matches_path(block, text):
