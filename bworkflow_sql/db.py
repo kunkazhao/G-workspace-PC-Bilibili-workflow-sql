@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 """
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 def _script_id_slug(value: Any) -> str:
@@ -217,6 +217,7 @@ class Database:
         current = self._get_schema_version(conn)
         migrations = [
             (1, self._migrate_v1),
+            (2, self._migrate_v2),
         ]
         for version, func in migrations:
             if current < version:
@@ -303,6 +304,17 @@ class Database:
                 counters[key] = counters.get(key, 0) + 1
                 script_id = f"product:{uid}:V{counters[key]:03d}"
             conn.execute("UPDATE script_blocks SET script_id=? WHERE id=?", (script_id, row[0]))
+
+    def _migrate_v2(self, conn: sqlite3.Connection) -> None:
+        """Add performance indexes on foreign-key columns."""
+        for ddl in (
+            "CREATE INDEX IF NOT EXISTS idx_products_project ON products(project_id)",
+            "CREATE INDEX IF NOT EXISTS idx_script_blocks_project ON script_blocks(project_id)",
+            "CREATE INDEX IF NOT EXISTS idx_asset_bindings_project ON asset_bindings(project_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sync_events_project ON sync_events(project_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sync_event_items_event ON sync_event_items(sync_event_id)",
+        ):
+            conn.execute(ddl)
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> None:
         with self.connect() as conn:

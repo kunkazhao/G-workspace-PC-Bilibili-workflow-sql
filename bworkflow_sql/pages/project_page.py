@@ -127,7 +127,7 @@ if TYPE_CHECKING:
 
 class ProjectPageDialog(BasePage):
     def __init__(self, master, app: App):
-        super().__init__(master, "品类项目", app)
+        super().__init__(master, "品类项目", app, scrollable=True)
         self.project_var = app.project_selector_var
         self.workspaces: list[dict[str, Any]] = []
         self.category_tree: list[dict[str, Any]] = []

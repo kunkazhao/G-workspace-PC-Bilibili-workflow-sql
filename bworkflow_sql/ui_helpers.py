@@ -1156,7 +1156,70 @@ COLUMN_WIDTHS = {
 
 
 
-def _build_table(parent, columns: tuple[str, ...], row: int = 0) -> ttk.Treeview:
+class _TreeTooltip:
+    """Treeview 单元格悬停 tooltip，截断文字时自动显示完整内容。"""
+
+    def __init__(self, tree: ttk.Treeview):
+        self._tree = tree
+        self._tip: tk.Toplevel | None = None
+        self._after_id: str | None = None
+        tree.bind("<Motion>", self._on_motion)
+        tree.bind("<Leave>", self._hide)
+
+    def _on_motion(self, event: tk.Event) -> None:
+        self._cancel()
+        self._after_id = self._tree.after(350, lambda: self._show(event.x, event.y))
+
+    def _cancel(self) -> None:
+        if self._after_id:
+            self._tree.after_cancel(self._after_id)
+            self._after_id = None
+        self._hide()
+
+    def _hide(self, _event: tk.Event | None = None) -> None:
+        if self._tip:
+            self._tip.destroy()
+            self._tip = None
+
+    def _show(self, x: int, y: int) -> None:
+        self._hide()
+        row_id = self._tree.identify_row(y)
+        col_id = self._tree.identify_column(x)
+        if not row_id or not col_id:
+            return
+        try:
+            col_index = int(col_id.replace("#", "")) - 1
+            values = self._tree.item(row_id, "values")
+            if col_index < 0 or col_index >= len(values):
+                return
+            text = str(values[col_index])
+            if not text or len(text) < 12:
+                return
+        except (ValueError, tk.TclError):
+            return
+        self._tip = tw = tk.Toplevel(self._tree)
+        tw.wm_overrideredirect(True)
+        tw.wm_attributes("-topmost", True)
+        lbl = tk.Label(
+            tw,
+            text=text,
+            background="#1E293B",
+            foreground="#F1F5F9",
+            relief="solid",
+            borderwidth=1,
+            font=UIStyle.FONT_SMALL,
+            wraplength=520,
+            justify="left",
+            padx=8,
+            pady=4,
+        )
+        lbl.pack()
+        rx = self._tree.winfo_rootx() + x + 16
+        ry = self._tree.winfo_rooty() + y + 20
+        tw.wm_geometry(f"+{rx}+{ry}")
+
+
+def _build_table(parent, columns: tuple[str, ...], row: int = 0, *, empty_text: str = "") -> ttk.Treeview:
     """在 CTkFrame 内创建深色风格的 Treeview。"""
     configure_treeview_style(parent)
     tree = ttk.Treeview(parent, columns=columns, show="headings", style="CTreeview")
@@ -1170,6 +1233,20 @@ def _build_table(parent, columns: tuple[str, ...], row: int = 0) -> ttk.Treeview
     ybar = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
     tree.configure(yscrollcommand=ybar.set)
     ybar.grid(row=row, column=1, sticky="ns")
+    _TreeTooltip(tree)
+    if empty_text:
+        overlay = ctk.CTkLabel(
+            parent,
+            text=empty_text,
+            font=UIStyle.FONT_BODY,
+            text_color=UIStyle.COLOR_TEXT_DIM,
+            fg_color=UIStyle.COLOR_CARD_BG,
+            corner_radius=UIStyle.RADIUS_MD,
+            wraplength=400,
+        )
+        tree._empty_overlay = overlay  # type: ignore[attr-defined]
+        overlay.grid(row=row, column=0, sticky="nsew")
+        overlay.lift()
     return tree
 
 
@@ -1179,5 +1256,11 @@ def _set_tree_rows(tree: ttk.Treeview, rows: list[tuple[Any, ...]], tag_key: int
     for row in rows:
         tags = ("has_issues",) if tag_key is not None and row[tag_key] else ()
         tree.insert("", "end", values=row, tags=tags)
+    overlay = getattr(tree, "_empty_overlay", None)
+    if overlay is not None:
+        if rows:
+            overlay.grid_remove()
+        else:
+            overlay.grid()
 
 

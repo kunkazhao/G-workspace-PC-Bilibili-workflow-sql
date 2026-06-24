@@ -10,12 +10,23 @@ from .settings import DEFAULT_MASTER_API_BASE_URL
 from .utils import safe_text
 
 WORKSPACE_HEADER = "X-Workspace-Id"
+_CACHE_MAX_SIZE = 64
 
 _session: requests.Session | None = None
 _workspaces_cache: list[dict[str, Any]] | None = None
 _category_tree_cache: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
 _scheme_list_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
 _scheme_summary_cache: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def _cache_put(cache: dict, key: Any, value: Any) -> None:
+    if len(cache) >= _CACHE_MAX_SIZE:
+        try:
+            oldest = next(iter(cache))
+            del cache[oldest]
+        except StopIteration:
+            pass
+    cache[key] = value
 
 
 def _get_session() -> requests.Session:
@@ -92,7 +103,7 @@ class MasterDataService:
         tree = _build_category_tree(categories)
         if not tree:
             raise RuntimeError("Master 分类列表为空。")
-        _category_tree_cache[ws_id] = (dict(workspace), [dict(p, children=[dict(c) for c in p.get("children", [])]) for p in tree])
+        _cache_put(_category_tree_cache, ws_id, (dict(workspace), [dict(p, children=[dict(c) for c in p.get("children", [])]) for p in tree]))
         return workspace, tree, "network"
 
     def fetch_schemes(self, *, workspace_id: str, category_id: str, force_refresh: bool = False) -> tuple[list[dict[str, Any]], str]:
@@ -105,7 +116,7 @@ class MasterDataService:
         if not isinstance(schemes, list):
             raise RuntimeError("Master API /api/schemes 返回异常，缺少 schemes 列表。")
         normalized = [s for s in schemes if isinstance(s, dict)]
-        _scheme_list_cache[cache_key] = normalized
+        _cache_put(_scheme_list_cache, cache_key, normalized)
         return [dict(s) for s in normalized], "network"
 
     def fetch_scheme_summary(self, *, workspace_id: str, scheme_id: str, force_refresh: bool = False) -> dict[str, Any]:
@@ -117,7 +128,7 @@ class MasterDataService:
         summary = payload.get("scheme")
         if not isinstance(summary, dict):
             raise RuntimeError("Master API /api/schemes/summary 返回异常，缺少 scheme 对象。")
-        _scheme_summary_cache[cache_key] = summary
+        _cache_put(_scheme_summary_cache, cache_key, summary)
         return dict(summary)
 
 

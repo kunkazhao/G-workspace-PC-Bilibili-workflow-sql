@@ -289,7 +289,7 @@ class AppTextbox(ctk.CTkTextbox):
 class BasePage(ctk.CTkFrame):
     """所有子页面的基类：标准标题栏 + 内容区。"""
 
-    def __init__(self, master, title: str, app, **kwargs):
+    def __init__(self, master, title: str, app, *, scrollable: bool = False, **kwargs):
         super().__init__(
             master,
             fg_color="transparent",
@@ -320,13 +320,20 @@ class BasePage(ctk.CTkFrame):
         self.action_area = ctk.CTkFrame(self.header_frame, fg_color="transparent", width=1, height=1)
         self.action_area.pack(side="right")
 
-        # 内容区。CTkScrollableFrame 在部分页面会给首个控件留出异常空白，
-        # 这里用普通 frame，页面自己的表格/文本区负责滚动。
-        self.content = ctk.CTkFrame(
-            self,
-            fg_color="transparent",
-            corner_radius=0,
-        )
+        if scrollable:
+            self.content: ctk.CTkFrame = ctk.CTkScrollableFrame(
+                self,
+                fg_color="transparent",
+                corner_radius=0,
+                scrollbar_button_color=UIStyle.COLOR_LOG_SCROLLBAR,
+                scrollbar_button_hover_color=UIStyle.COLOR_LOG_SCROLLBAR_HOVER,
+            )
+        else:
+            self.content = ctk.CTkFrame(
+                self,
+                fg_color="transparent",
+                corner_radius=0,
+            )
         self.content.pack(fill="both", expand=True, pady=0)
 
     def refresh(self) -> None:

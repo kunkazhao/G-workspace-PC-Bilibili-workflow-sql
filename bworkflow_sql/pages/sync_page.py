@@ -300,7 +300,7 @@ class SyncPage(BasePage):
         self._log_body = ctk.CTkFrame(self.content, fg_color=UIStyle.COLOR_CARD_BG, corner_radius=UIStyle.RADIUS_LG, border_width=1, border_color=UIStyle.COLOR_BORDER)
         self._log_body.grid_columnconfigure(0, weight=1)
         self._log_body.grid_rowconfigure(0, weight=1)
-        self.log_tree = _build_table(self._log_body, ("时间", "类型", "状态", "说明"), row=0)
+        self.log_tree = _build_table(self._log_body, ("时间", "类型", "状态", "说明"), row=0, empty_text="暂无同步记录。")
         self.log_tree.column("时间", width=160)
         self.log_tree.column("类型", width=110)
         self.log_tree.column("状态", width=80)

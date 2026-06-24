@@ -145,7 +145,7 @@ class CopyPage(BasePage):
         outer.grid_columnconfigure(0, weight=1)
         outer.grid_rowconfigure(0, weight=1)
 
-        self.tree = _build_table(outer, CopyPageColumns, row=0)
+        self.tree = _build_table(outer, CopyPageColumns, row=0, empty_text="暂无文案数据。请先同步 Master 方案并导入 MD 文档。")
         for col, width in COLUMN_WIDTHS.items():
             self.tree.column(col, width=width)
         self.tree.bind("<ButtonRelease-1>", self._on_body_click)

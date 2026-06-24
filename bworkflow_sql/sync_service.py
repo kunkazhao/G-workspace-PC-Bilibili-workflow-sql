@@ -328,9 +328,14 @@ class SyncService:
         if "voice" in checked_types and md_path and Path(md_path).exists():
             self.sync_markdown(project_id)
             project = self.repo.project(project_id) or project
-        products = {item["uid"]: item for item in self.repo.products(project_id, include_removed=False)}
+        all_products = self.repo.products(project_id)
+        products = {item["uid"]: item for item in all_products if item["active"] and not int(item["removed_from_master"])}
         script_blocks = self.repo.script_blocks(project_id)
         accounts = self.repo.accounts()
+        all_bindings = self.repo.asset_bindings(project_id)
+        blocks_by_type: dict[str, list[dict[str, Any]]] = {}
+        for _blk in script_blocks:
+            blocks_by_type.setdefault(_blk["script_type"], []).append(_blk)
         counts = {"image": 0, "video": 0, "voice": 0, "unmatched": 0}
         matched_items: list[dict[str, Any]] = []
         matched_keys: set[tuple[str, str, int, str, str, str]] = set()
@@ -341,12 +346,12 @@ class SyncService:
         ts = now_iso()
         before_assets = [
             item
-            for item in self.repo.asset_bindings(project_id)
+            for item in all_bindings
             if item.get("asset_type") in checked_types and safe_text(item.get("status")) == "ready"
         ]
         before_keys = {self._asset_binding_key(item): item for item in before_assets}
         active_uids = set(products)
-        all_uids = {safe_text(row["uid"]) for row in self.repo.products(project_id)}
+        all_uids = {safe_text(row["uid"]) for row in all_products}
         stale_uids = sorted(uid for uid in all_uids if uid and uid not in active_uids)
         if stale_uids:
             placeholders = ", ".join("?" for _ in stale_uids)
@@ -365,6 +370,7 @@ class SyncService:
         }
         if requested_type and root_override:
             roots[requested_type] = Path(root_override)
+        uid_patterns = self._build_uid_patterns(products)
         for current_type, root, suffixes in [
             ("image", roots["image"], IMAGE_SUFFIXES),
             ("video", roots["video"], VIDEO_SUFFIXES),
@@ -374,12 +380,12 @@ class SyncService:
                 continue
             scanned_roots[current_type] = str(root)
             for path in self._scan_files(root, suffixes):
-                uid = self._uid_from_path(path, products)
+                uid = self._uid_from_path(path, products, uid_patterns)
                 account = {} if current_type == "video" else self._account_from_path(path, accounts)
                 if current_type == "voice" and not self._voice_path_in_project_scope(path, project, account):
                     continue
                 if uid:
-                    block = self._product_voice_block_from_path(uid, path, script_blocks) if current_type == "voice" else None
+                    block = self._product_voice_block_from_path(uid, path, script_blocks, blocks_by_type) if current_type == "voice" else None
                     if block:
                         self._upsert_voice_block_asset(project_id, uid=uid, block=block, path=path, account=account)
                         matched_voice_targets.add(self._voice_target_key(block))
@@ -403,7 +409,7 @@ class SyncService:
                         }
                     )
                 elif current_type == "voice":
-                    block = self._voice_block_from_path(path, script_blocks)
+                    block = self._voice_block_from_path(path, script_blocks, blocks_by_type)
                     if not block:
                         continue
                     special_uid = "INTRO" if block["script_type"] == "intro" else "PRICE_TRANSITION"
@@ -425,7 +431,7 @@ class SyncService:
                         }
                     )
         if "voice" in checked_types:
-            matched_voice_targets.update(self._current_ready_voice_targets(project_id, script_blocks, project, accounts))
+            matched_voice_targets.update(self._current_ready_voice_targets(project_id, script_blocks, project, accounts, all_bindings=all_bindings))
         for current_type in checked_types:
             if not current_type:
                 continue
@@ -463,12 +469,22 @@ class SyncService:
                     }
                 )
         added_items = [item for item in matched_items if self._asset_item_key(item) not in before_keys]
+        _path_cache: dict[str, bool] = {}
+
+        def _cached_path_exists(item: dict[str, Any]) -> bool:
+            p = safe_text(item.get("path"))
+            if not p:
+                return False
+            if p not in _path_cache:
+                _path_cache[p] = Path(p).is_file()
+            return _path_cache[p]
+
         removed_bindings = [
             item
             for key, item in before_keys.items()
             if key not in matched_keys
             and (
-                not self._asset_path_exists(item)
+                not _cached_path_exists(item)
                 or (
                     self._asset_is_in_scanned_scope(item, scanned_roots)
                     and safe_text(item.get("source_kind")) != "manual"
@@ -499,7 +515,7 @@ class SyncService:
             self._asset_item_from_binding(item)
             for item in self.repo.asset_bindings(project_id)
             if item.get("asset_type") in checked_types and safe_text(item.get("status")) == "ready"
-            and self._asset_path_exists(item)
+            and _cached_path_exists(item)
             and self._asset_is_in_scanned_scope(item, scanned_roots)
         ]
         for item in current_assets:
@@ -681,15 +697,23 @@ class SyncService:
         blocks: list[dict[str, Any]],
         project: dict[str, Any],
         accounts: list[dict[str, Any]],
+        *,
+        all_bindings: list[dict[str, Any]] | None = None,
     ) -> set[tuple[str, str]]:
+        bindings = all_bindings if all_bindings is not None else self.repo.asset_bindings(project_id)
         blocks_by_id = {int(block.get("id") or 0): block for block in blocks}
         accounts_by_label = {safe_text(account.get("label")): account for account in accounts}
+        path_cache: dict[str, bool] = {}
         targets: set[tuple[str, str]] = set()
-        for asset in self.repo.asset_bindings(project_id):
+        for asset in bindings:
             if safe_text(asset.get("asset_type")) != "voice" or safe_text(asset.get("status")) != "ready":
                 continue
             path_text = safe_text(asset.get("path"))
-            if not path_text or not Path(path_text).exists():
+            if not path_text:
+                continue
+            if path_text not in path_cache:
+                path_cache[path_text] = Path(path_text).exists()
+            if not path_cache[path_text]:
                 continue
             if safe_text(asset.get("source_kind")) != "manual" and not self._voice_asset_in_project_scope(asset, project, accounts_by_label):
                 continue
@@ -714,11 +738,13 @@ class SyncService:
         account = accounts_by_label.get(account_label, {"label": account_label})
         return self._voice_path_in_project_scope(Path(path_text), project, account)
 
-    def _voice_block_from_path(self, path: Path, blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    def _voice_block_from_path(
+        self, path: Path, blocks: list[dict[str, Any]], blocks_by_type: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> dict[str, Any] | None:
         text = _compact_identity(path.stem)
         stem_segments = {_compact_identity(part) for part in re.split(r"[\s_\-—/&]+", path.stem) if part.strip()}
-        intro_blocks = [block for block in blocks if block["script_type"] == "intro"]
-        price_blocks = [block for block in blocks if block["script_type"] == "price_transition"]
+        intro_blocks = (blocks_by_type or {}).get("intro") or [block for block in blocks if block["script_type"] == "intro"]
+        price_blocks = (blocks_by_type or {}).get("price_transition") or [block for block in blocks if block["script_type"] == "price_transition"]
         if "引言" in path.stem:
             segment_hits = [
                 block for block in intro_blocks
@@ -748,13 +774,15 @@ class SyncService:
             return matched_ranges[0] if len(matched_ranges) == 1 else None
         return None
 
-    def _product_voice_block_from_path(self, uid: str, path: Path, blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    def _product_voice_block_from_path(
+        self, uid: str, path: Path, blocks: list[dict[str, Any]], blocks_by_type: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> dict[str, Any] | None:
         text = _compact_identity(path.stem)
-        # 从原始文件名提取各段落（按分隔符拆分），用于精确匹配 block_label
         stem_segments = {_compact_identity(p) for p in re.split(r"[\s_\-—/&]+", path.stem) if p.strip()}
+        uid_lower = uid.casefold()
         product_blocks = [
-            block for block in blocks
-            if block["script_type"] == "product" and safe_text(block.get("owner_uid")).casefold() == uid.casefold()
+            block for block in ((blocks_by_type or {}).get("product") or blocks)
+            if block["script_type"] == "product" and safe_text(block.get("owner_uid")).casefold() == uid_lower
         ]
         segment_hits = [
             block for block in product_blocks
@@ -811,14 +839,18 @@ class SyncService:
             return []
         return [path for path in root.rglob("*") if path.is_file() and path.suffix.casefold() in suffixes]
 
-    def _uid_from_path(self, path: Path, products: dict[str, dict[str, Any]]) -> str:
-        name = path.stem.casefold()
+    def _build_uid_patterns(self, products: dict[str, dict[str, Any]]) -> list[tuple[str, re.Pattern[str]]]:
+        entries = []
         for uid in sorted(products, key=len, reverse=True):
             uid_text = safe_text(uid).casefold()
-            if not uid_text:
-                continue
-            pattern = UID_BOUNDARY_PATTERN.format(uid=re.escape(uid_text))
-            if re.search(pattern, name):
+            if uid_text:
+                entries.append((uid, re.compile(UID_BOUNDARY_PATTERN.format(uid=re.escape(uid_text)))))
+        return entries
+
+    def _uid_from_path(self, path: Path, products: dict[str, dict[str, Any]], uid_patterns: list[tuple[str, re.Pattern[str]]] | None = None) -> str:
+        name = path.stem.casefold()
+        for uid, pattern in (uid_patterns or self._build_uid_patterns(products)):
+            if pattern.search(name):
                 return uid
         return ""
 

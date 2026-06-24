@@ -127,7 +127,7 @@ if TYPE_CHECKING:
 
 class StandaloneVoicePage(BasePage):
     def __init__(self, master, app: App):
-        super().__init__(master, "单独配音", app)
+        super().__init__(master, "单独配音", app, scrollable=True)
         self.input_mode_var = ctk.StringVar(value="粘贴文字")
         self.voice_provider_var = ctk.StringVar(value="IndexTTS 本地服务")
         self.voice_mode_var = ctk.StringVar(value="已配置用户音色")

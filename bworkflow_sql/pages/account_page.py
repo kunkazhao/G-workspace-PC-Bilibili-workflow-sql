@@ -169,7 +169,7 @@ class AccountPage(BasePage):
         outer.pack(fill="both", expand=True)
         outer.grid_columnconfigure(0, weight=1)
         outer.grid_rowconfigure(0, weight=1)
-        self.tree = _build_table(outer, ("用户名称", "账号标识", "IndexTTS 音色", "MiniMax 音色", "音色名称", "素材身份", "结尾配音", "启用"), row=0)
+        self.tree = _build_table(outer, ("用户名称", "账号标识", "IndexTTS 音色", "MiniMax 音色", "音色名称", "素材身份", "结尾配音", "启用"), row=0, empty_text="暂无用户。点击上方「新建用户」添加。")
 
     def _save_account(self) -> None:
         payload = {k: v.get().strip() for k, v in self.vars.items()}

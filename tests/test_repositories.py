@@ -79,8 +79,8 @@ def test_migrations_are_idempotent(tmp_path: Path):
     db.close()
     db2 = Database(db_path)
     rows = db2.fetchall("SELECT version FROM schema_version ORDER BY version")
-    assert len(rows) == 1
-    assert rows[0]["version"] == CURRENT_SCHEMA_VERSION
+    assert len(rows) == CURRENT_SCHEMA_VERSION
+    assert rows[-1]["version"] == CURRENT_SCHEMA_VERSION
     db2.close()
 
 
