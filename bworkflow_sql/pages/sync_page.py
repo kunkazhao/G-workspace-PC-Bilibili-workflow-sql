@@ -321,19 +321,15 @@ class SyncPage(BasePage):
         return card
 
     def refresh(self) -> None:
-        projects = self.repo.projects()
         self.app.sync_project_selectors()
         project = self.app.current_project()
-        if not project and projects:
-            self.app.current_project_id = int(projects[0]["id"])
-            self.app.sync_project_selectors()
-            project = projects[0]
-        users = ["全部"] + [a["label"] for a in self.repo.accounts()]
+        accounts = self.repo.accounts()
+        users = ["全部"] + [a["label"] for a in accounts]
         self.user_combo.configure(values=users)
         if self.user_var.get() not in users:
             self.user_var.set("全部")
         self._refresh_template_options()
-        self._refresh_status()
+        self._refresh_status(accounts=accounts)
         self._refresh_logs()
 
     def _on_user_changed(self) -> None:
@@ -366,8 +362,10 @@ class SyncPage(BasePage):
             self.toast("请先选择品类项目。", kind="warning")
         return p
 
-    def _refresh_status(self) -> None:
+    def _refresh_status(self, *, accounts: list[dict[str, Any]] | None = None) -> None:
         project = self.app.current_project()
+        if accounts is None:
+            accounts = self.repo.accounts()
         if not project:
             for card in (self.master_card, self.md_card, self.folder_card, self.mapping_card):
                 card.set_body("请先创建或选择品类项目。")
@@ -394,11 +392,11 @@ class SyncPage(BasePage):
                          and safe_text(a.get("path")) and Path(safe_text(a.get("path"))).is_file()
                          and (selected_user == "全部" or a["account_label"] == selected_user or not a["account_label"])),
         }
-        issues = build_project_issue_summary(project, products, blocks, assets, self.repo.accounts(), selected_user=self.user_var.get(), image_template=selected_template)
+        issues = build_project_issue_summary(project, products, blocks, assets, accounts, selected_user=self.user_var.get(), image_template=selected_template)
         voice_status = collect_voice_status(
             blocks,
             assets,
-            self.repo.accounts(),
+            accounts,
             {safe_text(item.get("uid")): item for item in products},
             selected_user=selected_user,
         )

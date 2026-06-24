@@ -166,7 +166,9 @@ class Database:
         ensure_data_dir()
         self.path = path
         self._conn: sqlite3.Connection | None = None
+        self._read_conn: sqlite3.Connection | None = None
         self._lock = __import__("threading").Lock()
+        self._read_lock = __import__("threading").Lock()
         self.init()
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -188,11 +190,23 @@ class Database:
                 conn.rollback()
                 raise
 
+    def _get_read_connection(self) -> sqlite3.Connection:
+        if self._read_conn is None:
+            self._read_conn = sqlite3.connect(self.path, check_same_thread=False)
+            self._read_conn.row_factory = sqlite3.Row
+            self._read_conn.execute("PRAGMA journal_mode = WAL")
+            self._read_conn.execute("PRAGMA query_only = ON")
+        return self._read_conn
+
     def close(self) -> None:
         with self._lock:
             if self._conn is not None:
                 self._conn.close()
                 self._conn = None
+        with self._read_lock:
+            if self._read_conn is not None:
+                self._read_conn.close()
+                self._read_conn = None
 
     def init(self) -> None:
         conn = self._get_connection()
@@ -321,11 +335,13 @@ class Database:
             conn.execute(sql, tuple(params))
 
     def fetchall(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
-        with self.connect() as conn:
+        with self._read_lock:
+            conn = self._get_read_connection()
             return list(conn.execute(sql, tuple(params)).fetchall())
 
     def fetchone(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Row | None:
-        with self.connect() as conn:
+        with self._read_lock:
+            conn = self._get_read_connection()
             return conn.execute(sql, tuple(params)).fetchone()
 
     def upsert_project(self, payload: dict[str, Any]) -> int:

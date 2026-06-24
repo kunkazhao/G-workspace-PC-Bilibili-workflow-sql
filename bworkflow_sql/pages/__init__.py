@@ -1,45 +1,42 @@
-from .project_page import ProjectPageDialog
-from .copy_page import CopyPage
-from .asset_page import AssetPage
-from .sync_page import SyncPage
-from .account_page import AccountPage
-from .standalone_voice_page import StandaloneVoicePage
-from .workflow_page import WorkflowPage
-from .voice_page import VoicePage
-from .assemble_page import AssemblePage
-from .jianying_page import JianyingPage
-from .rollb_rename_page import RollBRenamePage
-from .subtitle_srt_page import SubtitleSrtPage
-from .cutme_page import CutMePage
+import importlib
 
-PAGE_MAP: dict[str, type] = {
-    "品类项目": ProjectPageDialog,
-    "文案中心": CopyPage,
-    "资产中心": AssetPage,
-    "同步中心": SyncPage,
-    "用户管理": AccountPage,
-    "生成配音": VoicePage,
-    "组合口播稿": AssemblePage,
-    "生成剪映草稿": JianyingPage,
-    "单独配音": StandaloneVoicePage,
-    "roll-b改名": RollBRenamePage,
-    "导出字幕 SRT": SubtitleSrtPage,
-    "CutMe 引言": CutMePage,
+_PAGE_REGISTRY: dict[str, tuple[str, str]] = {
+    "品类项目": (".project_page", "ProjectPageDialog"),
+    "文案中心": (".copy_page", "CopyPage"),
+    "资产中心": (".asset_page", "AssetPage"),
+    "同步中心": (".sync_page", "SyncPage"),
+    "用户管理": (".account_page", "AccountPage"),
+    "生成配音": (".voice_page", "VoicePage"),
+    "组合口播稿": (".assemble_page", "AssemblePage"),
+    "生成剪映草稿": (".jianying_page", "JianyingPage"),
+    "单独配音": (".standalone_voice_page", "StandaloneVoicePage"),
+    "roll-b改名": (".rollb_rename_page", "RollBRenamePage"),
+    "导出字幕 SRT": (".subtitle_srt_page", "SubtitleSrtPage"),
+    "CutMe 引言": (".cutme_page", "CutMePage"),
 }
 
-__all__ = [
-    "PAGE_MAP",
-    "ProjectPageDialog",
-    "CopyPage",
-    "AssetPage",
-    "SyncPage",
-    "AccountPage",
-    "StandaloneVoicePage",
-    "WorkflowPage",
-    "VoicePage",
-    "AssemblePage",
-    "JianyingPage",
-    "RollBRenamePage",
-    "SubtitleSrtPage",
-    "CutMePage",
-]
+_page_class_cache: dict[str, type] = {}
+
+
+class _LazyPageMap:
+    """延迟加载页面类——首次访问某页面时才 import 对应模块。"""
+
+    def __getitem__(self, key: str) -> type:
+        cls = _page_class_cache.get(key)
+        if cls is None:
+            module_path, class_name = _PAGE_REGISTRY[key]
+            module = importlib.import_module(module_path, package=__package__)
+            cls = getattr(module, class_name)
+            _page_class_cache[key] = cls
+        return cls
+
+    def __contains__(self, key: object) -> bool:
+        return key in _PAGE_REGISTRY
+
+    def keys(self):
+        return _PAGE_REGISTRY.keys()
+
+
+PAGE_MAP = _LazyPageMap()
+
+__all__ = ["PAGE_MAP"]

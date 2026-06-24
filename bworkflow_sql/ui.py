@@ -13,14 +13,11 @@ from .components import (
     NavButton,
 )
 from .db import Database
-from .legacy_import import LegacyImportService
 from .master_data import MasterDataService
 from .master_service import MasterServiceManager
-from .outline_service import OutlineService
 from .repositories import Repository
 from .style_config import UIStyle
 from .sync_service import SyncService
-from .workflow_service import WorkflowService
 from .utils import safe_text
 from .pages import PAGE_MAP
 from .ui_helpers import (
@@ -52,10 +49,10 @@ class App(ctk.CTk):
         self.db = Database()
         self.repo = Repository(self.db)
         self.sync = SyncService(self.db)
-        self.workflow = WorkflowService(self.db)
+        self._workflow = None
         self.master_service = MasterServiceManager()
-        self.outline = OutlineService(self.db)
-        self.legacy_import = LegacyImportService(self.db)
+        self._outline = None
+        self._legacy_import = None
         self.master_data = MasterDataService()
 
         self.current_project_id: int | None = self.db.latest_project_id()
@@ -66,6 +63,27 @@ class App(ctk.CTk):
         self._build_shell()
         self.sync_project_selectors()
         self.show_page("品类项目")
+
+    @property
+    def workflow(self):
+        if self._workflow is None:
+            from .workflow_service import WorkflowService
+            self._workflow = WorkflowService(self.db)
+        return self._workflow
+
+    @property
+    def outline(self):
+        if self._outline is None:
+            from .outline_service import OutlineService
+            self._outline = OutlineService(self.db)
+        return self._outline
+
+    @property
+    def legacy_import(self):
+        if self._legacy_import is None:
+            from .legacy_import import LegacyImportService
+            self._legacy_import = LegacyImportService(self.db)
+        return self._legacy_import
 
     def _build_shell(self) -> None:
         self.grid_columnconfigure(1, weight=1)

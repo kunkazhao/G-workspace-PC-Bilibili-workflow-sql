@@ -29,6 +29,8 @@ class TaskProgressDialog(ctk.CTkToplevel):
         self.status_var = ctk.StringVar(value=message)
         self.detail_var = ctk.StringVar(value="")
         self._log_count = 0
+        self._log_max = 50
+        self._log_frames: list[tuple[ctk.CTkFrame, ctk.CTkFrame]] = []
         self.cancel_event = threading.Event()
 
         shell = ctk.CTkFrame(self, fg_color="transparent")
@@ -182,6 +184,11 @@ class TaskProgressDialog(ctk.CTkToplevel):
 
         line = ctk.CTkFrame(self.log_scroll, fg_color=UIStyle.COLOR_LOG_DIVIDER, height=1)
         line.grid(row=self._log_count * 2 + 1, column=0, sticky="ew")
+        self._log_frames.append((row, line))
+        if len(self._log_frames) > self._log_max:
+            old_row, old_line = self._log_frames.pop(0)
+            old_row.destroy()
+            old_line.destroy()
         canvas = getattr(self.log_scroll, "_parent_canvas", None)
         if canvas is not None:
             canvas.yview_moveto(1.0)

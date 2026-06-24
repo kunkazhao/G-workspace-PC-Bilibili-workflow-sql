@@ -2,17 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
 from .settings import DEFAULT_MASTER_API_BASE_URL
 from .utils import safe_text
 
 WORKSPACE_HEADER = "X-Workspace-Id"
 _CACHE_MAX_SIZE = 64
 
-_session: requests.Session | None = None
+_session: Any = None
 _workspaces_cache: list[dict[str, Any]] | None = None
 _category_tree_cache: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
 _scheme_list_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -29,7 +25,11 @@ def _cache_put(cache: dict, key: Any, value: Any) -> None:
     cache[key] = value
 
 
-def _get_session() -> requests.Session:
+def _get_session():
+    import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
     global _session
     if _session is None:
         _session = requests.Session()
@@ -45,6 +45,8 @@ def _api_url(path: str) -> str:
 
 
 def _get_json(path: str, *, headers: dict[str, str] | None = None, params: dict[str, str] | None = None, timeout: float = 30.0) -> Any:
+    import requests
+
     try:
         resp = _get_session().get(_api_url(path), headers=headers, params=params, timeout=timeout)
         resp.raise_for_status()

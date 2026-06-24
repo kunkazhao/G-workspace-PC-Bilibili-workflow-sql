@@ -32,10 +32,6 @@ from .style_config import UIStyle
 from .sync_service import AUDIO_SUFFIXES
 from .template_config import image_set_for_template
 from .utils import compact_path, safe_text, text_hash
-from .workflow_service import (
-    VOICE_PROVIDER_INDEXTTS,
-    account_voice_id_for_provider,
-)
 
 
 @dataclass
@@ -55,7 +51,7 @@ class VoiceTaskDraft:
     account_label: str
     target_text: str = ""
     output_dir: str = ""
-    voice_provider: str = VOICE_PROVIDER_INDEXTTS
+    voice_provider: str = "indextts"
 
     @property
     def display_target(self) -> str:
@@ -92,6 +88,8 @@ def project_name_exists(projects: list[dict[str, Any]], name: str, *, exclude_pr
 
 
 def account_labels_for_voice_provider(accounts: list[dict[str, Any]], provider: str) -> list[str]:
+    from .tts_helpers import account_voice_id_for_provider
+
     labels: list[str] = []
     for account in accounts:
         label = safe_text(account.get("label"))
