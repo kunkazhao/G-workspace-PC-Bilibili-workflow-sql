@@ -37,6 +37,9 @@ DEFAULT_SPOKEN_MD_ROOT = Path(r"G:\WriteSpace\B站-文案脚本\10_b站文案\1.
 DEFAULT_JIANYING_DRAFT_ROOT = Path(r"E:\剪辑-剪映\草稿\JianyingPro Drafts")
 INTERNAL_WORKSPACE_ROOT = DATA_DIR / "workspace"
 
+CUTME_ROOT = Path(r"G:\workspace\赵二-工具-CutMe")
+CUTME_OUTPUT_ROOT = CUTME_ROOT / "cutme" / "output"
+
 
 def ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)

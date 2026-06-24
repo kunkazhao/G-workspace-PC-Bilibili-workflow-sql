@@ -194,20 +194,17 @@ def test_master_sync_forces_fresh_scheme_summary(tmp_path: Path, monkeypatch):
     )
     calls = []
 
-    class FakeMasterSchemes:
-        @staticmethod
-        def fetch_scheme_summary(*, workspace_id, scheme_id, force_refresh=False):
-            calls.append(
-                {
-                    "workspace_id": workspace_id,
-                    "scheme_id": scheme_id,
-                    "force_refresh": force_refresh,
-                }
-            )
-            return {"items": [{"uid": "JP096", "title": "狼蛛F75Max 客制化", "price": "279元"}]}
+    def fake_fetch_summary(self, *, workspace_id, scheme_id, force_refresh=False):
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "scheme_id": scheme_id,
+                "force_refresh": force_refresh,
+            }
+        )
+        return {"items": [{"uid": "JP096", "title": "狼蛛F75Max 客制化", "price": "279元"}]}
 
-    monkeypatch.setattr("bworkflow_sql.sync_service.install_legacy_paths", lambda: None)
-    monkeypatch.setattr("bworkflow_sql.sync_service.try_import", lambda name: FakeMasterSchemes)
+    monkeypatch.setattr("bworkflow_sql.master_data.MasterDataService.fetch_scheme_summary", fake_fetch_summary)
 
     result = SyncService(db).sync_master_scheme(project_id, apply_changes=False)
 
@@ -229,17 +226,14 @@ def test_master_sync_trusts_matching_category_id_when_names_are_aliases(tmp_path
         }
     )
 
-    class FakeMasterSchemes:
-        @staticmethod
-        def fetch_scheme_summary(*, workspace_id, scheme_id, force_refresh=False):
-            return {
-                "category_id": "category-1",
-                "category_name": "耳机-入耳",
-                "items": [{"uid": "EJ001", "title": "示例耳机", "price": "99元"}],
-            }
+    def fake_fetch_summary(self, *, workspace_id, scheme_id, force_refresh=False):
+        return {
+            "category_id": "category-1",
+            "category_name": "耳机-入耳",
+            "items": [{"uid": "EJ001", "title": "示例耳机", "price": "99元"}],
+        }
 
-    monkeypatch.setattr("bworkflow_sql.sync_service.install_legacy_paths", lambda: None)
-    monkeypatch.setattr("bworkflow_sql.sync_service.try_import", lambda name: FakeMasterSchemes)
+    monkeypatch.setattr("bworkflow_sql.master_data.MasterDataService.fetch_scheme_summary", fake_fetch_summary)
 
     result = SyncService(db).sync_master_scheme(project_id, apply_changes=False)
 

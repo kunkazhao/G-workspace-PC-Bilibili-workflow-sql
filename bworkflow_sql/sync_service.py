@@ -6,7 +6,7 @@ from typing import Any
 
 from .asset_paths import legacy_voice_user_dir, path_is_under, voice_user_dir
 from .db import Database, _script_id_slug
-from .legacy_bridge import install_legacy_paths, try_import
+from .master_data import MasterDataService
 from .md_parser import H3_RE, H4_RE, SCRIPT_ID_RE, SECTION_RE, ParsedMarkdown, parse_markdown_file, parse_product_heading
 from .repositories import Repository
 from .settings import DEFAULT_IMAGE_ROOT, DEFAULT_VIDEO_ROOT, DEFAULT_VOICE_ROOT
@@ -61,11 +61,7 @@ class SyncService:
         if not workspace_id or not scheme_id:
             raise ValueError("当前项目缺少 Master workspace_id 或 scheme_id。")
 
-        install_legacy_paths()
-        master_schemes = try_import("core.master_schemes")
-        if master_schemes is None:
-            raise ValueError("无法加载旧项目 Master 方案模块。")
-        summary = master_schemes.fetch_scheme_summary(workspace_id=workspace_id, scheme_id=scheme_id, force_refresh=force_refresh)
+        summary = MasterDataService().fetch_scheme_summary(workspace_id=workspace_id, scheme_id=scheme_id, force_refresh=force_refresh)
         self._validate_scheme_matches_project(project, summary)
         raw_items = summary.get("items") or []
         products = []

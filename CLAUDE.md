@@ -30,3 +30,4 @@
 | 模板坐标转换 | `template_config.py` 的 x/y/width/height 是画布像素坐标（左上角原点）。转成剪映 UI 值：`剪映X = (center_x-960)×2`，`剪映Y = (540-center_y)×2`，`缩放% = display_scale×100`。注意乘除 2 不是 960/540。 |
 | 字幕断行 | `split_subtitle_text(...)` 对超长分句做语义断行，保留数字+单位、英文型号、小数和 `的/地/得` 结构，优先在连词前断。 |
 | 验证命令 | 从仓库根目录运行 `python -m pytest`，不要用裸 `pytest`。最小回归常用：`python -m pytest -q tests/test_workflow_service.py tests/test_ui_helpers.py tests/test_repositories.py tests/test_sync_service.py`。 |
+| 非价格过渡口播稿 | 当品类按用途/标签分组而非价格段时（如充电宝按品类标签），软件无法直接生成口播稿。完整流程和踩坑记录见 `docs/operator-runbook.md` 的「非价格过渡口播稿」章节。参考脚本：`scripts/batch_tts_chongdianbao.py`（批量配音）、`scripts/gen_manifest_chongdianbao.py`（生成 manifest）。 |

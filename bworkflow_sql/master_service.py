@@ -3,8 +3,6 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 from .settings import DEFAULT_MASTER_API_BASE_URL, DEFAULT_MASTER_SERVICE_ROOT
@@ -28,8 +26,9 @@ class MasterServiceManager:
 
     def is_running(self, *, timeout: float = 0.8) -> bool:
         try:
-            with urllib.request.urlopen(f"{self.api_base_url}/api/health", timeout=timeout) as response:
-                return 200 <= int(response.status) < 500
+            import requests
+            response = requests.get(f"{self.api_base_url}/api/health", timeout=timeout)
+            return 200 <= response.status_code < 500
         except Exception:
             return False
 

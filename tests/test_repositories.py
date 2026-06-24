@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from bworkflow_sql.db import Database
+from bworkflow_sql.db import CURRENT_SCHEMA_VERSION, Database
 from bworkflow_sql.repositories import Repository
 
 
@@ -55,9 +55,40 @@ def test_database_migrates_known_minimax_voice_aliases(tmp_path: Path):
             """
         )
         conn.execute("DROP TABLE accounts_old")
+        conn.execute("DELETE FROM schema_version")
+    db.close()
 
     migrated = Database(db_path)
     row = migrated.fetchone("SELECT label, voice_id, minimax_voice_id FROM accounts WHERE label='荣荣'")
 
     assert row["voice_id"] == "荣荣"
     assert row["minimax_voice_id"] == "rongrong-v2"
+    migrated.close()
+
+
+def test_fresh_db_gets_current_schema_version(tmp_path: Path):
+    db = Database(tmp_path / "fresh.db")
+    row = db.fetchone("SELECT MAX(version) AS v FROM schema_version")
+    assert row["v"] == CURRENT_SCHEMA_VERSION
+    db.close()
+
+
+def test_migrations_are_idempotent(tmp_path: Path):
+    db_path = tmp_path / "idem.db"
+    db = Database(db_path)
+    db.close()
+    db2 = Database(db_path)
+    rows = db2.fetchall("SELECT version FROM schema_version ORDER BY version")
+    assert len(rows) == 1
+    assert rows[0]["version"] == CURRENT_SCHEMA_VERSION
+    db2.close()
+
+
+def test_schema_version_table_exists(tmp_path: Path):
+    db = Database(tmp_path / "ver.db")
+    tables = {
+        row[0]
+        for row in db.fetchall("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert "schema_version" in tables
+    db.close()

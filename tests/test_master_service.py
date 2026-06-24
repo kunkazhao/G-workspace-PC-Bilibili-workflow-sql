@@ -1,5 +1,4 @@
 import subprocess
-import urllib.error
 
 from bworkflow_sql.master_service import MasterServiceManager, is_master_connection_error
 
@@ -35,10 +34,12 @@ def test_master_service_start_uses_backend_main(tmp_path, monkeypatch):
     assert kwargs["cwd"] == str(root)
 
 
-def test_master_service_is_running_handles_url_errors(monkeypatch):
-    def fake_urlopen(*_args, **_kwargs):
-        raise urllib.error.URLError("refused")
+def test_master_service_is_running_handles_connection_errors(monkeypatch):
+    import requests
 
-    monkeypatch.setattr("bworkflow_sql.master_service.urllib.request.urlopen", fake_urlopen)
+    def fake_get(*_args, **_kwargs):
+        raise requests.exceptions.ConnectionError("refused")
+
+    monkeypatch.setattr(requests, "get", fake_get)
 
     assert not MasterServiceManager().is_running()

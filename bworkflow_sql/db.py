@@ -142,7 +142,14 @@ CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL,
+    applied_at TEXT NOT NULL
+);
 """
+
+CURRENT_SCHEMA_VERSION = 1
 
 
 def _script_id_slug(value: Any) -> str:
@@ -158,25 +165,66 @@ class Database:
     def __init__(self, path: Path = DB_PATH):
         ensure_data_dir()
         self.path = path
+        self._conn: sqlite3.Connection | None = None
+        self._lock = __import__("threading").Lock()
         self.init()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA foreign_keys = ON")
+            self._conn.execute("PRAGMA journal_mode = WAL")
+        return self._conn
 
     @contextmanager
     def connect(self):
-        conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        try:
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                yield conn
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+
+    def close(self) -> None:
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
     def init(self) -> None:
-        with sqlite3.connect(self.path) as conn:
-            conn.executescript(SCHEMA)
-            self._migrate(conn)
+        conn = self._get_connection()
+        conn.executescript(SCHEMA)
+        self._run_migrations(conn)
+        conn.commit()
 
-    def _migrate(self, conn: sqlite3.Connection) -> None:
+    def _get_schema_version(self, conn: sqlite3.Connection) -> int:
+        try:
+            row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+            return row[0] if row and row[0] is not None else 0
+        except sqlite3.OperationalError:
+            return 0
+
+    def _set_schema_version(self, conn: sqlite3.Connection, version: int) -> None:
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (version, now_iso()),
+        )
+
+    def _run_migrations(self, conn: sqlite3.Connection) -> None:
+        current = self._get_schema_version(conn)
+        migrations = [
+            (1, self._migrate_v1),
+        ]
+        for version, func in migrations:
+            if current < version:
+                func(conn)
+                self._set_schema_version(conn, version)
+
+    def _migrate_v1(self, conn: sqlite3.Connection) -> None:
+        """Consolidate all pre-versioning column additions into v1."""
         columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
         if "spoken_md_path" not in columns:
             conn.execute("ALTER TABLE projects ADD COLUMN spoken_md_path TEXT DEFAULT ''")

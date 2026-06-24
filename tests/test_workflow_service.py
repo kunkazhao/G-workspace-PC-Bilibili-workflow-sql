@@ -12,6 +12,7 @@ from bworkflow_sql.settings import INTERNAL_WORKSPACE_ROOT
 from bworkflow_sql.sync_service import SyncService
 from bworkflow_sql.utils import now_iso, text_hash
 import bworkflow_sql.workflow_service as workflow_service_module
+import bworkflow_sql.subtitle_helpers as subtitle_helpers_module
 from bworkflow_sql.workflow_service import (
     DEFAULT_CLOSING_TEXT,
     VOICE_PROVIDER_MINIMAX,
@@ -1048,9 +1049,9 @@ def test_asr_alignment_snaps_subtitle_start_after_breath_pause(tmp_path: Path, m
             {"start": 0.8, "end": 1.1, "text": "句"},
         ]
 
-    monkeypatch.setattr(workflow_service_module, "run_subtitle_alignment_asr", fake_asr)
+    monkeypatch.setattr(subtitle_helpers_module, "run_subtitle_alignment_asr", fake_asr)
 
-    items = workflow_service_module.align_subtitle_text_with_asr(audio_path, "第一句。第二句。", 0.0)
+    items = subtitle_helpers_module.align_subtitle_text_with_asr(audio_path, "第一句。第二句。", 0.0)
 
     assert items[0] == (0.0, 0.4, "第一句")
     assert items[1][0] == 0.7
@@ -1079,9 +1080,9 @@ def test_asr_alignment_runs_all_jobs_in_one_isolated_worker(tmp_path: Path, monk
             [{"start": 0.2, "end": 0.9, "text": "第二句"}],
         ]
 
-    monkeypatch.setattr(workflow_service_module, "run_subtitle_asr_worker", fake_worker)
+    monkeypatch.setattr(subtitle_helpers_module, "run_subtitle_asr_worker", fake_worker)
 
-    items = workflow_service_module.align_subtitle_jobs_with_asr(jobs, workers=3)
+    items = subtitle_helpers_module.align_subtitle_jobs_with_asr(jobs, workers=3)
 
     assert len(calls) == 1
     assert items == [(0.1, 0.8, "第一句"), (1.2, 1.9, "第二句")]
@@ -1355,6 +1356,41 @@ def test_generate_voice_with_minimax_writes_mp3_and_binds_asset(tmp_path: Path, 
     asset = db.fetchone("SELECT * FROM asset_bindings WHERE project_id=? AND asset_type='voice'", (project_id,))
     assert asset is not None
     assert Path(asset["path"]).suffix == ".mp3"
+
+
+def test_generate_voice_cancel_stops_after_current_job(tmp_path: Path, monkeypatch):
+    import threading
+
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    generated_count = 0
+
+    def fake_prepare(self, voice_id: str, **kwargs):
+        return "minimax-voice-1"
+
+    def fake_synthesize(self, text: str, *, voice_id: str, final_path: Path, **kwargs):
+        nonlocal generated_count
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        final_path.write_bytes(b"mp3")
+        generated_count += 1
+        return final_path
+
+    monkeypatch.setattr(WorkflowService, "_prepare_minimax_voice", fake_prepare)
+    monkeypatch.setattr(WorkflowService, "_synthesize_minimax_to_path", fake_synthesize)
+
+    cancel = threading.Event()
+    cancel.set()
+
+    result = service.generate_voice(
+        project_id,
+        account_label="小燃",
+        voice_provider=VOICE_PROVIDER_MINIMAX,
+        output_dir=tmp_path / "voice-out",
+        cancel_event=cancel,
+    )
+
+    assert generated_count == 0
+    assert "取消" in result.stdout
 
 
 def test_markdown_file_to_voice_text_keeps_document_as_single_text(tmp_path: Path):

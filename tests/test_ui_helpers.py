@@ -6,10 +6,8 @@ from bworkflow_sql.md_parser import parse_markdown_text
 from bworkflow_sql.repositories import Repository
 from bworkflow_sql.settings import DEFAULT_SPOKEN_MD_ROOT
 from bworkflow_sql.sync_service import SyncService
-from bworkflow_sql.ui import (
+from bworkflow_sql.ui_helpers import (
     ProjectEditorState,
-    ProjectPageDialog,
-    WorkflowPage,
     asset_folder_paths,
     build_project_issue_summary,
     collect_voice_status,
@@ -28,6 +26,8 @@ from bworkflow_sql.ui import (
     voice_inventory_stats,
     voice_state,
 )
+from bworkflow_sql.pages.project_page import ProjectPageDialog
+from bworkflow_sql.pages.workflow_page import WorkflowPage
 from bworkflow_sql.utils import text_hash
 from bworkflow_sql.workflow_service import WorkflowService
 

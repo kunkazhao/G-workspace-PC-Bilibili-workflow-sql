@@ -32,61 +32,76 @@ from .settings import (
 )
 from .utils import file_metadata, now_iso, safe_text
 from .template_config import image_set_for_template, user_for_template
+from .tts_helpers import (  # noqa: F401 – re-exported
+    DEFAULT_KEEP_SILENCE_MS,
+    DEFAULT_LEADING_SILENCE_MS,
+    DEFAULT_LONG_SILENCE_KEEP_MS,
+    DEFAULT_LONG_SILENCE_MS,
+    DEFAULT_MAX_LEADING_SILENCE_MS,
+    DEFAULT_MIN_SILENCE_MS,
+    DEFAULT_SILENCE_CHUNK_MS,
+    DEFAULT_SILENCE_THRESHOLD_DB,
+    DEFAULT_TRAILING_SILENCE_KEEP_MS,
+    DEFAULT_TRAILING_SILENCE_LIMIT_MS,
+    DEFAULT_TTS_FIELDS,
+    MINIMAX_API_BASE_URL,
+    MINIMAX_KNOWN_LOCAL_VOICE_IDS,
+    MINIMAX_SKILL_ENV_PATH,
+    MINIMAX_T2A_MODEL,
+    MINIMAX_T2A_URL,
+    MINIMAX_VOICE_ALIASES,
+    MINIMAX_VOICE_LIST_URL,
+    VOICE_PROVIDER_INDEXTTS,
+    VOICE_PROVIDER_LABELS,
+    VOICE_PROVIDER_MINIMAX,
+    account_voice_id_for_provider,
+    compress_internal_silence,
+    dbfs_for_chunk,
+    load_minimax_api_key,
+    markdown_file_to_voice_text,
+    markdown_to_voice_text,
+    normalize_generated_voice_silence,
+    normalize_voice_provider,
+    prepend_silence,
+    resolve_minimax_voice_id,
+    seconds_to_frames,
+    silence_ranges_for_audio,
+    voice_provider_label,
+)
+from .subtitle_helpers import (  # noqa: F401 – re-exported
+    DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
+    DEFAULT_SUBTITLE_ASR_LANGUAGE,
+    DEFAULT_SUBTITLE_ASR_MODEL,
+    DEFAULT_SUBTITLE_ASR_WORKERS,
+    DEFAULT_SUBTITLE_OVERLAP_GAP_SEC,
+    DEFAULT_SUBTITLE_SPEECH_SNAP_WINDOW_SEC,
+    SUBTITLE_ALIGN_DROP_RE,
+    SUBTITLE_BREAK_RE,
+    SUBTITLE_DROP_PUNCT_RE,
+    align_subtitle_jobs_with_asr,
+    align_subtitle_text_with_asr,
+    align_subtitle_text_with_units,
+    distribute_subtitle_text,
+    format_srt,
+    format_srt_timestamp,
+    normalize_subtitle_alignment_text,
+    probe_media_duration_seconds,
+    run_subtitle_alignment_asr,
+    run_subtitle_asr_worker,
+    snap_subtitle_segments_to_speech,
+    split_subtitle_text,
+    subtitle_asr_python_path,
+    subtitle_entry_label,
+    subtitle_manifest_entries,
+    subtitle_speech_ranges,
+)
+from .draft_helpers import (  # noqa: F401 – re-exported
+    format_duration_cn,
+    format_jianying_run_stdout,
+    parse_json_object,
+)
 
 
-DEFAULT_TTS_FIELDS = {
-    "use_emo_text": False,
-    "use_random": False,
-    "interval_silence": 100,
-    "max_text_tokens_per_sentence": 100,
-    "do_sample": True,
-    "top_p": 0.8,
-    "top_k": 10,
-    "temperature": 0.5,
-    "length_penalty": 0.0,
-    "num_beams": 1,
-    "repetition_penalty": 6.0,
-    "max_mel_tokens": 1800,
-    "verbose": False,
-}
-VOICE_PROVIDER_INDEXTTS = "indextts"
-VOICE_PROVIDER_MINIMAX = "minimax"
-VOICE_PROVIDER_LABELS = {
-    VOICE_PROVIDER_INDEXTTS: "IndexTTS 本地服务",
-    VOICE_PROVIDER_MINIMAX: "MiniMax API",
-}
-MINIMAX_API_BASE_URL = "https://api.minimaxi.com"
-MINIMAX_T2A_URL = f"{MINIMAX_API_BASE_URL}/v1/t2a_v2"
-MINIMAX_VOICE_LIST_URL = f"{MINIMAX_API_BASE_URL}/v1/get_voice"
-MINIMAX_T2A_MODEL = "speech-2.8-hd"
-MINIMAX_VOICE_ALIASES = {
-    "知了": "bilibili-zhiliao",
-    "蓉蓉": "rongrong-v2",
-    "荣荣": "rongrong-v2",
-    "小博": "xiaobo-v2",
-    "小燃": "xiaoran-v2",
-    "小歪": "xiaowai-v6",
-}
-MINIMAX_KNOWN_LOCAL_VOICE_IDS = set(MINIMAX_VOICE_ALIASES.values())
-MINIMAX_SKILL_ENV_PATH = Path(r"C:\Users\zhaoer\.codex\skills\minimax-tts\.env")
-DEFAULT_SILENCE_THRESHOLD_DB = -45.0
-DEFAULT_MIN_SILENCE_MS = 300
-DEFAULT_KEEP_SILENCE_MS = 220
-DEFAULT_LONG_SILENCE_MS = 800
-DEFAULT_LONG_SILENCE_KEEP_MS = 350
-DEFAULT_SILENCE_CHUNK_MS = 10
-DEFAULT_LEADING_SILENCE_MS = 100
-DEFAULT_MAX_LEADING_SILENCE_MS = 120
-DEFAULT_TRAILING_SILENCE_LIMIT_MS = 500
-DEFAULT_TRAILING_SILENCE_KEEP_MS = 200
-DEFAULT_SUBTITLE_ASR_MODEL = "base"
-DEFAULT_SUBTITLE_ASR_LANGUAGE = "zh"
-DEFAULT_SUBTITLE_ASR_BEAM_SIZE = 2
-DEFAULT_SUBTITLE_ASR_WORKERS = 3
-DEFAULT_SUBTITLE_SPEECH_SNAP_WINDOW_SEC = 0.5
-DEFAULT_SUBTITLE_OVERLAP_GAP_SEC = 0.02
-DEFAULT_SUBTITLE_ASR_PYTHON = Path(__file__).resolve().parents[1] / ".venv-asr" / "Scripts" / "python.exe"
-DEFAULT_SUBTITLE_ASR_WORKER = Path(__file__).resolve().parents[1] / "scripts" / "subtitle_asr_worker.py"
 INTERNAL_PREFIX = "internal:"
 DEFAULT_DISPLAY_VIDEO_SLOT = {
     "x": 1100,
@@ -143,406 +158,6 @@ class RollBRenameItem:
         }
 
 
-def seconds_to_frames(seconds: float, frame_rate: int) -> int:
-    return max(0, int(round(seconds * frame_rate)))
-
-
-def normalize_voice_provider(value: str) -> str:
-    text = safe_text(value).casefold()
-    if text in {"minimax", "minimax api", "minimax-api", "minimax_api", "api", "MiniMax API".casefold()}:
-        return VOICE_PROVIDER_MINIMAX
-    return VOICE_PROVIDER_INDEXTTS
-
-
-def voice_provider_label(provider: str) -> str:
-    return VOICE_PROVIDER_LABELS.get(normalize_voice_provider(provider), VOICE_PROVIDER_LABELS[VOICE_PROVIDER_INDEXTTS])
-
-
-def resolve_minimax_voice_id(value: str) -> str:
-    text = safe_text(value)
-    return MINIMAX_VOICE_ALIASES.get(text, text)
-
-
-def account_voice_id_for_provider(account: dict[str, Any], provider: str) -> str:
-    normalized = normalize_voice_provider(provider)
-    if normalized == VOICE_PROVIDER_MINIMAX:
-        explicit = safe_text(account.get("minimax_voice_id"))
-        if explicit:
-            return resolve_minimax_voice_id(explicit)
-        for key in ("label", "voice_name", "voice_id", "account_id"):
-            resolved = resolve_minimax_voice_id(safe_text(account.get(key)))
-            if resolved in MINIMAX_KNOWN_LOCAL_VOICE_IDS:
-                return resolved
-        return ""
-    return safe_text(account.get("voice_id") or account.get("account_id"))
-
-
-def _load_env_file_value(path: Path, key: str) -> str:
-    if not path.exists():
-        return ""
-    try:
-        lines = path.read_text(encoding="utf-8-sig").splitlines()
-    except OSError:
-        return ""
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        name, value = line.split("=", 1)
-        if name.strip() != key:
-            continue
-        return value.strip().strip('"').strip("'")
-    return ""
-
-
-def load_minimax_api_key() -> str:
-    env_value = os.environ.get("MINIMAX_API_KEY", "").strip()
-    if env_value:
-        return env_value
-    for candidate in (MINIMAX_SKILL_ENV_PATH, Path.cwd() / ".env"):
-        value = _load_env_file_value(candidate, "MINIMAX_API_KEY")
-        if value:
-            return value
-    raise ValueError(f"找不到 MINIMAX_API_KEY。请配置系统环境变量，或写入：{MINIMAX_SKILL_ENV_PATH}")
-
-
-def dbfs_for_chunk(chunk: bytes, sample_width: int) -> float:
-    if not chunk:
-        return -math.inf
-    sample_count = len(chunk) // sample_width
-    if sample_count <= 0:
-        return -math.inf
-    total_square = 0
-    for offset in range(0, sample_count * sample_width, sample_width):
-        sample = chunk[offset : offset + sample_width]
-        if sample_width == 1:
-            value = sample[0] - 128
-        else:
-            value = int.from_bytes(sample, byteorder="little", signed=True)
-        total_square += value * value
-    rms = math.sqrt(total_square / sample_count)
-    if rms <= 0:
-        return -math.inf
-    peak = float(128 if sample_width == 1 else (1 << (8 * sample_width - 1)) - 1)
-    if peak <= 0:
-        return -math.inf
-    return 20.0 * math.log10(rms / peak)
-
-
-def silence_ranges_for_audio(
-    raw_audio: bytes,
-    *,
-    frame_count: int,
-    frame_rate: int,
-    bytes_per_frame: int,
-    sample_width: int,
-    threshold_db: float = DEFAULT_SILENCE_THRESHOLD_DB,
-    chunk_ms: int = DEFAULT_SILENCE_CHUNK_MS,
-) -> list[tuple[int, int, bool]]:
-    if chunk_ms <= 0:
-        raise ValueError("chunk_ms must be greater than 0")
-
-    chunk_frames = max(1, seconds_to_frames(chunk_ms / 1000.0, frame_rate))
-    chunks: list[tuple[int, int, bool]] = []
-    start_frame = 0
-    while start_frame < frame_count:
-        end_frame = min(frame_count, start_frame + chunk_frames)
-        start_byte = start_frame * bytes_per_frame
-        end_byte = end_frame * bytes_per_frame
-        chunk = raw_audio[start_byte:end_byte]
-        chunks.append((start_frame, end_frame, dbfs_for_chunk(chunk, sample_width) <= threshold_db))
-        start_frame = end_frame
-
-    if not chunks:
-        return []
-
-    ranges: list[tuple[int, int, bool]] = []
-    current_start, current_end, current_silence = chunks[0]
-    for chunk_start, chunk_end, is_silence in chunks[1:]:
-        if is_silence == current_silence:
-            current_end = chunk_end
-            continue
-        ranges.append((current_start, current_end, current_silence))
-        current_start, current_end, current_silence = chunk_start, chunk_end, is_silence
-    ranges.append((current_start, current_end, current_silence))
-    return ranges
-
-
-def compress_internal_silence(
-    audio_path: Path,
-    *,
-    threshold_db: float = DEFAULT_SILENCE_THRESHOLD_DB,
-    min_silence_ms: int = DEFAULT_MIN_SILENCE_MS,
-    keep_silence_ms: int = DEFAULT_KEEP_SILENCE_MS,
-    long_silence_ms: int = DEFAULT_LONG_SILENCE_MS,
-    long_keep_silence_ms: int = DEFAULT_LONG_SILENCE_KEEP_MS,
-    chunk_ms: int = DEFAULT_SILENCE_CHUNK_MS,
-) -> dict[str, Any]:
-    if min_silence_ms < keep_silence_ms:
-        return {"enabled": True, "changed": False, "reason": "min_silence_ms < keep_silence_ms"}
-    if long_silence_ms < min_silence_ms or long_keep_silence_ms < keep_silence_ms:
-        return {"enabled": True, "changed": False, "reason": "invalid long silence thresholds"}
-    if chunk_ms <= 0:
-        raise ValueError("静音修音参数错误：chunk_ms 必须大于 0。")
-
-    with wave.open(str(audio_path), "rb") as reader:
-        params = reader.getparams()
-        frame_rate = reader.getframerate()
-        frame_count = reader.getnframes()
-        channel_count = reader.getnchannels()
-        sample_width = reader.getsampwidth()
-        raw_audio = reader.readframes(frame_count)
-
-    if frame_rate <= 0 or frame_count <= 0:
-        return {"enabled": True, "changed": False, "reason": "empty audio"}
-    if sample_width not in {1, 2, 3, 4}:
-        return {"enabled": True, "changed": False, "reason": f"unsupported sample width {sample_width}"}
-
-    bytes_per_frame = channel_count * sample_width
-    min_silence_frames = seconds_to_frames(min_silence_ms / 1000.0, frame_rate)
-    keep_silence_frames = seconds_to_frames(keep_silence_ms / 1000.0, frame_rate)
-    long_silence_frames = seconds_to_frames(long_silence_ms / 1000.0, frame_rate)
-    long_keep_silence_frames = seconds_to_frames(long_keep_silence_ms / 1000.0, frame_rate)
-    ranges = silence_ranges_for_audio(
-        raw_audio,
-        frame_count=frame_count,
-        frame_rate=frame_rate,
-        bytes_per_frame=bytes_per_frame,
-        sample_width=sample_width,
-        threshold_db=threshold_db,
-        chunk_ms=chunk_ms,
-    )
-
-    if not ranges:
-        return {"enabled": True, "changed": False, "reason": "no chunks"}
-
-    output_parts: list[bytes] = []
-    compressed: list[dict[str, Any]] = []
-    last_index = len(ranges) - 1
-    for index, (start, end, is_silence) in enumerate(ranges):
-        duration_frames = end - start
-        keep_frames = duration_frames
-        if is_silence and 0 < index < last_index and duration_frames > min_silence_frames:
-            target_frames = long_keep_silence_frames if duration_frames > long_silence_frames else keep_silence_frames
-            keep_frames = min(duration_frames, target_frames)
-            compressed.append(
-                {
-                    "start_seconds": round(start / frame_rate, 3),
-                    "original_ms": round(duration_frames * 1000 / frame_rate),
-                    "kept_ms": round(keep_frames * 1000 / frame_rate),
-                }
-            )
-        start_byte = start * bytes_per_frame
-        end_byte = (start + keep_frames) * bytes_per_frame
-        output_parts.append(raw_audio[start_byte:end_byte])
-
-    if not compressed:
-        return {
-            "enabled": True,
-            "changed": False,
-            "threshold_db": threshold_db,
-            "min_silence_ms": min_silence_ms,
-            "keep_silence_ms": keep_silence_ms,
-            "long_silence_ms": long_silence_ms,
-            "long_keep_silence_ms": long_keep_silence_ms,
-            "compressed_count": 0,
-        }
-
-    fixed_audio = b"".join(output_parts)
-    temp_path = audio_path.with_name(f"{audio_path.stem}.silencefix.tmp{audio_path.suffix}")
-    try:
-        with wave.open(str(temp_path), "wb") as writer:
-            writer.setparams(params)
-            writer.writeframes(fixed_audio)
-        temp_path.replace(audio_path)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
-
-    original_ms = round(frame_count * 1000 / frame_rate)
-    fixed_frames = len(fixed_audio) // bytes_per_frame
-    fixed_ms = round(fixed_frames * 1000 / frame_rate)
-    return {
-        "enabled": True,
-        "changed": True,
-        "threshold_db": threshold_db,
-        "min_silence_ms": min_silence_ms,
-        "keep_silence_ms": keep_silence_ms,
-        "long_silence_ms": long_silence_ms,
-        "long_keep_silence_ms": long_keep_silence_ms,
-        "compressed_count": len(compressed),
-        "compressed": compressed,
-        "original_ms": original_ms,
-        "fixed_ms": fixed_ms,
-        "removed_ms": original_ms - fixed_ms,
-    }
-
-
-def prepend_silence(audio_path: Path, *, silence_ms: int = DEFAULT_LEADING_SILENCE_MS) -> dict[str, Any]:
-    if silence_ms <= 0:
-        return {"enabled": True, "changed": False, "reason": "silence_ms <= 0"}
-
-    with wave.open(str(audio_path), "rb") as reader:
-        params = reader.getparams()
-        frame_rate = reader.getframerate()
-        frame_count = reader.getnframes()
-        channel_count = reader.getnchannels()
-        sample_width = reader.getsampwidth()
-        raw_audio = reader.readframes(frame_count)
-
-    if frame_rate <= 0 or channel_count <= 0 or sample_width <= 0:
-        return {"enabled": True, "changed": False, "reason": "invalid wav params"}
-
-    silence_frames = seconds_to_frames(silence_ms / 1000.0, frame_rate)
-    if silence_frames <= 0:
-        return {"enabled": True, "changed": False, "reason": "silence too short"}
-
-    silent_prefix = b"\x00" * silence_frames * channel_count * sample_width
-    temp_path = audio_path.with_name(f"{audio_path.stem}.leadingsilence.tmp{audio_path.suffix}")
-    try:
-        with wave.open(str(temp_path), "wb") as writer:
-            writer.setparams(params)
-            writer.writeframes(silent_prefix + raw_audio)
-        temp_path.replace(audio_path)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
-
-    return {
-        "enabled": True,
-        "changed": True,
-        "silence_ms": round(silence_frames * 1000 / frame_rate),
-    }
-
-
-def normalize_generated_voice_silence(
-    audio_path: Path,
-    *,
-    threshold_db: float = DEFAULT_SILENCE_THRESHOLD_DB,
-    chunk_ms: int = DEFAULT_SILENCE_CHUNK_MS,
-    leading_min_ms: int = DEFAULT_LEADING_SILENCE_MS,
-    leading_trim_limit_ms: int = 300,
-    leading_keep_ms: int = DEFAULT_MAX_LEADING_SILENCE_MS,
-    trailing_trim_limit_ms: int = DEFAULT_TRAILING_SILENCE_LIMIT_MS,
-    trailing_keep_ms: int = DEFAULT_TRAILING_SILENCE_KEEP_MS,
-    internal_trim_limit_ms: int = DEFAULT_MIN_SILENCE_MS,
-    internal_keep_ms: int = DEFAULT_KEEP_SILENCE_MS,
-    internal_long_limit_ms: int = DEFAULT_LONG_SILENCE_MS,
-    internal_long_keep_ms: int = DEFAULT_LONG_SILENCE_KEEP_MS,
-) -> dict[str, Any]:
-    if chunk_ms <= 0:
-        raise ValueError("chunk_ms must be greater than 0")
-
-    with wave.open(str(audio_path), "rb") as reader:
-        params = reader.getparams()
-        frame_rate = reader.getframerate()
-        frame_count = reader.getnframes()
-        channel_count = reader.getnchannels()
-        sample_width = reader.getsampwidth()
-        raw_audio = reader.readframes(frame_count)
-
-    if frame_rate <= 0 or frame_count <= 0:
-        return {"enabled": True, "changed": False, "reason": "empty audio"}
-    if channel_count <= 0 or sample_width not in {1, 2, 3, 4}:
-        return {"enabled": True, "changed": False, "reason": "unsupported wav params"}
-
-    bytes_per_frame = channel_count * sample_width
-    ranges = silence_ranges_for_audio(
-        raw_audio,
-        frame_count=frame_count,
-        frame_rate=frame_rate,
-        bytes_per_frame=bytes_per_frame,
-        sample_width=sample_width,
-        threshold_db=threshold_db,
-        chunk_ms=chunk_ms,
-    )
-    if not ranges:
-        return {"enabled": True, "changed": False, "reason": "no chunks"}
-
-    leading_min_frames = seconds_to_frames(leading_min_ms / 1000.0, frame_rate)
-    leading_trim_limit_frames = seconds_to_frames(leading_trim_limit_ms / 1000.0, frame_rate)
-    leading_keep_frames = seconds_to_frames(leading_keep_ms / 1000.0, frame_rate)
-    trailing_trim_limit_frames = seconds_to_frames(trailing_trim_limit_ms / 1000.0, frame_rate)
-    trailing_keep_frames = seconds_to_frames(trailing_keep_ms / 1000.0, frame_rate)
-    internal_trim_limit_frames = seconds_to_frames(internal_trim_limit_ms / 1000.0, frame_rate)
-    internal_keep_frames = seconds_to_frames(internal_keep_ms / 1000.0, frame_rate)
-    internal_long_limit_frames = seconds_to_frames(internal_long_limit_ms / 1000.0, frame_rate)
-    internal_long_keep_frames = seconds_to_frames(internal_long_keep_ms / 1000.0, frame_rate)
-
-    output_parts: list[bytes] = []
-    changes: list[dict[str, Any]] = []
-    last_index = len(ranges) - 1
-    leading_kept_frames = 0
-    for index, (start, end, is_silence) in enumerate(ranges):
-        duration_frames = end - start
-        keep_frames = duration_frames
-        reason = ""
-        if is_silence and index == 0:
-            leading_kept_frames = duration_frames
-            if duration_frames > leading_trim_limit_frames:
-                keep_frames = min(duration_frames, leading_keep_frames)
-                leading_kept_frames = keep_frames
-                reason = "leading"
-        elif is_silence and index == last_index:
-            if duration_frames > trailing_trim_limit_frames:
-                keep_frames = min(duration_frames, trailing_keep_frames)
-                reason = "trailing"
-        elif is_silence and duration_frames > internal_trim_limit_frames:
-            target_frames = internal_long_keep_frames if duration_frames > internal_long_limit_frames else internal_keep_frames
-            keep_frames = min(duration_frames, target_frames)
-            reason = "internal_long" if duration_frames > internal_long_limit_frames else "internal"
-
-        if reason and keep_frames < duration_frames:
-            changes.append(
-                {
-                    "type": reason,
-                    "start_seconds": round(start / frame_rate, 3),
-                    "original_ms": round(duration_frames * 1000 / frame_rate),
-                    "kept_ms": round(keep_frames * 1000 / frame_rate),
-                }
-            )
-        start_byte = start * bytes_per_frame
-        end_byte = (start + keep_frames) * bytes_per_frame
-        output_parts.append(raw_audio[start_byte:end_byte])
-
-    prefix_frames = 0
-    if leading_kept_frames < leading_min_frames:
-        prefix_frames = leading_min_frames - leading_kept_frames
-        output_parts.insert(0, b"\x00" * prefix_frames * bytes_per_frame)
-
-    if not changes and prefix_frames <= 0:
-        return {
-            "enabled": True,
-            "changed": False,
-            "threshold_db": threshold_db,
-            "changed_count": 0,
-        }
-
-    fixed_audio = b"".join(output_parts)
-    temp_path = audio_path.with_name(f"{audio_path.stem}.voicefix.tmp{audio_path.suffix}")
-    try:
-        with wave.open(str(temp_path), "wb") as writer:
-            writer.setparams(params)
-            writer.writeframes(fixed_audio)
-        temp_path.replace(audio_path)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
-
-    original_ms = round(frame_count * 1000 / frame_rate)
-    fixed_frames = len(fixed_audio) // bytes_per_frame
-    fixed_ms = round(fixed_frames * 1000 / frame_rate)
-    return {
-        "enabled": True,
-        "changed": True,
-        "threshold_db": threshold_db,
-        "changed_count": len(changes) + (1 if prefix_frames > 0 else 0),
-        "changes": changes,
-        "prepended_ms": round(prefix_frames * 1000 / frame_rate),
-        "original_ms": original_ms,
-        "fixed_ms": fixed_ms,
-        "removed_ms": original_ms - fixed_ms,
-    }
 
 
 class WorkflowService:
@@ -748,6 +363,7 @@ class WorkflowService:
         output_dir: str | Path | None = None,
         start_service_if_needed: bool = True,
         progress_hook: Callable[[str], None] | None = None,
+        cancel_event: "threading.Event | None" = None,
     ) -> WorkflowRunResult:
         logs: list[str] = []
         def emit(message: str) -> None:
@@ -782,8 +398,14 @@ class WorkflowService:
         else:
             voice_id = self._prepare_minimax_voice(voice_id, logs=logs, progress_hook=progress_hook)
         generated = 0
+        cancelled = False
         failures: list[str] = []
         for position, job in enumerate(pending, start=1):
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
+                remaining = len(pending) - position + 1
+                emit(f"[取消] 用户取消，跳过剩余 {remaining} 条。已完成 {generated} 条。")
+                break
             try:
                 emit(f"[生成 {position}/{len(pending)}] {job.product_name} / {job.block['block_label']}")
                 overwrite_expired = self._has_existing_stale_voice_file(project_id, job=job, account=account)
@@ -809,12 +431,17 @@ class WorkflowService:
             except Exception as exc:
                 failures.append(f"{job.product_name} / {job.block['block_label']}：{exc}")
                 emit(f"[失败] {failures[-1]}")
-        status = "success" if not failures else "partial"
+        if cancelled:
+            status = "cancelled"
+        elif failures:
+            status = "partial"
+        else:
+            status = "success"
         self.db.log_event(
             project_id,
             "voice_generate",
             status,
-            f"{voice_provider_label(provider)} 配音生成完成：新增 {generated}，失败 {len(failures)}，跳过 {len(existing)}",
+            f"{voice_provider_label(provider)} 配音{'已取消' if cancelled else '生成完成'}：新增 {generated}，失败 {len(failures)}，跳过 {len(existing)}",
             [{"item_kind": "voice", "status": "failed", "message": item} for item in failures],
         )
         return WorkflowRunResult(
@@ -2237,108 +1864,6 @@ def run_subprocess_text(cmd: list[str]) -> WorkflowRunResult:
     )
 
 
-def format_jianying_run_stdout(stdout: str) -> str:
-    payload = parse_json_object(stdout)
-    if not isinstance(payload, dict):
-        return stdout
-
-    status = safe_text(payload.get("status"))
-    if status == "failed":
-        error = safe_text(payload.get("error")) or "未知错误"
-        return f"生成失败：{error}\n"
-
-    lines: list[str] = []
-    draft_name = safe_text(payload.get("draft_name"))
-    draft_dir = safe_text(payload.get("draft_dir"))
-    if draft_name:
-        lines.append(f"草稿名称：{draft_name}")
-    if draft_dir:
-        lines.append(f"草稿已写入：{draft_dir}")
-
-    total_items = int(payload.get("total_items") or 0)
-    product_items = int(payload.get("product_items") or 0)
-    if total_items:
-        lines.append(f"本次共拼接 {total_items} 段素材，其中商品推荐 {product_items} 段。")
-
-    total_duration = float(payload.get("total_duration_sec") or 0)
-    if total_duration > 0:
-        lines.append(f"草稿总时长约 {format_duration_cn(total_duration)}。")
-
-    if payload.get("has_intro_video"):
-        intro_duration = float(payload.get("intro_duration_sec") or 0)
-        suffix = f"，时长约 {format_duration_cn(intro_duration)}" if intro_duration > 0 else ""
-        lines.append(f"已使用引言成片视频{suffix}。")
-
-    display_video_segments = int(payload.get("display_video_segments") or 0)
-    if display_video_segments:
-        lines.append(f"已插入 {display_video_segments} 段商品展示视频。")
-
-    price_transition_title_segments = int(payload.get("price_transition_title_segments") or 0)
-    if price_transition_title_segments:
-        lines.append(f"已插入 {price_transition_title_segments} 段价格过渡标题。")
-
-    subtitle_segments = int(payload.get("subtitle_segments") or 0)
-    if subtitle_segments:
-        lines.append(f"已生成 {subtitle_segments} 段字幕。")
-
-    image_fallback = payload.get("image_fallback")
-    if isinstance(image_fallback, dict):
-        resolved_count = int(image_fallback.get("resolved_count") or 0)
-        missing_uids = [safe_text(item) for item in image_fallback.get("missing_uids") or [] if safe_text(item)]
-        if resolved_count:
-            lines.append(f"有 {resolved_count} 个商品图片已从图片索引自动补齐。")
-        if missing_uids:
-            lines.append(f"仍有 {len(missing_uids)} 个商品没有找到可用图片：{'、'.join(missing_uids[:8])}")
-
-    skipped_entries = payload.get("skipped_entries")
-    if isinstance(skipped_entries, list) and skipped_entries:
-        lines.append(f"有 {len(skipped_entries)} 个条目因缺少素材被跳过，请检查口播稿清单。")
-
-    skipped_display_videos = payload.get("skipped_display_videos")
-    if isinstance(skipped_display_videos, list) and skipped_display_videos:
-        lines.append(f"有 {len(skipped_display_videos)} 个商品展示视频因文件缺失或格式不支持被跳过：")
-        for item in skipped_display_videos[:8]:
-            name = safe_text(item.get("product_name")) or safe_text(item.get("product_uid")) or f"条目 {item.get('index')}"
-            reason = safe_text(item.get("reason"))
-            lines.append(f"  - {name}（{reason}）")
-        if len(skipped_display_videos) > 8:
-            lines.append(f"  ……等共 {len(skipped_display_videos)} 个")
-
-    missing_subtitle_texts = payload.get("missing_subtitle_texts")
-    if isinstance(missing_subtitle_texts, list) and missing_subtitle_texts:
-        lines.append(f"有 {len(missing_subtitle_texts)} 段音频缺少字幕文本，已跳过字幕生成。")
-
-    if not lines:
-        return stdout
-    lines.append("剪映草稿生成完成，可以在剪映草稿列表中打开。")
-    return "\n".join(lines) + "\n"
-
-
-def parse_json_object(text: str) -> Any:
-    raw = safe_text(text).strip()
-    if not raw:
-        return None
-    candidates = [raw]
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start >= 0 and end > start:
-        candidates.append(raw[start : end + 1])
-    for candidate in candidates:
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-    return None
-
-
-def format_duration_cn(seconds: float) -> str:
-    total_seconds = max(0, int(round(seconds)))
-    minutes, secs = divmod(total_seconds, 60)
-    if minutes:
-        return f"{minutes} 分 {secs} 秒"
-    return f"{secs} 秒"
-
-
 def decode_process_output(value: bytes | str | None) -> str:
     if value is None:
         return ""
@@ -2354,8 +1879,18 @@ def decode_process_output(value: bytes | str | None) -> str:
 
 
 class JsonHttpClient:
-    def __init__(self, timeout: float = 60.0) -> None:
+    def __init__(self, timeout: float = 60.0, retries: int = 3) -> None:
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
         self.timeout = timeout
+        self._session = requests.Session()
+        self._requests = requests
+        retry = Retry(total=retries, backoff_factor=0.5, status_forcelist=[502, 503, 504])
+        adapter = HTTPAdapter(max_retries=retry)
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
 
     def request(
         self,
@@ -2366,29 +1901,30 @@ class JsonHttpClient:
         json_payload: Any | None = None,
         headers: dict[str, str] | None = None,
     ) -> Any:
-        if params:
-            query = urllib.parse.urlencode([(key, str(value)) for key, value in params.items()], doseq=True)
-            url = f"{url}?{query}"
-        body: bytes | None = None
-        request_headers: dict[str, str] = dict(headers or {})
-        if json_payload is not None:
-            body = json.dumps(json_payload, ensure_ascii=False).encode("utf-8")
-            request_headers.setdefault("Content-Type", "application/json; charset=utf-8")
-        request = urllib.request.Request(url=url, data=body, method=method.upper(), headers=request_headers)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                raw = response.read()
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="ignore")
-            raise ValueError(f"HTTP {exc.code}: {detail or exc.reason}") from exc
-        except urllib.error.URLError as exc:
-            raise ValueError(f"网络请求失败: {exc.reason}") from exc
-        if not raw:
+            response = self._session.request(
+                method.upper(),
+                url,
+                params=params,
+                json=json_payload,
+                headers=headers,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+        except self._requests.exceptions.HTTPError as exc:
+            detail = exc.response.text if exc.response is not None else str(exc)
+            code = exc.response.status_code if exc.response is not None else 0
+            raise ValueError(f"HTTP {code}: {detail}") from exc
+        except self._requests.exceptions.ConnectionError as exc:
+            raise ValueError(f"网络连接失败: {exc}") from exc
+        except self._requests.exceptions.Timeout as exc:
+            raise ValueError(f"请求超时: {exc}") from exc
+        if not response.content:
             return None
         try:
-            return json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError:
-            return raw.decode("utf-8", errors="ignore")
+            return response.json()
+        except ValueError:
+            return response.text
 
     def get(self, url: str, *, params: dict[str, Any] | None = None) -> Any:
         return self.request("GET", url, params=params)
@@ -2425,479 +1961,12 @@ def standalone_voice_filename(*, voice_label: str, source_label: str = "", text:
     return safe_path_component("-".join(part for part in parts if safe_text(part))) + ".wav"
 
 
-def markdown_to_voice_text(markdown: str) -> str:
-    text = safe_text(markdown)
-    text = re.sub(r"\A---\s*\n.*?\n---\s*\n?", "", text, flags=re.S)
-    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
-    text = re.sub(r"```.*?```", "", text, flags=re.S)
-    text = re.sub(r"`([^`]+)`", r"\1", text)
-    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
-    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
-    cleaned_lines: list[str] = []
-    for line in text.splitlines():
-        line = re.sub(r"^\s{0,3}#{1,6}\s*", "", line)
-        line = re.sub(r"^\s{0,3}>\s?", "", line)
-        line = re.sub(r"^\s*[-*+]\s+", "", line)
-        line = re.sub(r"^\s*\d+[.)、]\s+", "", line)
-        line = re.sub(r"[*_~]{1,3}", "", line)
-        line = line.strip()
-        if line:
-            cleaned_lines.append(line)
-    return "\n".join(cleaned_lines).strip()
 
 
-def markdown_file_to_voice_text(path: str | Path) -> str:
-    md_path = Path(path)
-    if md_path.suffix.casefold() != ".md":
-        raise ValueError("只支持选择 MD 文档。")
-    if not md_path.exists():
-        raise ValueError(f"MD 文档不存在：{md_path}")
-    if not md_path.is_file():
-        raise ValueError(f"MD 路径不是文件：{md_path}")
-    return markdown_to_voice_text(md_path.read_text(encoding="utf-8-sig"))
 
 
-def subtitle_manifest_entries(payload: Any) -> list[dict[str, Any]]:
-    if isinstance(payload, dict):
-        raw_entries = payload.get("entries") or payload.get("items") or []
-    elif isinstance(payload, list):
-        raw_entries = payload
-    else:
-        raw_entries = []
-    entries = [entry for entry in raw_entries if isinstance(entry, dict)]
-    return sorted(entries, key=lambda entry: int(entry.get("order_index") or entry.get("section_order") or 0))
 
 
-def subtitle_entry_label(entry: dict[str, Any]) -> str:
-    parts = [
-        f"#{entry.get('order_index') or entry.get('section_order')}" if entry.get("order_index") or entry.get("section_order") else "",
-        safe_text(entry.get("section") or entry.get("type")),
-        safe_text(entry.get("product_uid")),
-        safe_text(entry.get("product_name") or entry.get("source_label")),
-    ]
-    return " ".join(part for part in parts if part) or "未命名字幕段"
-
-
-def probe_media_duration_seconds(path: Path) -> float:
-    if path.suffix.casefold() == ".wav":
-        try:
-            with wave.open(str(path), "rb") as reader:
-                frame_rate = reader.getframerate()
-                frame_count = reader.getnframes()
-            if frame_rate > 0 and frame_count > 0:
-                return frame_count / frame_rate
-        except wave.Error:
-            pass
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "json",
-        str(path),
-    ]
-    completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="ignore", check=False)
-    if completed.returncode != 0:
-        raise ValueError(f"无法读取媒体时长：{path}\n{completed.stderr.strip()}")
-    payload = json.loads(completed.stdout or "{}")
-    duration_text = safe_text(payload.get("format", {}).get("duration"))
-    if not duration_text:
-        raise ValueError(f"无法读取媒体时长：{path}")
-    duration = float(duration_text)
-    if duration <= 0:
-        raise ValueError(f"媒体时长必须大于 0：{path}")
-    return duration
-
-
-SUBTITLE_BREAK_RE = re.compile(r"[，,。!！?？；;：:]|……|…")
-SUBTITLE_DROP_PUNCT_RE = re.compile(r"[，,。!！?？；;：:]|……|…")
-SUBTITLE_ALIGN_DROP_RE = re.compile(r"[\s，,。.!！?？；;：:、/\\\-—_~·`\"“”'‘’（）()【】\[\]{}《》<>]+|……|…")
-
-
-# 语义断行：分句仍超长时二次切分用，避免切在数字+单位、英文型号、“的/地/得”结构中间，并优先在连词/转折词前断。
-_SUBTITLE_BREAK_CONJUNCTIONS = (
-    "但是", "不过", "所以", "因为", "因此", "而且", "并且", "于是",
-    "然后", "其实", "另外", "如果", "虽然", "同时", "比如", "除了",
-    "不仅", "只是", "就是", "这样", "那么",
-)
-_SUBTITLE_CJK_DIGITS = set("〇零一二两三四五六七八九十百千万亿点")
-_SUBTITLE_NO_BREAK_CHARS = set("的地得")  # 这些字前后都不断，保住偏正/状中结构
-
-
-def _subtitle_is_digit(ch: str) -> bool:
-    return ch.isdigit() or ch in _SUBTITLE_CJK_DIGITS
-
-
-def _subtitle_is_alpha(ch: str) -> bool:
-    return ch.isascii() and ch.isalpha()
-
-
-def _subtitle_can_break(left: str, right: str) -> bool:
-    """left 落行尾、right 落下一行行首时，这里是否允许断开。"""
-    if not left or not right:
-        return True
-    if left in _SUBTITLE_NO_BREAK_CHARS or right in _SUBTITLE_NO_BREAK_CHARS:
-        return False
-    if (left == "." and _subtitle_is_digit(right)) or (_subtitle_is_digit(left) and right == "."):
-        return False  # 小数：6.0
-    left_num, right_num = _subtitle_is_digit(left), _subtitle_is_digit(right)
-    left_alpha, right_alpha = _subtitle_is_alpha(left), _subtitle_is_alpha(right)
-    if left_num and (right_num or right_alpha or not right.isascii()):
-        return False  # 数字串 / 数字+单位量词：20bar、60到65度、4种、三十秒
-    if left_alpha and (right_alpha or right_num):
-        return False  # 英文单词 / 型号：App、LDAC、A3
-    return True
-
-
-def _subtitle_choose_cut(text: str, lo: int, hi: int, prefer: int) -> int | None:
-    """在 [lo, hi] 区间里挑一个合法断点，优先连词前，其次离 prefer 最近、靠后。"""
-    candidates = [cut for cut in range(max(lo, 1), min(hi, len(text) - 1) + 1)]
-    if not candidates:
-        return None
-    conj_cuts = [
-        cut
-        for cut in candidates
-        if _subtitle_can_break(text[cut - 1], text[cut])
-        and any(text.startswith(word, cut) for word in _SUBTITLE_BREAK_CONJUNCTIONS)
-    ]
-    pool = conj_cuts or [cut for cut in candidates if _subtitle_can_break(text[cut - 1], text[cut])]
-    if not pool:
-        return None
-    return min(pool, key=lambda cut: (abs(cut - prefer), -cut))
-
-
-def _break_long_clause(clause: str, max_chars: int) -> list[str]:
-    """把一条无句标点的超长分句按语义切成多行，每行尽量 ≤ max_chars。"""
-    min_head = min(4, max_chars)
-    lines: list[str] = []
-    rest = clause
-    while len(rest) > max_chars:
-        if len(rest) <= max_chars * 2:
-            # 再切一次就能放下：在中点附近断，让两行更均衡（下行不短于上行）
-            lo = max(min_head, len(rest) - max_chars)
-            hi = min(max_chars, len(rest) - min_head)
-            cut = _subtitle_choose_cut(rest, lo, hi, (len(rest) + 1) // 2)
-        else:
-            cut = _subtitle_choose_cut(rest, min_head, max_chars, max_chars)
-        if not cut:
-            cut = max_chars  # 兜底：实在找不到合法断点才硬切
-        lines.append(rest[:cut])
-        rest = rest[cut:]
-    if rest:
-        lines.append(rest)
-    return lines
-
-
-def split_subtitle_text(text: str, *, max_chars: int = 24) -> list[str]:
-    body = re.sub(r"\s+", "", safe_text(text))
-    if not body:
-        return []
-    clauses = [SUBTITLE_DROP_PUNCT_RE.sub("", item) for item in SUBTITLE_BREAK_RE.split(body)]
-    clauses = [item for item in clauses if item]
-    chunks: list[str] = []
-    for clause in clauses or [body]:
-        if len(clause) > max_chars:
-            chunks.extend(_break_long_clause(clause, max_chars))
-            continue
-        chunks.append(clause)
-    return [chunk for chunk in chunks if chunk]
-
-
-def distribute_subtitle_text(text: str, start_sec: float, duration_sec: float) -> list[tuple[float, float, str]]:
-    chunks = split_subtitle_text(text)
-    if not chunks:
-        return []
-    total_weight = sum(max(len(chunk), 1) for chunk in chunks)
-    cursor = start_sec
-    segments: list[tuple[float, float, str]] = []
-    for index, chunk in enumerate(chunks):
-        if index == len(chunks) - 1:
-            end = start_sec + duration_sec
-        else:
-            end = cursor + duration_sec * (max(len(chunk), 1) / total_weight)
-        if end <= cursor:
-            end = cursor + 0.1
-        segments.append((cursor, end, chunk))
-        cursor = end
-    return segments
-
-
-def normalize_subtitle_alignment_text(text: str) -> str:
-    return SUBTITLE_ALIGN_DROP_RE.sub("", safe_text(text)).casefold()
-
-
-def _expand_asr_unit(start: float, end: float, text: str) -> list[dict[str, Any]]:
-    clean = normalize_subtitle_alignment_text(text)
-    if not clean:
-        return []
-    start = max(0.0, float(start or 0.0))
-    end = max(start + 0.001, float(end or start))
-    step = (end - start) / len(clean)
-    return [
-        {
-            "start": start + step * index,
-            "end": start + step * (index + 1),
-            "text": char,
-        }
-        for index, char in enumerate(clean)
-    ]
-
-
-def subtitle_asr_python_path() -> Path:
-    configured = safe_text(os.environ.get("BWORKFLOW_ASR_PYTHON"))
-    return Path(configured) if configured else DEFAULT_SUBTITLE_ASR_PYTHON
-
-
-def run_subtitle_asr_worker(
-    jobs: list[dict[str, Any]],
-    *,
-    model_name: str,
-    language: str,
-    beam_size: int,
-    workers: int,
-) -> list[list[dict[str, Any]]]:
-    python_exe = subtitle_asr_python_path()
-    if not python_exe.exists():
-        raise ValueError(
-            f"独立 ASR 环境不存在：{python_exe}\n"
-            "请运行 scripts\\setup_subtitle_asr.ps1 安装项目专用 Python 3.11 环境。"
-        )
-    if not DEFAULT_SUBTITLE_ASR_WORKER.exists():
-        raise ValueError(f"ASR 子进程脚本不存在：{DEFAULT_SUBTITLE_ASR_WORKER}")
-
-    payload = {
-        "model_name": model_name,
-        "language": language,
-        "beam_size": max(1, int(beam_size or 1)),
-        "cpu_threads": max(1, int(workers or 1)),
-        "jobs": [{"audio_path": safe_text(job.get("audio_path"))} for job in jobs],
-    }
-    with tempfile.TemporaryDirectory(prefix="bworkflow-asr-") as temp_dir:
-        request_path = Path(temp_dir) / "request.json"
-        response_path = Path(temp_dir) / "response.json"
-        request_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        completed = subprocess.run(
-            [str(python_exe), str(DEFAULT_SUBTITLE_ASR_WORKER), str(request_path), str(response_path)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=3600,
-            creationflags=creationflags,
-        )
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "").strip()
-            raise ValueError(f"独立 ASR 子进程失败（退出码 {completed.returncode}）：{detail or '没有错误输出'}")
-        if not response_path.exists():
-            raise ValueError("独立 ASR 子进程没有生成结果文件。")
-        response = json.loads(response_path.read_text(encoding="utf-8-sig"))
-    if not isinstance(response, dict) or not isinstance(response.get("results"), list):
-        raise ValueError("独立 ASR 子进程返回格式无效。")
-    results = response["results"]
-    if len(results) != len(jobs):
-        raise ValueError(f"独立 ASR 返回条数不匹配：任务 {len(jobs)}，结果 {len(results)}。")
-    return [result if isinstance(result, list) else [] for result in results]
-
-
-def run_subtitle_alignment_asr(
-    audio_path: str | Path,
-    *,
-    model_name: str = DEFAULT_SUBTITLE_ASR_MODEL,
-    language: str = DEFAULT_SUBTITLE_ASR_LANGUAGE,
-    beam_size: int = DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
-) -> list[dict[str, Any]]:
-    path = Path(audio_path)
-    if not path.exists():
-        raise ValueError(f"音频文件不存在：{path}")
-    return run_subtitle_asr_worker(
-        [{"audio_path": str(path)}],
-        model_name=model_name,
-        language=language,
-        beam_size=beam_size,
-        workers=1,
-    )[0]
-
-
-def subtitle_speech_ranges(audio_path: str | Path) -> list[tuple[float, float]]:
-    path = Path(audio_path)
-    if path.suffix.casefold() != ".wav":
-        return []
-    try:
-        with wave.open(str(path), "rb") as reader:
-            frame_rate = reader.getframerate()
-            frame_count = reader.getnframes()
-            channel_count = reader.getnchannels()
-            sample_width = reader.getsampwidth()
-            raw_audio = reader.readframes(frame_count)
-    except wave.Error:
-        return []
-    if frame_rate <= 0 or frame_count <= 0 or channel_count <= 0 or sample_width not in {1, 2, 3, 4}:
-        return []
-    bytes_per_frame = channel_count * sample_width
-    ranges = silence_ranges_for_audio(
-        raw_audio,
-        frame_count=frame_count,
-        frame_rate=frame_rate,
-        bytes_per_frame=bytes_per_frame,
-        sample_width=sample_width,
-        threshold_db=DEFAULT_SILENCE_THRESHOLD_DB,
-        chunk_ms=DEFAULT_SILENCE_CHUNK_MS,
-    )
-    return [(start / frame_rate, end / frame_rate) for start, end, is_silence in ranges if not is_silence]
-
-
-def snap_subtitle_segments_to_speech(
-    audio_path: str | Path,
-    segments: list[tuple[float, float, str]],
-    offset_sec: float,
-    *,
-    snap_window_sec: float = DEFAULT_SUBTITLE_SPEECH_SNAP_WINDOW_SEC,
-) -> list[tuple[float, float, str]]:
-    speech_ranges = subtitle_speech_ranges(audio_path)
-    if not speech_ranges or not segments:
-        return segments
-
-    offset = max(0.0, float(offset_sec or 0.0))
-    snapped: list[tuple[float, float, str]] = []
-    for start, end, text in segments:
-        local_start = max(0.0, start - offset)
-        snapped_start = start
-        for speech_start, speech_end in speech_ranges:
-            if speech_end <= local_start:
-                continue
-            if speech_start <= local_start < speech_end:
-                break
-            if 0 <= speech_start - local_start <= snap_window_sec:
-                snapped_start = offset + speech_start
-            break
-        if end <= snapped_start:
-            end = snapped_start + 0.1
-        snapped.append((snapped_start, end, text))
-
-    adjusted = snapped[:]
-    for index in range(len(adjusted) - 1):
-        start, end, text = adjusted[index]
-        next_start = adjusted[index + 1][0]
-        max_end = next_start - DEFAULT_SUBTITLE_OVERLAP_GAP_SEC
-        if end > max_end:
-            end = max(start + 0.1, max_end)
-            adjusted[index] = (start, end, text)
-    return adjusted
-
-
-def align_subtitle_text_with_asr(
-    audio_path: str | Path,
-    text: str,
-    offset_sec: float,
-    *,
-    model_name: str = DEFAULT_SUBTITLE_ASR_MODEL,
-    language: str = DEFAULT_SUBTITLE_ASR_LANGUAGE,
-    beam_size: int = DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
-) -> list[tuple[float, float, str]]:
-    chunks = split_subtitle_text(text)
-    if not chunks:
-        return []
-    units = run_subtitle_alignment_asr(audio_path, model_name=model_name, language=language, beam_size=beam_size)
-    return align_subtitle_text_with_units(audio_path, chunks, units, offset_sec)
-
-
-def align_subtitle_text_with_units(
-    audio_path: str | Path,
-    chunks: list[str],
-    units: list[dict[str, Any]],
-    offset_sec: float,
-) -> list[tuple[float, float, str]]:
-    if not units:
-        raise ValueError(f"ASR 未识别到可对齐语音：{audio_path}")
-
-    normalized_lengths = [len(normalize_subtitle_alignment_text(chunk)) for chunk in chunks]
-    if sum(normalized_lengths) <= 0:
-        return []
-
-    unit_index = 0
-    offset = max(0.0, float(offset_sec or 0.0))
-    aligned: list[tuple[float, float, str]] = []
-    for index, chunk in enumerate(chunks):
-        remaining_chunks = len(chunks) - index - 1
-        available = len(units) - unit_index
-        if available <= 0:
-            start = aligned[-1][1] if aligned else offset
-            aligned.append((start, start + 0.1, chunk))
-            continue
-        if index == len(chunks) - 1:
-            take = available
-        else:
-            target_len = max(normalized_lengths[index], 1)
-            take = min(target_len, max(1, available - remaining_chunks))
-        start_unit = units[unit_index]
-        end_unit = units[min(len(units) - 1, unit_index + take - 1)]
-        start = offset + float(start_unit["start"])
-        end = offset + float(end_unit["end"])
-        if end <= start:
-            end = start + 0.1
-        aligned.append((start, end, chunk))
-        unit_index += take
-    return snap_subtitle_segments_to_speech(audio_path, aligned, offset)
-
-
-def align_subtitle_jobs_with_asr(
-    jobs: list[dict[str, Any]],
-    *,
-    model_name: str = DEFAULT_SUBTITLE_ASR_MODEL,
-    language: str = DEFAULT_SUBTITLE_ASR_LANGUAGE,
-    beam_size: int = DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
-    workers: int = DEFAULT_SUBTITLE_ASR_WORKERS,
-) -> list[tuple[float, float, str]]:
-    if not jobs:
-        return []
-    unit_results = run_subtitle_asr_worker(
-        jobs,
-        model_name=model_name,
-        language=language,
-        beam_size=beam_size,
-        workers=workers,
-    )
-    merged: list[tuple[float, float, str]] = []
-    for index, (job, units) in enumerate(zip(jobs, unit_results)):
-        label = safe_text(job.get("label")) or f"字幕段 {index + 1}"
-        chunks = split_subtitle_text(safe_text(job.get("text")))
-        try:
-            merged.extend(
-                align_subtitle_text_with_units(
-                    safe_text(job.get("audio_path")),
-                    chunks,
-                    units,
-                    float(job.get("offset_sec") or 0.0),
-                )
-            )
-        except Exception as exc:
-            raise ValueError(f"{label} ASR 字幕对齐失败：{exc}") from exc
-    return merged
-
-
-def format_srt_timestamp(seconds: float) -> str:
-    total_ms = max(0, int(round(seconds * 1000)))
-    hours, rem = divmod(total_ms, 3_600_000)
-    minutes, rem = divmod(rem, 60_000)
-    secs, millis = divmod(rem, 1000)
-    return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
-
-
-def format_srt(items: list[tuple[float, float, str]]) -> str:
-    lines: list[str] = []
-    for index, (start, end, text) in enumerate(items, start=1):
-        lines.extend(
-            [
-                str(index),
-                f"{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}",
-                text,
-                "",
-            ]
-        )
-    return "\n".join(lines).rstrip() + "\n"
 
 
 def extract_label(text: str, length: int = 2) -> str:

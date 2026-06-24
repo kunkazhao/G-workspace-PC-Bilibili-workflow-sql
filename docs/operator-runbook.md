@@ -21,6 +21,119 @@
 | 4. 同步别名 | 脚本会同步 `workflow_service.py`；如果独立 MiniMax skill 的中文别名没有同步，手动检查 `t2a_core.py`。 |
 | 5. 自检 | 必须看到 `SWAP_DONE=1`。如失败，先看 `MINIMAX_REASON`，不要重复占用同一个 MiniMax voice id。 |
 
+## 非价格过渡口播稿（品类过渡 / 自定义分组过渡）
+
+软件的口播稿流程默认按价格段切分商品（`## 价格过渡文案`）。当品类需要按用途、功能或自定义标签分组时（如充电宝按"高性价比款/日常款/小巧精致款/磁吸便捷款/高性能款"），软件无法直接生成，需要手动走以下流程。
+
+### 前置条件
+
+| 条件 | 说明 |
+|---|---|
+| MD 文案 | 引言、商品、过渡文案都写好。过渡文案的二级标题可以不叫"价格过渡文案"（如 `## 品类过渡文案`），三级标题是分组名（如 `### 高性价比款`） |
+| Master 标签 | 在 Master 方案的商品上打好标签（tag），标签值 = 过渡文案里的分组名 |
+| 图片同步 | 商品图片已同步到对应用户 + 模板目录 |
+| 配音目录 | 确认配音输出路径 |
+
+### 步骤总览
+
+| 步骤 | 脚本 | 说明 |
+|---|---|---|
+| 1. 获取标签分组 | 手动查 Master API | scheme summary 的 `tags` 字段为空是已知 bug（`SCHEME_SUMMARY_ITEM_SELECT` 没有 `tags`）；必须逐个查 `/api/sourcing/items/{source_id}` 才能拿到 `tags` |
+| 2. 批量 MiniMax 配音 | `scripts/batch_tts_chongdianbao.py` | 为商品正文 + 过渡文案调用 MiniMax T2A |
+| 3. 生成 manifest | `scripts/gen_manifest_chongdianbao.py` | 按标签分组组织 entry 顺序：引言 → [过渡 → 该分组商品] × N → 结尾 |
+| 4. 生成剪映草稿 | 调用 `generate_jianying_draft.py` | 用 b-workflow skill 的 venv 执行 |
+
+### 步骤详解
+
+#### 1. 获取标签分组
+
+Master API `GET /api/schemes/{scheme_id}/summary` 返回的 items 里 `tags` 字段为空，这是因为 `backend/api/schemes.py` 的 `SCHEME_SUMMARY_ITEM_SELECT` 没有包含 `tags`。
+
+**解决方法**：先从 summary 拿到每个 item 的 `source_id`，再逐个调 `GET /api/sourcing/items/{source_id}` 获取 `tags`。
+
+**注意**：Master 的 HTTP 头 `X-Workspace-Id` 需要传中文（"赵二"），Python 的 `http.client` 会因 latin-1 编码报错。解决方案：
+- 用 `socket` 直接发 UTF-8 raw HTTP 请求
+- 或把查询逻辑写进 `.py` 文件执行（避免 shell 管道编码问题）
+
+工作空间 UUID 映射（可通过 `GET /api/workspaces` 获取）：
+
+| 名称 | UUID |
+|---|---|
+| 赵二 | `de90965d-29e4-4ac3-9730-0ce1fc85b67c` |
+
+#### 2. 批量 MiniMax 配音
+
+参考脚本 `scripts/batch_tts_chongdianbao.py`，核心逻辑：
+
+- 从 DB 读 `script_blocks` 获取商品文案正文
+- 过渡文案文本硬编码在脚本里（因为 MD parser 只识别 `## 价格过渡文案`，自定义标题不入库）
+- 调用 `WorkflowService._synthesize_minimax_to_path()` 生成音频
+- 文件命名：商品 `{price}-{uid}-{title}-正文.mp3`，过渡 `0-品类过渡-{分组名}.mp3`
+- 速度 1.2，voice_id 从 `accounts.minimax_voice_id` 取
+
+**复用要点**：新品类只需改脚本里的 `project_id`、`voice_id`、`output_dir`、`category_transitions` 列表。
+
+#### 3. 生成 manifest
+
+参考脚本 `scripts/gen_manifest_chongdianbao.py`，核心结构：
+
+```
+manifest.entries 顺序：
+  1. intro（section="intro", type="transition"）
+  2. 循环每个分组：
+     a. 品类过渡（section="price_transition", type="transition"）
+     b. 该分组下的商品（section="product", type="product"）
+  3. closing（section="closing", type="closing"）
+```
+
+**关键字段**：
+- `display_template`：模板名（如 `荣荣-模板2`）
+- `display_video_slot`：从 `template_config.py` 取坐标
+- 过渡 entry 的 `price_range_label` 填分组名，剪映草稿生成器会用它生成标题卡
+- `product_uid` 对于过渡用 `CATEGORY_TRANSITION`（不影响草稿生成，只是标识）
+- 音频和图片路径必须是绝对路径
+
+#### 4. 生成剪映草稿
+
+```bash
+python_exe="C:/Users/zhaoer/.codex/skills/b-workflow/.venv/Scripts/python.exe"
+script="C:/Users/zhaoer/.codex/skills/b-workflow/scripts/generate_jianying_draft.py"
+
+"$python_exe" "$script" \
+  --manifest "<manifest_path>" \
+  --draft-name "<草稿名>" \
+  --draft-root "E:/剪辑-剪映/草稿/JianyingPro Drafts" \
+  --allow-replace \
+  --skip-subtitles
+```
+
+### 实际案例：充电宝品类（2026-06-20）
+
+| 项目 | 值 |
+|---|---|
+| project_id | 14 |
+| 项目名 | 数码-充电宝 |
+| 用户 | 荣荣 |
+| 模板 | 荣荣-模板2 |
+| 配音 | MiniMax rongrong-v2 |
+| 分组方式 | 5 个品类标签（非价格段） |
+| 商品数 | 26 |
+| 配音数 | 31（26 商品 + 5 品类过渡） |
+| 引言 | 1 条（已有） |
+| 结尾 | accounts.closing_audio_path（荣荣） |
+| 总时长 | 1079.8 秒（约 18 分钟） |
+| manifest | `data/manifests/数码-充电宝-荣荣-品类过渡.manifest.json` |
+| 草稿目录 | `E:\剪辑-剪映\草稿\JianyingPro Drafts\数码-充电宝-荣荣-品类过渡` |
+
+### 踩坑记录
+
+| 问题 | 原因 | 解决 |
+|---|---|---|
+| Master API 拿不到 tags | `SCHEME_SUMMARY_ITEM_SELECT` 没有 `tags` 列 | 逐个查 `/api/sourcing/items/{source_id}` |
+| `X-Workspace-Id` 中文报错 | Python `http.client` 强制 latin-1 编码 | 用 raw socket 发 UTF-8 请求 |
+| 品类过渡文案不入库 | MD parser 只识别 `## 价格过渡文案` | 过渡文本硬编码在脚本里 |
+| shell 环境中文乱码 | Git Bash 的 stdin 编码 | 业务逻辑写 `.py` 文件，不走 shell 管道 |
+
 ## 验证命令
 
 | 场景 | 命令 |
