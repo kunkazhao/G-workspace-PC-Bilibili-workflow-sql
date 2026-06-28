@@ -177,3 +177,55 @@ data\workspace\project-{project_id}\intro\cutme-config-{script_block_id}-{accoun
 ```
 
 `cutme-config` 通过 `intro_plan_path` 交给 `python -m cutme` 渲染。页面日志会显示准备后的 `intro_plan`、CutMe 配置、素材预检结果、是否执行 ASR 对齐，以及最终选中的素材路径。
+## CutMe 引言写作链路
+
+第一阶段“写引言文案”不再直接让 AI 自由写完整开头，而是先写模板槽位 JSON，再由仓库把槽位渲染成固定结构的引言文案和 CutMe `intro_plan`。
+
+默认模板是 `pain_avoidance_priority_v1`。槽位 JSON 至少包含这些字段：
+
+```json
+{
+  "category": "键盘",
+  "common_mistake_1": "轴体名字",
+  "common_mistake_2": "灯效",
+  "common_mistake_3": "热插拔",
+  "pain_1": "手感不稳定",
+  "pain_2": "声音太吵",
+  "pain_3": "长时间打字累",
+  "scene_1": "办公和码字",
+  "criteria_1": "稳定手感",
+  "flashy_selling_point": "炫酷 RGB",
+  "scene_2": "打游戏",
+  "criteria_2": "触发速度",
+  "criteria_3": "键位响应",
+  "scene_3": "宿舍或者夜里用",
+  "criteria_4": "声音控制",
+  "bad_result": "影响别人休息",
+  "standard_1": "手感",
+  "standard_2": "连接稳定性",
+  "standard_3": "做工"
+}
+```
+
+生成命令：
+
+```powershell
+python -m bworkflow_sql intro-plan <project_id> --slots <slots.json> --label 引言1 --sync
+```
+
+输出位置：
+
+```text
+data\workspace\project-{project_id}\intro\intro-slots-引言1.json
+data\workspace\project-{project_id}\intro\source-intro-plan-引言1.json
+```
+
+命令会把完整引言写进项目 Markdown 的 `## 引言文案 / ### 引言1`，并把 `source-intro-plan-*.json` 作为 CutMe 的源计划文件保留下来。之后进入 `工具 -> CutMe 引言` 时，如果当前引言文案与 `source-intro-plan-*.json` 的 `full_script` 一致，页面会自动匹配该计划文件，不需要手动选择。
+
+新增模板时，先在 CutMe 仓库的 `intro_templates` 中新增模板和 `visual_cues` 契约，再用本仓库 `intro-plan --template <template_id>` 生成计划文件。不要只改提示词而不更新模板契约，否则 CutMe 无法稳定知道哪些段落要插产品展示和引导三连。
+
+回归验证：
+
+```powershell
+python -m pytest -q tests/test_intro_plan_writer.py tests/test_cutme_intro.py tests/test_intro_timeline.py
+```

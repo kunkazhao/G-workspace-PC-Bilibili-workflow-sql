@@ -48,6 +48,26 @@ def default_cutme_config_path(
     return default_intro_plan_workspace(project_id) / f"cutme-config-{script_block_id}-{account}.json"
 
 
+def find_intro_plan_for_text(project_id: int, intro_text: str) -> Path | None:
+    expected = normalize_subtitle_alignment_text(intro_text)
+    if not expected:
+        return None
+    workspace = default_intro_plan_workspace(project_id)
+    if not workspace.is_dir():
+        return None
+    for path in sorted(workspace.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            plan = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(plan, dict):
+            continue
+        full_script = safe_text(plan.get("full_script"))
+        if full_script and normalize_subtitle_alignment_text(full_script) == expected:
+            return path
+    return None
+
+
 def prepare_intro_plan_for_cutme(
     *,
     source_plan_path: str | Path,

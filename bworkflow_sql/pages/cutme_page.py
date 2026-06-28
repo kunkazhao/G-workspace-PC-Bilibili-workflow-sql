@@ -305,6 +305,14 @@ class CutMePage(WorkflowPage):
         intro_plan_path = self.intro_plan_var.get().strip()
         title_text = self.title_var.get().strip() or safe_text(project.get("category_name")) or "精选推荐"
         output_dir = self.output_dir_var.get().strip() or str(CUTME_OUTPUT_ROOT)
+        intro_text = safe_text(block.get("body")) or ""
+        if not intro_plan_path:
+            from ..cutme_intro import find_intro_plan_for_text
+
+            matched_plan = find_intro_plan_for_text(int(project["id"]), intro_text)
+            if matched_plan:
+                intro_plan_path = str(matched_plan)
+                self.intro_plan_var.set(str(matched_plan).replace("/", "\\"))
 
         category = safe_text(project.get("category_name")) or safe_text(project.get("name")) or "intro"
         output_filename = f"引言-{category}-{account_label}.mp4"
@@ -316,8 +324,6 @@ class CutMePage(WorkflowPage):
         self.log(f"素材文件夹：{asset_folder or '（无）'}")
         self.log(f"输出路径：{output_path}")
         self.log("开始生成引言视频...")
-
-        intro_text = safe_text(block.get("body")) or ""
 
         def work() -> dict[str, Any]:
             if intro_plan_path:

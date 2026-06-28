@@ -265,6 +265,33 @@ def cmd_outline(args: argparse.Namespace) -> None:
 
 # ── scaffold ──────────────────────────────────────────────────────────
 
+def cmd_intro_plan(args: argparse.Namespace) -> None:
+    from .intro_plan_writer import write_intro_plan_for_project
+
+    db, _, _, _ = _init()
+    result = write_intro_plan_for_project(
+        db=db,
+        project_id=args.project_id,
+        slots_path=args.slots,
+        template_id=args.template,
+        label=args.label,
+        markdown_path=args.markdown or None,
+        sync=args.sync,
+    )
+    _json_out({
+        "ok": True,
+        "project_id": args.project_id,
+        "template": args.template,
+        "label": result.label,
+        "intro_plan_path": str(result.intro_plan_path),
+        "slots_path": str(result.slots_path),
+        "markdown_path": str(result.markdown_path),
+        "full_script": result.full_script,
+        "synced": result.synced,
+        "sync_result": result.sync_result,
+    })
+
+
 def cmd_scaffold(args: argparse.Namespace) -> None:
     """为项目预建素材目录骨架（商品图 / 配音 / Roll-B）。
 
@@ -440,6 +467,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("project_id", type=int)
     p.add_argument("--output", "-o", help="MD 输出路径（默认按品类名生成）")
 
+    # intro-plan
+    p = sub.add_parser("intro-plan", help="用 CutMe 引言模板槽位生成文案和 intro_plan")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--slots", required=True, help="引言槽位 JSON 文件")
+    p.add_argument("--template", default="pain_avoidance_priority_v1", help="CutMe 引言模板 ID")
+    p.add_argument("--label", default="引言1", help="写入 Markdown 的引言版本标题")
+    p.add_argument("--markdown", help="覆盖写入目标 MD；默认使用项目 md_path 或文案骨架默认路径")
+    p.add_argument("--sync", action="store_true", help="写入 Markdown 后立即同步入库")
+
     # scaffold
     p = sub.add_parser("scaffold", help="预建素材目录骨架（商品图/配音/Roll-B）")
     p.add_argument("project_id", type=int)
@@ -462,6 +498,7 @@ DISPATCH = {
     "assemble": cmd_assemble,
     "jianying": cmd_jianying,
     "outline": cmd_outline,
+    "intro-plan": cmd_intro_plan,
     "scaffold": cmd_scaffold,
     "assets-check": cmd_assets_check,
 }
