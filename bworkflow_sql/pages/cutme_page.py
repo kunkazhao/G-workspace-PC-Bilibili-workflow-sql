@@ -131,6 +131,7 @@ class CutMePage(WorkflowPage):
     def __init__(self, master, app: App):
         super().__init__(master, app, "CutMe 引言")
         self.asset_folder_var = ctk.StringVar()
+        self.intro_plan_var = ctk.StringVar()
         self.output_dir_var = ctk.StringVar()
         self.title_var = ctk.StringVar()
 
@@ -160,6 +161,14 @@ class CutMePage(WorkflowPage):
             row=r, column=1, columnspan=2, sticky="ew", pady=UIStyle.PAD_XS)
 
         r += 1
+        ctk.CTkLabel(inner, text="引言计划 JSON", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
+            row=r, column=0, sticky="w", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS)
+        AppEntry(inner, textvariable=self.intro_plan_var).grid(
+            row=r, column=1, sticky="ew", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS)
+        GhostButton(inner, text="选", width=50, command=self._browse_intro_plan).grid(
+            row=r, column=2, pady=UIStyle.PAD_XS)
+
+        r += 1
         ctk.CTkLabel(inner, text="素材文件夹", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM).grid(
             row=r, column=0, sticky="w", padx=(0, UIStyle.PAD_SM), pady=UIStyle.PAD_XS)
         AppEntry(inner, textvariable=self.asset_folder_var).grid(
@@ -178,7 +187,7 @@ class CutMePage(WorkflowPage):
         r += 1
         ctk.CTkLabel(
             inner,
-            text="选择引言版本和配音用户后自动定位配音文件；素材文件夹放商品图片和 roll-b 视频（可选）。",
+            text="选择引言计划 JSON 后会先做素材预检查和 ASR 场景对齐；不选择时继续使用旧 CutMe 素材文件夹流程。",
             font=UIStyle.FONT_SMALL,
             text_color=UIStyle.COLOR_TEXT_DIM,
         ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(UIStyle.PAD_XS, UIStyle.PAD_SM))
@@ -220,6 +229,17 @@ class CutMePage(WorkflowPage):
         path = filedialog.askdirectory(initialdir=initial, title="选择引言素材文件夹")
         if path:
             self.asset_folder_var.set(path.replace("/", "\\"))
+
+    def _browse_intro_plan(self) -> None:
+        current = self.intro_plan_var.get().strip()
+        initial = str(Path(current).parent) if current else str(INTERNAL_WORKSPACE_ROOT)
+        path = filedialog.askopenfilename(
+            initialdir=initial,
+            title="选择引言计划 JSON",
+            filetypes=(("JSON 文件", "*.json"), ("所有文件", "*.*")),
+        )
+        if path:
+            self.intro_plan_var.set(path.replace("/", "\\"))
 
     def _browse_output_dir(self) -> None:
         initial = self.output_dir_var.get().strip() or str(CUTME_OUTPUT_ROOT)
@@ -282,6 +302,7 @@ class CutMePage(WorkflowPage):
             return
 
         asset_folder = self.asset_folder_var.get().strip()
+        intro_plan_path = self.intro_plan_var.get().strip()
         title_text = self.title_var.get().strip() or safe_text(project.get("category_name")) or "精选推荐"
         output_dir = self.output_dir_var.get().strip() or str(CUTME_OUTPUT_ROOT)
 
@@ -291,13 +312,33 @@ class CutMePage(WorkflowPage):
 
         self.log(f"引言版本：{block_label}")
         self.log(f"配音文件：{voice_path}")
+        self.log(f"引言计划：{intro_plan_path or '（未选择，使用旧流程）'}")
         self.log(f"素材文件夹：{asset_folder or '（无）'}")
         self.log(f"输出路径：{output_path}")
         self.log("开始生成引言视频...")
 
         intro_text = safe_text(block.get("body")) or ""
 
-        def work() -> Path:
+        def work() -> dict[str, Any]:
+            if intro_plan_path:
+                from ..cutme_intro import prepare_cutme_intro, run_cutme_render
+
+                prepared = prepare_cutme_intro(
+                    source_plan_path=intro_plan_path,
+                    audio_path=voice_path,
+                    project=project,
+                    account_label=account_label,
+                    script_block_id=int(block["id"]),
+                    intro_text=intro_text,
+                    title=title_text,
+                    asset_folder=asset_folder,
+                )
+                result = run_cutme_render(prepared.config_path, output_path)
+                return {
+                    "path": result,
+                    "prepared": prepared,
+                }
+
             import sys as _sys
             _cutme_root = str(CUTME_ROOT)
             if _cutme_root not in _sys.path:
@@ -319,8 +360,16 @@ class CutMePage(WorkflowPage):
                 output_path=output_path,
             )
 
-        def on_success(result: Path) -> None:
+        def on_success(payload: Any) -> None:
+            result = payload["path"] if isinstance(payload, dict) else payload
+            prepared = payload.get("prepared") if isinstance(payload, dict) else None
             size_mb = result.stat().st_size / 1024 / 1024
+            if prepared:
+                self.log(f"已准备 intro_plan：{prepared.intro_plan_path}")
+                self.log(f"CutMe 配置：{prepared.config_path}")
+                self.log(f"素材预检查：{'通过' if prepared.preflight.get('ok', True) else '未通过'}")
+                self.log(f"ASR 场景对齐：{'已执行' if prepared.aligned_with_asr else '已使用现有 timing'}")
+                self.log(f"已选素材：{json.dumps(prepared.selected_assets, ensure_ascii=False)}")
             self.log(f"生成完成：{result}")
             self.log(f"文件大小：{size_mb:.1f} MB")
 

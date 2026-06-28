@@ -43,6 +43,7 @@ DEFAULT_MASTER_SERVICE_ROOT = Path(r"G:\workspace\bilibili-newTools-next-master"
 DEFAULT_MARKDOWN_ROOT = Path(r"G:\WriteSpace\B站-文案脚本\10_b站文案\3.商品文案")
 DEFAULT_IMAGE_ROOT = Path(r"G:\2026项目-b站\素材-商品ppt图片")
 DEFAULT_VIDEO_ROOT = Path(r"G:\2026项目-b站\素材-剪辑\roll-b素材")
+DEFAULT_INTRO_ASSET_ROOT = Path(r"G:\2026项目-b站\素材-自动剪辑")
 DEFAULT_VOICE_ROOT = Path(r"G:\2026项目-b站\素材-配音")
 DEFAULT_STANDALONE_VOICE_ROOT = Path(r"G:\2026项目-b站")
 DEFAULT_OUTPUT_ROOT = DATA_DIR / "workspace"

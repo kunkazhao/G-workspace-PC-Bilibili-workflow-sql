@@ -148,7 +148,7 @@ python -m venv "G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/.v
 | 最小 UI 回归 | `python -m pytest -q tests/test_ui_helpers.py` |
 | 结尾配音回归 | `python -m pytest -q tests/test_workflow_service.py -k closing` |
 | 字幕断行回归 | `python -m pytest -q tests/test_workflow_service.py -k subtitle` |
-| 引言场景 ASR 对齐回归 | `python -m pytest -q tests/test_intro_timeline.py` |
+| 引言场景 ASR 对齐回归 | `python -m pytest -q tests/test_cutme_intro.py tests/test_intro_timeline.py` |
 | 常用服务回归 | `python -m pytest -q tests/test_workflow_service.py tests/test_ui_helpers.py tests/test_repositories.py tests/test_sync_service.py` |
 
 ## CutMe 引言场景时间轴
@@ -161,3 +161,19 @@ python -m venv "G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/.v
 - 对齐前必须校验 `scenes[].text` 拼接后与 `full_script` 一致，不能让 LLM 改字后继续对齐。
 - ASR 仍复用现有独立子进程和 `align_subtitle_text_with_units(...)`，不要在 CutMe 里重复引入 Whisper。
 - CutMe 只消费 `scenes[].timing`，并根据 `hook_open`、`pain_points`、`self_check`、`priority_preview` 控制产品展示和引导三连素材。
+
+## CutMe 引言页面新链路
+
+`工具 -> CutMe 引言` 现在支持两条链路：
+
+- 选择 `引言计划 JSON`：走新链路。页面会先校验 `intro_plan.full_script` 与当前引言文案一致，再按 `G:\2026项目-b站\素材-自动剪辑\{一级品类-二级品类}` 随机选择三段不重复产品展示素材，并从 `通用` 文件夹随机选择文件名包含 `引导三连` 的视频。缺产品展示或缺引导三连时，在渲染前直接报错。
+- 不选择 `引言计划 JSON`：走旧链路，继续使用 `素材文件夹 + cutme_service.generate_intro_video(...)`，不会得到 `selected_assets` 和 ASR 场景 timing。
+
+新链路准备好的中间文件会写入：
+
+```text
+data\workspace\project-{project_id}\intro\intro-plan-{script_block_id}-{account}.json
+data\workspace\project-{project_id}\intro\cutme-config-{script_block_id}-{account}.json
+```
+
+`cutme-config` 通过 `intro_plan_path` 交给 `python -m cutme` 渲染。页面日志会显示准备后的 `intro_plan`、CutMe 配置、素材预检结果、是否执行 ASR 对齐，以及最终选中的素材路径。
