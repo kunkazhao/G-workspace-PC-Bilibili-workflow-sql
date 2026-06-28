@@ -15,8 +15,11 @@ from bworkflow_sql.template_config import get_template_slot
 
 PROBE_DIR = REPO_ROOT / "data" / "tmp_jianying_probe"
 ASSET_DIR = PROBE_DIR / "template2-position-assets"
-GENERATOR = Path.home() / ".codex" / "skills" / "b-workflow" / "scripts" / "generate_jianying_draft.py"
-VENV_PYTHON = Path.home() / ".codex" / "skills" / "b-workflow" / ".venv" / "Scripts" / "python.exe"
+ENGINE_DIR = REPO_ROOT / "scripts" / "jianying_engine"
+GENERATOR = ENGINE_DIR / "generate_jianying_draft.py"
+ENGINE_PYTHON = ENGINE_DIR / ".venv" / "Scripts" / "python.exe"
+LEGACY_PYTHON = Path.home() / ".codex" / "skills" / "b-workflow" / ".venv" / "Scripts" / "python.exe"
+VENV_PYTHON = ENGINE_PYTHON if ENGINE_PYTHON.exists() else LEGACY_PYTHON
 DRAFT_ROOT = Path(r"E:\剪辑-剪映\草稿\JianyingPro Drafts")
 DISPLAY_VIDEO = PROBE_DIR / "xiaowai2-slot-test.mp4"
 

@@ -1,0 +1,36 @@
+{
+  "version": 2,
+  "source": "bworkflow-sql",
+  "project_id": 0,
+  "project_name": "jianying-engine-migration-smoke",
+  "category": "smoke",
+  "mode": "migration_smoke",
+  "account_label": "smoke",
+  "account_id": "smoke",
+  "created_at": "2026-06-25T00:00:00Z",
+  "entries": [
+    {
+      "type": "product",
+      "order_index": 1,
+      "section": "product",
+      "section_order": 1,
+      "product_uid": "SMOKE001",
+      "product_name": "Smoke Test Item",
+      "price_label": "0",
+      "price_range_label": "",
+      "source_label": "smoke",
+      "text": "Smoke test item.",
+      "audio_path": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_probe\\template2-position-assets\\position-probe-4s.wav",
+      "image_path": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_probe\\xiaowai2-html-render\\xiaowai2--default.png",
+      "video_path": "",
+      "display_video_path": "G:\\workspace\\PC-Bilibili-workflow-sql\\data\\tmp_jianying_probe\\xiaowai2-slot-test.mp4",
+      "display_video_slot": {
+        "x": -843,
+        "y": -34,
+        "width": 1037,
+        "height": 528,
+        "coordinate_mode": "clip_transform_pixels"
+      }
+    }
+  ]
+}

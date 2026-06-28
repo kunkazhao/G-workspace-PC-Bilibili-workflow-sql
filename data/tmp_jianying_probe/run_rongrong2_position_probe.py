@@ -24,8 +24,11 @@ CANVAS_PNG = ASSET_DIR / "rongrong2-template2-canvas-1920x1080.png"
 MANIFEST = PROBE_DIR / "rongrong2-short-position-test.manifest.json"
 DRAFT_NAME = "荣荣-模板2-单条位置测试"
 
-VENV_PYTHON = Path(r"C:\Users\zhaoer\.codex\skills\b-workflow\.venv\Scripts\python.exe")
-GENERATOR = Path(r"C:\Users\zhaoer\.codex\skills\b-workflow\scripts\generate_jianying_draft.py")
+ENGINE_DIR = REPO_ROOT / "scripts" / "jianying_engine"
+ENGINE_PYTHON = ENGINE_DIR / ".venv" / "Scripts" / "python.exe"
+LEGACY_PYTHON = Path.home() / ".codex" / "skills" / "b-workflow" / ".venv" / "Scripts" / "python.exe"
+VENV_PYTHON = ENGINE_PYTHON if ENGINE_PYTHON.exists() else LEGACY_PYTHON
+GENERATOR = ENGINE_DIR / "generate_jianying_draft.py"
 DRAFT_ROOT = Path(r"E:\剪辑-剪映\草稿\JianyingPro Drafts")
 DISPLAY_VIDEO = PROBE_DIR / "xiaowai2-slot-test.mp4"
 AUDIO_PATH = ASSET_DIR / "position-probe-4s.wav"

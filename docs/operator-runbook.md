@@ -41,7 +41,7 @@
 | 1. 获取标签分组 | 手动查 Master API | scheme summary 的 `tags` 字段为空是已知 bug（`SCHEME_SUMMARY_ITEM_SELECT` 没有 `tags`）；必须逐个查 `/api/sourcing/items/{source_id}` 才能拿到 `tags` |
 | 2. 批量 MiniMax 配音 | `scripts/batch_tts_chongdianbao.py` | 为商品正文 + 过渡文案调用 MiniMax T2A |
 | 3. 生成 manifest | `scripts/gen_manifest_chongdianbao.py` | 按标签分组组织 entry 顺序：引言 → [过渡 → 该分组商品] × N → 结尾 |
-| 4. 生成剪映草稿 | 调用 `generate_jianying_draft.py` | 用 b-workflow skill 的 venv 执行 |
+| 4. 生成剪映草稿 | `scripts/jianying_engine/generate_jianying_draft.py` | 项目内剪映引擎优先；`BWORKFLOW_JIANYING_ENGINE_DIR` 可覆盖；旧 b-workflow skill 只作迁移兜底 |
 
 ### 步骤详解
 
@@ -96,8 +96,8 @@ manifest.entries 顺序：
 #### 4. 生成剪映草稿
 
 ```bash
-python_exe="C:/Users/zhaoer/.codex/skills/b-workflow/.venv/Scripts/python.exe"
-script="C:/Users/zhaoer/.codex/skills/b-workflow/scripts/generate_jianying_draft.py"
+python_exe="G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/.venv/Scripts/python.exe"
+script="G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/generate_jianying_draft.py"
 
 "$python_exe" "$script" \
   --manifest "<manifest_path>" \
@@ -105,6 +105,13 @@ script="C:/Users/zhaoer/.codex/skills/b-workflow/scripts/generate_jianying_draft
   --draft-root "E:/剪辑-剪映/草稿/JianyingPro Drafts" \
   --allow-replace \
   --skip-subtitles
+```
+
+如果项目内 `.venv` 还没初始化，先执行：
+
+```bash
+python -m venv "G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/.venv"
+"G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/.venv/Scripts/python.exe" -m pip install -r "G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/requirements-jianying.txt"
 ```
 
 ### 实际案例：充电宝品类（2026-06-20）
@@ -142,4 +149,3 @@ script="C:/Users/zhaoer/.codex/skills/b-workflow/scripts/generate_jianying_draft
 | 结尾配音回归 | `python -m pytest -q tests/test_workflow_service.py -k closing` |
 | 字幕断行回归 | `python -m pytest -q tests/test_workflow_service.py -k subtitle` |
 | 常用服务回归 | `python -m pytest -q tests/test_workflow_service.py tests/test_ui_helpers.py tests/test_repositories.py tests/test_sync_service.py` |
-

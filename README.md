@@ -132,7 +132,10 @@ Output rules:
 
 ## Jianying Draft Notes
 
-- Draft generation is delegated to `C:\Users\zhaoer\.codex\skills\b-workflow\scripts\generate_jianying_draft.py`.
+- Draft generation is owned by the project-local engine at `scripts\jianying_engine\generate_jianying_draft.py`.
+- The engine directory can be overridden with `BWORKFLOW_JIANYING_ENGINE_DIR`; archived `C:\Users\zhaoer\.codex\skills_archived\b-workflow-20260625\scripts` is only a migration fallback.
+- The engine dependencies are listed in `scripts\jianying_engine\requirements-jianying.txt`; an optional engine-local virtualenv belongs at `scripts\jianying_engine\.venv`.
+- The default image-index data file is `data\jianying_engine\image_index.json`.
 - Closing voice clips come from `accounts.closing_audio_path`. Current 小歪 closing audio is `G:\2026项目-b站\素材-配音\公共-结尾\小歪\结尾-小歪.mp3`.
 - Product images remain on the main media track. Product videos are also written as `display_video_path` and placed on the separate `display_video` track.
 - Voice clips use a `100ms` timeline gap between adjacent clips.

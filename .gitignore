@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .codex_tmp/
 .venv-asr/
+scripts/jianying_engine/.venv/
 build/
 dist/
 data/*.db
@@ -15,6 +16,7 @@ data/manual_voice_outputs/
 data/tmp_jianying_price_title_demo/
 data/tmp_jianying_price_transition_title/
 data/tmp_rongrong_template_probe/
+data/tmp_jianying_probe/smoke_drafts/
 _tmp_*.py
 cutme_launch_err.txt
 data/manifests/

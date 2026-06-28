@@ -8,7 +8,7 @@ import wave
 from bworkflow_sql.db import Database
 from bworkflow_sql.md_parser import parse_markdown_text
 from bworkflow_sql.repositories import Repository
-from bworkflow_sql.settings import INTERNAL_WORKSPACE_ROOT
+from bworkflow_sql.settings import INTERNAL_WORKSPACE_ROOT, JIANYING_ENGINE_DIR
 from bworkflow_sql.sync_service import SyncService
 from bworkflow_sql.utils import now_iso, text_hash
 import bworkflow_sql.workflow_service as workflow_service_module
@@ -694,6 +694,7 @@ def test_jianying_generation_skips_subtitles_by_default(tmp_path: Path, monkeypa
 
     assert draft.returncode == 0
     assert "--skip-subtitles" in captured["cmd"]
+    assert captured["cmd"][1] == str(JIANYING_ENGINE_DIR / "generate_jianying_draft.py")
 
 
 def test_jianying_generation_summarizes_json_stdout_for_users(tmp_path: Path, monkeypatch):

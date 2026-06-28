@@ -22,13 +22,14 @@ from .asset_paths import voice_user_dir
 from .db import Database
 from .repositories import Repository
 from .settings import (
-    B_WORKFLOW_SKILL_SCRIPTS,
     DEFAULT_INDEXTTS_DIR,
     DEFAULT_JIANYING_DRAFT_ROOT,
     DEFAULT_OUTPUT_ROOT,
     DEFAULT_STANDALONE_VOICE_ROOT,
     DEFAULT_TTS_API_BASE_URL,
     INTERNAL_WORKSPACE_ROOT,
+    JIANYING_ENGINE_DIR,
+    LEGACY_B_WORKFLOW_SKILL_SCRIPTS,
 )
 from .utils import file_metadata, now_iso, safe_text
 from .template_config import image_set_for_template, user_for_template
@@ -731,10 +732,8 @@ class WorkflowService:
         if intro_video is not None and not intro_video.exists():
             raise ValueError(f"引言成片视频不存在：{intro_video}")
         effective_manifest = self._jianying_manifest_for_intro_video(project_id, manifest, intro_video=intro_video)
-        python_exe = B_WORKFLOW_SKILL_SCRIPTS.parent / ".venv" / "Scripts" / "python.exe"
-        if not python_exe.exists():
-            python_exe = Path(sys.executable)
-        script = B_WORKFLOW_SKILL_SCRIPTS / "generate_jianying_draft.py"
+        script = self._jianying_engine_script()
+        python_exe = self._jianying_engine_python(script)
         if not script.exists():
             raise ValueError(f"剪映草稿生成引擎不存在：{script}")
         cmd = [
@@ -760,6 +759,30 @@ class WorkflowService:
             f"剪映草稿生成完成，退出码 {completed.returncode}",
         )
         return completed
+
+    def _jianying_engine_script(self) -> Path:
+        candidates = [
+            JIANYING_ENGINE_DIR / "generate_jianying_draft.py",
+            LEGACY_B_WORKFLOW_SKILL_SCRIPTS / "generate_jianying_draft.py",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0]
+
+    def _jianying_engine_python(self, script: Path) -> Path:
+        override = safe_text(os.environ.get("BWORKFLOW_JIANYING_PYTHON"))
+        if override:
+            return Path(override)
+        candidates = [
+            script.parent / ".venv" / "Scripts" / "python.exe",
+            LEGACY_B_WORKFLOW_SKILL_SCRIPTS.parent / ".venv" / "Scripts" / "python.exe",
+            Path(sys.executable),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return Path(sys.executable)
 
     def _run_internal(self, cmd: list[str]) -> WorkflowRunResult:
         args = self._parse_internal_args(cmd[1:])

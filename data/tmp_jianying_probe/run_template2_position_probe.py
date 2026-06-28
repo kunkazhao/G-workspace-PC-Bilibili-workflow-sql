@@ -5,8 +5,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(r"G:\workspace\PC-Bilibili-workflow-sql")
 PROBE_DIR = REPO_ROOT / "data" / "tmp_jianying_probe"
-GENERATOR = Path(r"C:\Users\zhaoer\.codex\skills\b-workflow\scripts\generate_jianying_draft.py")
-PYTHON = Path(r"C:\Users\zhaoer\.codex\skills\b-workflow\.venv\Scripts\python.exe")
+ENGINE_DIR = REPO_ROOT / "scripts" / "jianying_engine"
+GENERATOR = ENGINE_DIR / "generate_jianying_draft.py"
+ENGINE_PYTHON = ENGINE_DIR / ".venv" / "Scripts" / "python.exe"
+LEGACY_PYTHON = Path.home() / ".codex" / "skills" / "b-workflow" / ".venv" / "Scripts" / "python.exe"
+PYTHON = ENGINE_PYTHON if ENGINE_PYTHON.exists() else LEGACY_PYTHON
 DRAFT_ROOT = Path(r"E:\剪辑-剪映\草稿\JianyingPro Drafts")
 BACKGROUND_IMAGE = Path(r"G:\2026项目-b站\素材-剪辑\1-背景图\背景1 (1).png")
 

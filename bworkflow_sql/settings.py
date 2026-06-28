@@ -21,7 +21,20 @@ DATA_DIR = _default_data_dir()
 DB_PATH = DATA_DIR / "bworkflow.db"
 
 LEGACY_PROJECT_ROOT = Path(r"G:\workspace\PC-Bilibili-workflow")
-B_WORKFLOW_SKILL_SCRIPTS = Path(r"C:\Users\zhaoer\.codex\skills\b-workflow\scripts")
+LEGACY_B_WORKFLOW_SKILL_SCRIPTS = Path(r"C:\Users\zhaoer\.codex\skills_archived\b-workflow-20260625\scripts")
+
+
+def _default_jianying_engine_dir() -> Path:
+    override = os.environ.get("BWORKFLOW_JIANYING_ENGINE_DIR", "").strip()
+    if override:
+        return Path(override)
+    canonical_engine = CANONICAL_APP_ROOT / "scripts" / "jianying_engine"
+    if APP_ROOT != CANONICAL_APP_ROOT and canonical_engine.exists():
+        return canonical_engine
+    return APP_ROOT / "scripts" / "jianying_engine"
+
+
+JIANYING_ENGINE_DIR = _default_jianying_engine_dir()
 DEFAULT_INDEXTTS_DIR = Path(r"G:\Tools\IndexTTS2.0")
 DEFAULT_TTS_API_BASE_URL = "http://127.0.0.1:7861"
 DEFAULT_MASTER_API_BASE_URL = "http://127.0.0.1:8000"
