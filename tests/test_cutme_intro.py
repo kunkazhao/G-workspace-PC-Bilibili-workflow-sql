@@ -38,7 +38,7 @@ def _write_plan(path: Path) -> None:
     plan = {
         "full_script": "ABCD",
         "asset_contract": {
-            "common_folder_name": "通用",
+            "common_folder_name": "1-通用",
             "clip_slots": [
                 {"role": "product_demo", "source": "category_folder"},
                 {"role": "triple_cta", "source": "common_folder", "match_keywords": ["引导三连"]},
@@ -56,7 +56,7 @@ def test_prepare_intro_plan_selects_assets_without_reuse(tmp_path: Path):
 
     asset_root = tmp_path / "素材"
     category_dir = asset_root / "数码-键盘"
-    common_dir = asset_root / "通用"
+    common_dir = asset_root / "1-通用"
     category_dir.mkdir(parents=True)
     common_dir.mkdir(parents=True)
     for index in range(1, 5):

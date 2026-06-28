@@ -166,7 +166,7 @@ python -m venv "G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/.v
 
 `工具 -> CutMe 引言` 现在支持两条链路：
 
-- 选择 `引言计划 JSON`：走新链路。页面会先校验 `intro_plan.full_script` 与当前引言文案一致，再按 `G:\2026项目-b站\素材-自动剪辑\{一级品类-二级品类}` 随机选择三段不重复产品展示素材，并从 `通用` 文件夹随机选择文件名包含 `引导三连` 的视频。缺产品展示或缺引导三连时，在渲染前直接报错。
+- 选择 `引言计划 JSON`：走新链路。页面会先校验 `intro_plan.full_script` 与当前引言文案一致，再按 `G:\2026项目-b站\素材-自动剪辑\{一级品类-二级品类}` 随机选择三段不重复产品展示素材，并从 `1-通用` 文件夹随机选择文件名包含 `引导三连` 的视频。缺产品展示或缺引导三连时，在渲染前直接报错。
 - 不选择 `引言计划 JSON`：走旧链路，继续使用 `素材文件夹 + cutme_service.generate_intro_video(...)`，不会得到 `selected_assets` 和 ASR 场景 timing。
 
 新链路准备好的中间文件会写入：
