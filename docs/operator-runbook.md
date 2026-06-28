@@ -148,4 +148,16 @@ python -m venv "G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/.v
 | 最小 UI 回归 | `python -m pytest -q tests/test_ui_helpers.py` |
 | 结尾配音回归 | `python -m pytest -q tests/test_workflow_service.py -k closing` |
 | 字幕断行回归 | `python -m pytest -q tests/test_workflow_service.py -k subtitle` |
+| 引言场景 ASR 对齐回归 | `python -m pytest -q tests/test_intro_timeline.py` |
 | 常用服务回归 | `python -m pytest -q tests/test_workflow_service.py tests/test_ui_helpers.py tests/test_repositories.py tests/test_sync_service.py` |
+
+## CutMe 引言场景时间轴
+
+`bworkflow_sql.intro_timeline.align_intro_plan_scenes_with_asr(...)` 负责把 CutMe 的
+`intro_plan.scenes[].text` 和整段引言配音做 ASR 对齐，输出 `scenes[].timing`。
+
+关键规则：
+
+- 对齐前必须校验 `scenes[].text` 拼接后与 `full_script` 一致，不能让 LLM 改字后继续对齐。
+- ASR 仍复用现有独立子进程和 `align_subtitle_text_with_units(...)`，不要在 CutMe 里重复引入 Whisper。
+- CutMe 只消费 `scenes[].timing`，并根据 `hook_open`、`pain_points`、`self_check`、`priority_preview` 控制产品展示和引导三连素材。
