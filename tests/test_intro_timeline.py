@@ -57,7 +57,7 @@ def test_align_intro_plan_scenes_with_asr_writes_scene_timing(tmp_path: Path, mo
 
     aligned = intro_timeline_module.align_intro_plan_scenes_with_asr(plan, audio_path)
 
-    assert aligned["timing_source"]["type"] == "asr_scene_alignment"
+    assert aligned["timing_source"]["type"] == "asr_scene_and_visual_event_alignment"
     assert aligned["scenes"][0]["timing"] == {"start": 0.0, "duration": 0.5}
     assert aligned["scenes"][1]["timing"]["start"] == pytest.approx(0.7)
     assert aligned["scenes"][2]["timing"]["start"] == pytest.approx(1.4)
@@ -76,3 +76,54 @@ def test_align_intro_plan_scenes_rejects_changed_scene_text(tmp_path: Path):
 
     with pytest.raises(ValueError, match="full_script"):
         intro_timeline_module.align_intro_plan_scenes_with_asr(plan, audio_path)
+
+
+def test_align_visual_event_specs_with_units_uses_trigger_text():
+    plan = {
+        "full_script": "Buy keyboard. Noise hurts. Hands tire.",
+        "scenes": [
+            {
+                "type": "hook_open",
+                "text": "Buy keyboard.",
+                "timing": {"start": 0.0, "duration": 1.0},
+            },
+            {
+                "type": "pain_points",
+                "text": "Noise hurts. Hands tire.",
+                "timing": {"start": 1.0, "duration": 3.0},
+            },
+        ],
+        "visual_event_specs": [
+            {
+                "id": "pain_1",
+                "scene_type": "pain_points",
+                "target": "pain_points.cards[0]",
+                "trigger_text": "Noise hurts",
+                "order": 0,
+                "animation": "card_reveal",
+            },
+            {
+                "id": "pain_2",
+                "scene_type": "pain_points",
+                "target": "pain_points.cards[1]",
+                "trigger_text": "Hands tire",
+                "order": 1,
+                "animation": "card_reveal",
+            },
+        ],
+    }
+    units = [
+        {"start": 0.0, "end": 1.0, "text": "Buy keyboard."},
+        {"start": 1.0, "end": 2.0, "text": "Noise hurts."},
+        {"start": 2.3, "end": 3.3, "text": "Hands tire."},
+    ]
+
+    events = intro_timeline_module.align_visual_event_specs_with_units(plan, units)
+
+    assert [event["target"] for event in events] == [
+        "pain_points.cards[0]",
+        "pain_points.cards[1]",
+    ]
+    assert events[0]["timing"]["source"] == "asr_trigger_text"
+    assert events[0]["timing"]["start"] == pytest.approx(1.0, abs=0.15)
+    assert events[1]["timing"]["start"] == pytest.approx(2.3, abs=0.15)

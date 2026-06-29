@@ -13,6 +13,7 @@ from bworkflow_sql.sync_service import SyncService
 from bworkflow_sql.utils import now_iso, text_hash
 import bworkflow_sql.workflow_service as workflow_service_module
 import bworkflow_sql.subtitle_helpers as subtitle_helpers_module
+import bworkflow_sql.tts_helpers as tts_helpers_module
 from bworkflow_sql.workflow_service import (
     DEFAULT_CLOSING_TEXT,
     VOICE_PROVIDER_MINIMAX,
@@ -21,6 +22,7 @@ from bworkflow_sql.workflow_service import (
     compress_internal_silence,
     markdown_file_to_voice_text,
     markdown_to_voice_text,
+    normalize_audio_loudness,
     normalize_generated_voice_silence,
     prepend_silence,
     split_subtitle_text,
@@ -1264,6 +1266,46 @@ def test_normalize_generated_voice_silence_applies_coarse_generation_filter(tmp_
     assert result["fixed_ms"] == 1490
 
 
+def test_normalize_audio_loudness_uses_two_pass_loudnorm(tmp_path: Path, monkeypatch):
+    audio_path = tmp_path / "voice.mp3"
+    audio_path.write_bytes(b"source audio")
+    commands: list[list[str]] = []
+
+    class FakeCompleted:
+        def __init__(self, stderr: str = "") -> None:
+            self.returncode = 0
+            self.stderr = stderr
+
+    def fake_run(command: list[str], **_: object) -> FakeCompleted:
+        commands.append(command)
+        if "-f" in command and "null" in command:
+            return FakeCompleted(
+                json.dumps(
+                    {
+                        "input_i": "-21.10",
+                        "input_tp": "-4.20",
+                        "input_lra": "6.10",
+                        "input_thresh": "-31.20",
+                        "target_offset": "0.40",
+                    }
+                )
+            )
+        Path(command[-1]).write_bytes(b"normalized audio")
+        return FakeCompleted()
+
+    monkeypatch.setattr(tts_helpers_module.subprocess, "run", fake_run)
+
+    result = normalize_audio_loudness(audio_path)
+
+    assert result["changed"] is True
+    assert result["two_pass"] is True
+    assert result["target_i_lufs"] == -11.0
+    assert audio_path.read_bytes() == b"normalized audio"
+    assert len(commands) == 2
+    assert any("loudnorm=I=-11.0:TP=-1.0:LRA=11.0" in item for item in commands[0])
+    assert any("measured_I=-21.10" in item for item in commands[1])
+
+
 def test_prepend_silence_adds_100ms_to_wav_start(tmp_path: Path):
     audio_path = tmp_path / "voice.wav"
     write_test_wav(audio_path, [(0.2, 0.6)], frame_rate=1000)
@@ -1307,6 +1349,7 @@ def test_generate_one_voice_runs_new_project_audio_postprocess(tmp_path: Path, m
         return {"enabled": True, "changed": True}
 
     monkeypatch.setattr(workflow_service_module, "normalize_generated_voice_silence", fake_normalize)
+    monkeypatch.setattr(workflow_service_module, "normalize_audio_loudness", lambda _path: {"enabled": True, "changed": True})
 
     output_path = service._generate_one_voice(
         FakeHttp(),

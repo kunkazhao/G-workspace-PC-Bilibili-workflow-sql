@@ -58,6 +58,19 @@ def test_xiaobo_template_2_uses_html_cover_frame_slot() -> None:
     }
 
 
+def test_xiaobo_template_3_uses_html_cover_frame_slot() -> None:
+    assert available_templates("小博") == ["小博-模板1", "小博-模板2", "小博-模板3"]
+    assert user_for_template("小博-模板3") == "小博"
+    assert image_set_for_template("小博-模板3") == "模板3"
+    assert get_template_slot("小博-模板3") == {
+        "x": 1015,
+        "y": 154,
+        "width": 680,
+        "height": 520,
+        "display_scale": 0.52,
+    }
+
+
 def test_xiaowai_template_2_uses_html_cover_stage_slot() -> None:
     assert get_template_slot("小歪-模板2") == {
         "x": -29,

@@ -177,6 +177,12 @@ data\workspace\project-{project_id}\intro\cutme-config-{script_block_id}-{accoun
 ```
 
 `cutme-config` 通过 `intro_plan_path` 交给 `python -m cutme` 渲染。页面日志会显示准备后的 `intro_plan`、CutMe 配置、素材预检结果、是否执行 ASR 对齐，以及最终选中的素材路径。
+
+当前新链路还会处理三件事：
+- 根据 `visual_event_specs[].trigger_text` 对齐引言配音 ASR，写入 `visual_events[].timing`，让文字卡片按配音逐项入场。
+- 从 `G:\2026项目-b站\素材-自动剪辑\1-音效` 精确匹配 6 个 `sfx_*.wav` 文件；缺音效只 warning，不阻断渲染。
+- 引言配音会先按口播增强档 loudnorm，CutMe 成片导出后还会对最终 MP4 再做一次同目标母带：`I=-11 LUFS / TP=-1.0 dB / LRA=11`，最终音频为 AAC 48kHz。
+
 ## CutMe 引言写作链路
 
 第一阶段“写引言文案”不再直接让 AI 自由写完整开头，而是先写模板槽位 JSON，再由仓库把槽位渲染成固定结构的引言文案和 CutMe `intro_plan`。

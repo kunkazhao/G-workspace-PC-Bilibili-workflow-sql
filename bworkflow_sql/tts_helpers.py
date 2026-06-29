@@ -3,11 +3,16 @@ from __future__ import annotations
 import math
 import os
 import re
+import json
+import logging
+import subprocess
 import wave
 from pathlib import Path
 from typing import Any
 
 from .utils import safe_text
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_TTS_FIELDS = {
@@ -55,6 +60,159 @@ DEFAULT_LEADING_SILENCE_MS = 100
 DEFAULT_MAX_LEADING_SILENCE_MS = 120
 DEFAULT_TRAILING_SILENCE_LIMIT_MS = 500
 DEFAULT_TRAILING_SILENCE_KEEP_MS = 200
+DEFAULT_LOUDNORM_I = -11.0
+DEFAULT_LOUDNORM_TP = -1.0
+DEFAULT_LOUDNORM_LRA = 11.0
+
+
+def normalize_audio_loudness(
+    audio_path: Path,
+    *,
+    target_i: float = DEFAULT_LOUDNORM_I,
+    target_tp: float = DEFAULT_LOUDNORM_TP,
+    target_lra: float = DEFAULT_LOUDNORM_LRA,
+) -> dict[str, Any]:
+    if not audio_path.exists():
+        return {"enabled": True, "changed": False, "reason": "missing file"}
+    if audio_path.stat().st_size <= 0:
+        return {"enabled": True, "changed": False, "reason": "empty file"}
+
+    try:
+        measured = _measure_loudness(audio_path, target_i=target_i, target_tp=target_tp, target_lra=target_lra)
+        result = _apply_loudnorm(
+            audio_path,
+            target_i=target_i,
+            target_tp=target_tp,
+            target_lra=target_lra,
+            measured=measured,
+        )
+        result["measured"] = measured
+        result["two_pass"] = True
+        return result
+    except Exception as exc:
+        logger.warning("两遍 loudnorm 失败，回退单遍处理：%s (%s)", audio_path, exc)
+        try:
+            return _apply_loudnorm(
+                audio_path,
+                target_i=target_i,
+                target_tp=target_tp,
+                target_lra=target_lra,
+                measured=None,
+            )
+        except Exception as fallback_exc:
+            logger.warning("音频响度归一化失败，保留原文件：%s (%s)", audio_path, fallback_exc)
+            return {
+                "enabled": True,
+                "changed": False,
+                "target_i_lufs": target_i,
+                "target_tp_db": target_tp,
+                "target_lra": target_lra,
+                "reason": str(fallback_exc),
+            }
+
+
+def _measure_loudness(
+    audio_path: Path,
+    *,
+    target_i: float,
+    target_tp: float,
+    target_lra: float,
+) -> dict[str, str]:
+    audio_filter = (
+        f"loudnorm=I={target_i}:TP={target_tp}:LRA={target_lra}:"
+        "print_format=json"
+    )
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-i", str(audio_path), "-af", audio_filter, "-f", "null", os.devnull],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"ffmpeg loudness measure failed: {result.returncode}")
+    input_marker = result.stderr.rfind('"input_i"')
+    if input_marker >= 0:
+        json_start = result.stderr.rfind("{", 0, input_marker)
+        json_end = result.stderr.find("}", input_marker)
+        if json_start >= 0 and json_end > json_start:
+            raw = result.stderr[json_start : json_end + 1]
+            cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", raw)
+            data = json.loads(cleaned)
+            if "input_i" in data and "target_offset" in data:
+                return {str(key): str(value) for key, value in data.items()}
+    raise RuntimeError("ffmpeg loudnorm did not return JSON measurement")
+
+
+def _apply_loudnorm(
+    audio_path: Path,
+    *,
+    target_i: float,
+    target_tp: float,
+    target_lra: float,
+    measured: dict[str, str] | None,
+) -> dict[str, Any]:
+    audio_filter = f"loudnorm=I={target_i}:TP={target_tp}:LRA={target_lra}"
+    if measured:
+        audio_filter += (
+            f":measured_I={measured['input_i']}"
+            f":measured_TP={measured['input_tp']}"
+            f":measured_LRA={measured['input_lra']}"
+            f":measured_thresh={measured['input_thresh']}"
+            f":offset={measured['target_offset']}"
+            ":linear=true:print_format=summary"
+        )
+
+    temp_path = audio_path.with_name(f"{audio_path.stem}.loudnorm.tmp{audio_path.suffix}")
+    command = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        str(audio_path),
+        "-af",
+        audio_filter,
+        *_audio_codec_args(audio_path),
+        str(temp_path),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or f"ffmpeg loudnorm apply failed: {result.returncode}")
+        temp_path.replace(audio_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+    return {
+        "enabled": True,
+        "changed": True,
+        "target_i_lufs": target_i,
+        "target_tp_db": target_tp,
+        "target_lra": target_lra,
+    }
+
+
+def _audio_codec_args(audio_path: Path) -> list[str]:
+    suffix = audio_path.suffix.casefold()
+    if suffix == ".wav":
+        return ["-c:a", "pcm_s16le"]
+    if suffix == ".mp3":
+        return ["-c:a", "libmp3lame", "-b:a", "192k"]
+    if suffix in {".m4a", ".aac"}:
+        return ["-c:a", "aac", "-b:a", "192k"]
+    if suffix == ".flac":
+        return ["-c:a", "flac"]
+    return ["-c:a", "aac", "-b:a", "192k"]
 
 
 def seconds_to_frames(seconds: float, frame_rate: int) -> int:

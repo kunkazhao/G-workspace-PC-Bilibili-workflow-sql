@@ -61,6 +61,7 @@ from .tts_helpers import (  # noqa: F401 – re-exported
     load_minimax_api_key,
     markdown_file_to_voice_text,
     markdown_to_voice_text,
+    normalize_audio_loudness,
     normalize_generated_voice_silence,
     normalize_voice_provider,
     prepend_silence,
@@ -1386,6 +1387,7 @@ class WorkflowService:
                     raise ValueError("MiniMax 响应里没有 audio 字段。")
                 final_path.parent.mkdir(parents=True, exist_ok=True)
                 final_path.write_bytes(bytes.fromhex(audio_hex))
+                normalize_audio_loudness(final_path)
                 return final_path
             last_error = f"[{code}] {base_resp.get('status_msg', '未知错误')}"
             if code in (1001, 1002, 1039) and attempt < 3:
@@ -1399,6 +1401,7 @@ class WorkflowService:
         if generated_path.resolve() != final_path.resolve():
             generated_path.replace(final_path)
         normalize_generated_voice_silence(final_path)
+        normalize_audio_loudness(final_path)
         return final_path
 
     def _has_existing_stale_voice_file(self, project_id: int, *, job: VoiceJob, account: dict[str, Any]) -> bool:

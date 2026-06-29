@@ -12,6 +12,7 @@ from .asset_paths import project_category_folder
 from .intro_timeline import align_intro_plan_scenes_with_asr
 from .settings import CUTME_ROOT, DEFAULT_INTRO_ASSET_ROOT, INTERNAL_WORKSPACE_ROOT
 from .subtitle_helpers import normalize_subtitle_alignment_text
+from .tts_helpers import normalize_audio_loudness
 from .utils import now_iso, safe_text
 
 
@@ -97,7 +98,7 @@ def prepare_intro_plan_for_cutme(
     )
 
     aligned_with_asr = False
-    if not _has_complete_scene_timing(plan):
+    if not _has_complete_scene_timing(plan) or _needs_visual_event_alignment(plan):
         plan = align_intro_plan_scenes_with_asr(plan, audio_path)
         aligned_with_asr = True
 
@@ -128,6 +129,7 @@ def prepare_cutme_config(
     template: str = "general",
     accent_color: str = "#00D4FF",
 ) -> dict[str, Any]:
+    normalize_audio_loudness(Path(audio_path))
     duration = get_cutme_audio_duration(audio_path)
     config = {
         "text": intro_text,
@@ -257,7 +259,9 @@ def _ensure_selected_assets(
     triple_count = int(needed.get("triple_cta") or 0)
     has_products = len(selected.get("product_demo") or []) >= product_count
     has_triple = not triple_count or bool(selected.get("triple_cta"))
-    if has_products and has_triple:
+    sfx_contract = plan.get("sfx_contract")
+    has_sfx = not isinstance(sfx_contract, dict) or bool(selected.get("sfx"))
+    if has_products and has_triple and has_sfx:
         return plan
 
     asset_contract = plan.get("asset_contract")
@@ -271,6 +275,7 @@ def _ensure_selected_assets(
         asset_root=asset_root,
         category_folder=project_category_folder(project),
         asset_contract=asset_contract,
+        sfx_contract=sfx_contract if isinstance(sfx_contract, dict) else None,
         scenes=list(plan.get("scenes") or []),
         seed=seed or f"{account_label}-{now_iso()}",
     )
@@ -279,6 +284,10 @@ def _ensure_selected_assets(
         raise ValueError("引言素材预检查失败：\n" + "\n".join(f"- {item}" for item in errors))
 
     result = dict(plan)
+    asset_selection["selected_assets"] = {
+        **selected,
+        **dict(asset_selection.get("selected_assets") or {}),
+    }
     result.update(asset_selection)
     return result
 
@@ -310,6 +319,29 @@ def _has_complete_scene_timing(plan: dict[str, Any]) -> bool:
         if start < 0 or duration <= 0:
             return False
     return True
+
+
+def _needs_visual_event_alignment(plan: dict[str, Any]) -> bool:
+    specs = plan.get("visual_event_specs")
+    if not isinstance(specs, list) or not specs:
+        return False
+    events = plan.get("visual_events")
+    if not isinstance(events, list) or len(events) < len(specs):
+        return True
+    for event in events:
+        if not isinstance(event, dict):
+            return True
+        timing = event.get("timing")
+        if not isinstance(timing, dict):
+            return True
+        try:
+            start = float(timing.get("start"))
+            duration = float(timing.get("duration"))
+        except (TypeError, ValueError):
+            return True
+        if start < 0 or duration <= 0:
+            return True
+    return False
 
 
 def _visual_cue_counts(plan: dict[str, Any]) -> dict[str, int]:

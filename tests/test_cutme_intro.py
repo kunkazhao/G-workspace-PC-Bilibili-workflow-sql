@@ -44,6 +44,19 @@ def _write_plan(path: Path) -> None:
                 {"role": "triple_cta", "source": "common_folder", "match_keywords": ["引导三连"]},
             ],
         },
+        "sfx_contract": {
+            "enabled_in_contract": True,
+            "folder_name": "1-音效",
+            "selection_policy": "exact_filename",
+            "sfx_slots": [
+                {"role": "text_pop", "filename": "sfx_text_pop.wav", "required": False},
+                {"role": "text_swipe", "filename": "sfx_text_swipe.wav", "required": False},
+                {"role": "title_hit", "filename": "sfx_title_hit.wav", "required": False},
+                {"role": "transition_whoosh", "filename": "sfx_transition_whoosh.wav", "required": False},
+                {"role": "progress_tick", "filename": "sfx_progress_tick.wav", "required": False},
+                {"role": "cta_pop", "filename": "sfx_cta_pop.wav", "required": False},
+            ],
+        },
         "scenes": scenes,
     }
     path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
@@ -57,12 +70,23 @@ def test_prepare_intro_plan_selects_assets_without_reuse(tmp_path: Path):
     asset_root = tmp_path / "素材"
     category_dir = asset_root / "数码-键盘"
     common_dir = asset_root / "1-通用"
+    sfx_dir = asset_root / "1-音效"
     category_dir.mkdir(parents=True)
     common_dir.mkdir(parents=True)
+    sfx_dir.mkdir(parents=True)
     for index in range(1, 5):
         (category_dir / f"product-{index}.mp4").write_bytes(b"")
     (common_dir / "引导三连1.mp4").write_bytes(b"")
     (common_dir / "点赞1.mp4").write_bytes(b"")
+    for filename in [
+        "sfx_text_pop.wav",
+        "sfx_text_swipe.wav",
+        "sfx_title_hit.wav",
+        "sfx_transition_whoosh.wav",
+        "sfx_progress_tick.wav",
+        "sfx_cta_pop.wav",
+    ]:
+        (sfx_dir / filename).write_bytes(b"")
 
     prepared = cutme_intro_module.prepare_intro_plan_for_cutme(
         source_plan_path=source_plan,
@@ -79,6 +103,15 @@ def test_prepare_intro_plan_selects_assets_without_reuse(tmp_path: Path):
     assert len(selected["product_demo"]) == 3
     assert len(set(selected["product_demo"])) == 3
     assert selected["triple_cta"].endswith("引导三连1.mp4")
+    assert set(selected["sfx"]) == {
+        "text_pop",
+        "text_swipe",
+        "title_hit",
+        "transition_whoosh",
+        "progress_tick",
+        "cta_pop",
+    }
+    assert selected["sfx"]["text_pop"].endswith("sfx_text_pop.wav")
     assert prepared["preflight"]["ok"] is True
     assert prepared["pc_workflow"]["aligned_with_asr"] is False
     assert json.loads(output_plan.read_text(encoding="utf-8"))["selected_assets"] == selected

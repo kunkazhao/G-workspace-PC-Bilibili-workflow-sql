@@ -14,7 +14,7 @@ from typing import Any
 TEMPLATE_COORDS: dict[str, dict[str, Any]] = {
     "小博-模板1": {"x": 850, "y": 95, "width": 980, "height": 620},
     "小博-模板2": {"x": 1015, "y": 154, "width": 680, "height": 520, "display_scale": 0.52},
-    "小博-模板3": {"x": 1015, "y": 154, "width": 680, "height": 520},
+    "小博-模板3": {"x": 1015, "y": 154, "width": 680, "height": 520, "display_scale": 0.52},
     "小燃-模板1": {"x": -830, "y": -77, "width": 970, "height": 590, "coordinate_mode": "clip_transform_pixels"},
     "小燃-模板2": {"x": 50, "y": 322, "width": 1004, "height": 588},
     "小歪-模板1": {"x": -855, "y": -22, "width": 960, "height": 540, "coordinate_mode": "clip_transform_pixels"},
