@@ -184,6 +184,7 @@ data\workspace\project-{project_id}\intro\cutme-config-{script_block_id}-{accoun
 - 根据 `visual_event_specs[].trigger_text` 对齐引言配音 ASR，写入 `visual_events[].timing`，让文字卡片按配音逐项入场。
 - 从 `G:\2026项目-b站\素材-自动剪辑\1-音效` 精确匹配 6 个 `sfx_*.wav` 文件；缺音效只 warning，不阻断渲染。
 - 引言配音会先按口播增强档 loudnorm，CutMe 成片导出后还会对最终 MP4 再做一次同目标母带：`I=-11 LUFS / TP=-1.0 dB / LRA=11`，最终音频为 AAC 48kHz。
+- CutMe 渲染时会把选中的产品展示/引导三连视频先转成 workspace 内的稳定 MP4：H.264、1920x1080 cover crop、30fps、GOP 30、yuv420p、`+faststart`，并丢弃素材原声；原始素材不修改。这个步骤用于避免 HyperFrames 因素材关键帧稀疏出现 seek 卡帧。
 - CutMe 根据 seed 生成 `visual_variant`，控制颜色、布局偏移、卡片样式、背景图选择、产品镜头轻微偏移和入场节奏。没有 seed 时保持旧固定样式。
 - `general` 模板还会按 seed 为 7 个段落分别选择 `a/b/c` 结构方案，具体方案图在 CutMe 仓库 `design-previews/general-random-v2/`。
 
