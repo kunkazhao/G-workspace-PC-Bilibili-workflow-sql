@@ -114,6 +114,7 @@ def test_prepare_intro_plan_selects_assets_without_reuse(tmp_path: Path):
     assert selected["sfx"]["text_pop"].endswith("sfx_text_pop.wav")
     assert prepared["preflight"]["ok"] is True
     assert prepared["pc_workflow"]["aligned_with_asr"] is False
+    assert prepared["pc_workflow"]["seed"] == "fixed"
     assert json.loads(output_plan.read_text(encoding="utf-8"))["selected_assets"] == selected
 
 
@@ -151,3 +152,27 @@ def test_prepare_cutme_config_writes_intro_plan_path(tmp_path: Path, monkeypatch
     assert saved == config
     assert saved["intro_plan_path"] == str(plan_path)
     assert saved["audio_duration"] == 12.5
+    assert saved["seed"] == ""
+
+
+def test_build_intro_visual_seed_is_fresh_per_prepare(monkeypatch):
+    project = {"id": 1, "name": "数码-键盘"}
+    tokens = iter(["aaa111", "bbb222"])
+    monkeypatch.setattr(cutme_intro_module, "now_iso", lambda: "2026-06-30T06:00:00")
+    monkeypatch.setattr(cutme_intro_module.secrets, "token_hex", lambda _size: next(tokens))
+
+    first = cutme_intro_module.build_intro_visual_seed(
+        project=project,
+        account_label="小博",
+        script_block_id=7,
+    )
+    second = cutme_intro_module.build_intro_visual_seed(
+        project=project,
+        account_label="小博",
+        script_block_id=7,
+    )
+    assert first == "intro-2026-06-30T06:00:00-aaa111"
+    assert second == "intro-2026-06-30T06:00:00-bbb222"
+    assert first != second
+    assert "小博" not in first
+    assert "数码-键盘" not in first

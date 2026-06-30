@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -108,6 +109,7 @@ def prepare_intro_plan_for_cutme(
         "asset_root": str(asset_root),
         "category_folder": project_category_folder(project),
         "account_label": account_label,
+        "seed": seed or "",
         "aligned_with_asr": aligned_with_asr,
     }
 
@@ -128,6 +130,7 @@ def prepare_cutme_config(
     subtitle: str = "",
     template: str = "general",
     accent_color: str = "#00D4FF",
+    seed: str = "",
 ) -> dict[str, Any]:
     normalize_audio_loudness(Path(audio_path))
     duration = get_cutme_audio_duration(audio_path)
@@ -141,6 +144,7 @@ def prepare_cutme_config(
         "asset_folder": asset_folder,
         "template": template,
         "accent_color": accent_color,
+        "seed": seed,
         "intro_plan_path": str(intro_plan_path),
     }
     target = Path(config_path)
@@ -172,7 +176,11 @@ def prepare_cutme_intro(
         script_block_id=script_block_id,
         account_label=account_label,
     )
-    seed = f"{account_label}-{project_category_folder(project)}-{now_iso()}"
+    seed = build_intro_visual_seed(
+        project=project,
+        account_label=account_label,
+        script_block_id=script_block_id,
+    )
     plan = prepare_intro_plan_for_cutme(
         source_plan_path=source_plan_path,
         audio_path=audio_path,
@@ -190,6 +198,7 @@ def prepare_cutme_intro(
         intro_text=intro_text,
         title=title,
         asset_folder=asset_folder,
+        seed=seed,
     )
     return PreparedCutMeIntro(
         intro_plan_path=intro_plan_path,
@@ -277,7 +286,7 @@ def _ensure_selected_assets(
         asset_contract=asset_contract,
         sfx_contract=sfx_contract if isinstance(sfx_contract, dict) else None,
         scenes=list(plan.get("scenes") or []),
-        seed=seed or f"{account_label}-{now_iso()}",
+        seed=seed or f"{account_label}-{project_category_folder(project)}",
     )
     errors = (asset_selection.get("preflight") or {}).get("errors") or []
     if errors:
@@ -362,6 +371,17 @@ def _ensure_cutme_import_path() -> None:
     root = str(CUTME_ROOT)
     if root not in sys.path:
         sys.path.insert(0, root)
+
+
+def build_intro_visual_seed(
+    *,
+    project: dict[str, Any],
+    account_label: str,
+    script_block_id: int,
+) -> str:
+    # Deliberately not derived from account/category/script id: each render should
+    # get fresh visual randomization even for the same intro.
+    return f"intro-{now_iso()}-{secrets.token_hex(6)}"
 
 
 def _safe_path_part(value: str) -> str:

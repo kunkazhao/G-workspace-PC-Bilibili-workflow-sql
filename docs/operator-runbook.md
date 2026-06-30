@@ -178,10 +178,20 @@ data\workspace\project-{project_id}\intro\cutme-config-{script_block_id}-{accoun
 
 `cutme-config` 通过 `intro_plan_path` 交给 `python -m cutme` 渲染。页面日志会显示准备后的 `intro_plan`、CutMe 配置、素材预检结果、是否执行 ASR 对齐，以及最终选中的素材路径。
 
-当前新链路还会处理三件事：
+`prepared intro_plan` 会写入 `pc_workflow.seed`，`cutme-config` 会写入 `"seed"`。生产 seed 每次准备 CutMe 渲染时重新生成，不按账号、品类或引言固定绑定；同一个账号/品类/引言块重复生成，也应该得到不同视觉变体。当前先走文件契约，不急着入库。
+
+当前新链路还会处理四件事：
 - 根据 `visual_event_specs[].trigger_text` 对齐引言配音 ASR，写入 `visual_events[].timing`，让文字卡片按配音逐项入场。
 - 从 `G:\2026项目-b站\素材-自动剪辑\1-音效` 精确匹配 6 个 `sfx_*.wav` 文件；缺音效只 warning，不阻断渲染。
 - 引言配音会先按口播增强档 loudnorm，CutMe 成片导出后还会对最终 MP4 再做一次同目标母带：`I=-11 LUFS / TP=-1.0 dB / LRA=11`，最终音频为 AAC 48kHz。
+- CutMe 根据 seed 生成 `visual_variant`，控制颜色、布局偏移、卡片样式、背景图选择、产品镜头轻微偏移和入场节奏。没有 seed 时保持旧固定样式。
+- `general` 模板还会按 seed 为 7 个段落分别选择 `a/b/c` 结构方案，具体方案图在 CutMe 仓库 `design-previews/general-random-v2/`。
+
+临时测试视频、抽帧、探针 config、对比样片不要再直接堆在正式 `intro\` 根目录。需要测试时放到：
+
+```text
+data\workspace\project-{project_id}\intro-test-runs\{test-name}-{date}\
+```
 
 ## CutMe 引言写作链路
 
