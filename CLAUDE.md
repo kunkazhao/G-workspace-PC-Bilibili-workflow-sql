@@ -21,7 +21,7 @@
 | Master 同步 | 同步中心先预览 Master 变化；如果 Master API 连接失败，用 `MasterServiceManager.ensure_running()` 尝试启动 `G:\workspace\bilibili-newTools-next-master` 后端再重试预览。 |
 | 手动配音映射 | 同步中心的配音检查对缺失和过期配音提供 `手动映射音频`，调用 `SyncService.manual_bind_voice_asset(...)` 写入 `asset_bindings.source_kind='manual'`，并用当前文案 hash 标记 ready。 |
 | 配音方式 | `生成配音` 和 `单独配音` 都支持 `IndexTTS 本地服务` 与 `MiniMax API`。页面仍按同一个用户名称选择，后端用 `voice_id` 对应 IndexTTS、`minimax_voice_id` 对应 MiniMax。 |
-| MiniMax 配置 | API key 读取顺序是环境变量 `MINIMAX_API_KEY`，然后 `C:\Users\zhaoer\.codex\skills\minimax-tts\.env`。常用映射：小博 `xiaobo-v2`，小燃 `xiaoran-v2`，小歪 `xiaowai-v6`，知了 `bilibili-zhiliao`，荣荣/蓉蓉 `rongrong-v2`。 |
+| MiniMax 配置 | API key 读取顺序是环境变量 `MINIMAX_API_KEY`，然后 `C:\Users\zhaoer\.codex\skills\zhaoer-tools-minimax-tts\.env`，再兼容旧路径 `C:\Users\zhaoer\.codex\skills\minimax-tts\.env` 和当前工作目录 `.env`。常用映射：小博 `xiaobo-v2`，小燃 `xiaoran-v2`，小歪 `xiaowai-v6`，知了 `bilibili-zhiliao`，荣荣/蓉蓉 `rongrong-v2`。 |
 | MiniMax 换音色 | 用 `scripts/swap_voice.py`；MiniMax 旧 voice id 不能覆盖，必须克隆到新的 `NEW_MINIMAX_VOICE_ID`。脚本兼容无 `MINIMAX_GROUP_ID` 的 `.env`，成功时输出 `SWAP_DONE=1`。 |
 | IndexTTS 音色 | 本地 voice profile 的 `speaker_audio_path` 是重新注册 IndexTTS 的来源路径。更换参考音频时要同步 `data\bworkflow.db.voice_profiles`，不要只改 `G:\Tools\IndexTTS2.0\outputs\voices\voices.json`。 |
 | 小歪当前音色 | IndexTTS 参考音频：`G:\Tools\自己用的音色\小歪10秒新.mp3`；MiniMax voice id：`xiaowai-v6`。 |

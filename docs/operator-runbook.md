@@ -5,7 +5,7 @@
 | 操作 | 入口 | 关键规则 | 验证 |
 |---|---|---|---|
 | 更换用户音色 | `scripts/swap_voice.py` | 先改 CONFIG 区；IndexTTS 更新 `voice_profiles` 和 `G:\Tools\IndexTTS2.0\outputs\voices\voices.json`；MiniMax 必须克隆到一个新的 `NEW_MINIMAX_VOICE_ID`，旧 voice id 不能覆盖。 | 运行脚本后确认输出 `VERIFY_DB_JSON_OK=1` 和 `SWAP_DONE=1`。 |
-| MiniMax 小歪音色 | `accounts.minimax_voice_id`、`bworkflow_sql/workflow_service.py`、`C:\Users\zhaoer\.codex\skills\minimax-tts\scripts\t2a_core.py` | 当前小歪 MiniMax voice id 是 `xiaowai-v6`。App 优先读账号行的 `minimax_voice_id`；中文别名也要同步，避免单独调用 MiniMax skill 时走旧音色。 | `python scripts/_check_accounts.py`，小歪应显示 `xiaowai-v6`。 |
+| MiniMax 小歪音色 | `accounts.minimax_voice_id`、`bworkflow_sql/workflow_service.py`、`C:\Users\zhaoer\.codex\skills\zhaoer-tools-minimax-tts\scripts\t2a_core.py` | 当前小歪 MiniMax voice id 是 `xiaowai-v6`。App 优先读账号行的 `minimax_voice_id`；中文别名也要同步，避免单独调用 MiniMax skill 时走旧音色。 | `python scripts/_check_accounts.py`，小歪应显示 `xiaowai-v6`。 |
 | IndexTTS 小歪音色 | `data\bworkflow.db.voice_profiles`、IndexTTS `voices.json` | 当前小歪参考音频是 `G:\Tools\自己用的音色\小歪10秒新.mp3`。更换时必须同步 DB 和 `voices.json` 指纹。 | `python scripts/_check_xiaowai.py`，路径应指向新参考音频。 |
 | 结尾配音 | `accounts.closing_audio_path` | 生成口播 manifest 时 `_closing_manifest_entry(...)` 读取当前用户 `closing_audio_path`；文件存在才写入结尾音频。当前小歪结尾配音是 `G:\2026项目-b站\素材-配音\公共-结尾\小歪\结尾-小歪.mp3`。 | 查询 `SELECT label, closing_audio_path FROM accounts WHERE label='小歪'`；运行 `python -m pytest -q tests/test_workflow_service.py -k closing`。 |
 | 弹窗居中 | `bworkflow_sql/ui.py::_center_dialog` | 所有 `CTkToplevel` 应调用 `_center_dialog(dialog)`；该函数优先按父窗口/主窗口居中，父窗口几何不可用时才按屏幕居中。不要在新弹窗里手写 `winfo_screenwidth()` 居中。 | `python -m py_compile bworkflow_sql\ui.py` 和 `python -m pytest -q tests/test_ui_helpers.py`。 |

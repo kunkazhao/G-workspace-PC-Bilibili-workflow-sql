@@ -30,8 +30,23 @@ OLD_MINIMAX_VOICE_ID = "xiaowai-v4"                      # 当前 accounts.minim
 DB_PATH = Path(r"G:\workspace\PC-Bilibili-workflow-sql\data\bworkflow.db")
 VOICES_JSON = Path(r"G:\Tools\IndexTTS2.0\outputs\voices\voices.json")
 WORKFLOW_SERVICE = Path(r"G:\workspace\PC-Bilibili-workflow-sql\bworkflow_sql\workflow_service.py")
-T2A_CORE = Path(r"C:\Users\zhaoer\.codex\skills\minimax-tts\scripts\t2a_core.py")
-ENV_PATH = Path(r"C:\Users\zhaoer\.codex\skills\minimax-tts\.env")
+MINIMAX_SKILL_ROOT = Path(r"C:\Users\zhaoer\.codex\skills\zhaoer-tools-minimax-tts")
+MINIMAX_LEGACY_SKILL_ROOT = Path(r"C:\Users\zhaoer\.codex\skills\minimax-tts")
+T2A_CORE = next(
+    (
+        path
+        for path in (
+            MINIMAX_SKILL_ROOT / "scripts" / "t2a_core.py",
+            MINIMAX_LEGACY_SKILL_ROOT / "scripts" / "t2a_core.py",
+        )
+        if path.exists()
+    ),
+    MINIMAX_SKILL_ROOT / "scripts" / "t2a_core.py",
+)
+ENV_PATHS = (
+    MINIMAX_SKILL_ROOT / ".env",
+    MINIMAX_LEGACY_SKILL_ROOT / ".env",
+)
 
 MINIMAX_API = "https://api.minimaxi.com"
 
@@ -51,9 +66,12 @@ def env(key: str) -> str:
     v = os.getenv(key)
     if v:
         return v
-    for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
-        if line.startswith(key):
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    for path in ENV_PATHS:
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            if line.startswith(key):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
     raise RuntimeError(f"缺少 {key}")
 
 

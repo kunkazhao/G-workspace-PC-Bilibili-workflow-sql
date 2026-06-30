@@ -49,7 +49,12 @@ MINIMAX_VOICE_ALIASES = {
     "小歪": "xiaowai-v6",
 }
 MINIMAX_KNOWN_LOCAL_VOICE_IDS = set(MINIMAX_VOICE_ALIASES.values())
-MINIMAX_SKILL_ENV_PATH = Path(r"C:\Users\zhaoer\.codex\skills\minimax-tts\.env")
+MINIMAX_SKILL_ENV_PATH = Path(r"C:\Users\zhaoer\.codex\skills\zhaoer-tools-minimax-tts\.env")
+MINIMAX_LEGACY_SKILL_ENV_PATH = Path(r"C:\Users\zhaoer\.codex\skills\minimax-tts\.env")
+MINIMAX_ENV_FILE_PATHS = (
+    MINIMAX_SKILL_ENV_PATH,
+    MINIMAX_LEGACY_SKILL_ENV_PATH,
+)
 DEFAULT_SILENCE_THRESHOLD_DB = -45.0
 DEFAULT_MIN_SILENCE_MS = 300
 DEFAULT_KEEP_SILENCE_MS = 220
@@ -271,11 +276,13 @@ def load_minimax_api_key() -> str:
     env_value = os.environ.get("MINIMAX_API_KEY", "").strip()
     if env_value:
         return env_value
-    for candidate in (MINIMAX_SKILL_ENV_PATH, Path.cwd() / ".env"):
+    candidates = (*MINIMAX_ENV_FILE_PATHS, Path.cwd() / ".env")
+    for candidate in candidates:
         value = _load_env_file_value(candidate, "MINIMAX_API_KEY")
         if value:
             return value
-    raise ValueError(f"找不到 MINIMAX_API_KEY。请配置系统环境变量，或写入：{MINIMAX_SKILL_ENV_PATH}")
+    paths = "、".join(str(path) for path in candidates)
+    raise ValueError(f"找不到 MINIMAX_API_KEY。请配置系统环境变量，或写入：{paths}")
 
 
 def dbfs_for_chunk(chunk: bytes, sample_width: int) -> float:

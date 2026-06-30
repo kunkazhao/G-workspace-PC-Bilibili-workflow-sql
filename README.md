@@ -114,7 +114,7 @@ Output rules:
 - User selection is still by the same visible account label such as `小博`, `小燃`, or `小歪`. The account row stores provider-specific ids:
   - `voice_id` for IndexTTS.
   - `minimax_voice_id` for MiniMax.
-- MiniMax API keys are read from the `MINIMAX_API_KEY` environment variable first, then from `C:\Users\zhaoer\.codex\skills\minimax-tts\.env`.
+- MiniMax API keys are read from the `MINIMAX_API_KEY` environment variable first, then from `C:\Users\zhaoer\.codex\skills\zhaoer-tools-minimax-tts\.env`, then the legacy `C:\Users\zhaoer\.codex\skills\minimax-tts\.env`, then the current working directory `.env`.
 - Known MiniMax voice aliases include `小博 -> xiaobo-v2`, `小燃 -> xiaoran-v2`, `小歪 -> xiaowai-v6`, `知了 -> bilibili-zhiliao`, and `荣荣/蓉蓉 -> rongrong-v2`.
 - Replacing a user's voice should use `scripts/swap_voice.py`. The script updates IndexTTS (`voice_profiles` plus `voices.json`) and clones a new MiniMax voice id; MiniMax voice ids are not overwritten in place.
 - MiniMax standalone voice generation requires a configured user voice. Uploading a one-off reference audio file is an IndexTTS-only mode.

@@ -78,6 +78,37 @@ def seed_project(tmp_path: Path):
     return db, project_id
 
 
+def test_load_minimax_api_key_prefers_new_skill_env(monkeypatch, tmp_path: Path):
+    new_skill_env = tmp_path / "zhaoer-tools-minimax-tts.env"
+    legacy_skill_env = tmp_path / "minimax-tts.env"
+    cwd_env = tmp_path / ".env"
+    new_skill_env.write_text("MINIMAX_API_KEY=new-skill-key\n", encoding="utf-8")
+    legacy_skill_env.write_text("MINIMAX_API_KEY=legacy-key\n", encoding="utf-8")
+    cwd_env.write_text("MINIMAX_API_KEY=cwd-key\n", encoding="utf-8")
+
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(tts_helpers_module, "MINIMAX_ENV_FILE_PATHS", (new_skill_env, legacy_skill_env))
+
+    assert tts_helpers_module.load_minimax_api_key() == "new-skill-key"
+
+    new_skill_env.unlink()
+    assert tts_helpers_module.load_minimax_api_key() == "legacy-key"
+
+    legacy_skill_env.unlink()
+    assert tts_helpers_module.load_minimax_api_key() == "cwd-key"
+
+
+def test_load_minimax_api_key_prefers_process_env(monkeypatch, tmp_path: Path):
+    new_skill_env = tmp_path / "zhaoer-tools-minimax-tts.env"
+    new_skill_env.write_text("MINIMAX_API_KEY=new-skill-key\n", encoding="utf-8")
+
+    monkeypatch.setenv("MINIMAX_API_KEY", "process-key")
+    monkeypatch.setattr(tts_helpers_module, "MINIMAX_ENV_FILE_PATHS", (new_skill_env,))
+
+    assert tts_helpers_module.load_minimax_api_key() == "process-key"
+
+
 def write_test_wav(path: Path, segments: list[tuple[float, float]], *, frame_rate: int = 16000) -> None:
     samples: list[int] = []
     for duration_sec, amplitude in segments:
