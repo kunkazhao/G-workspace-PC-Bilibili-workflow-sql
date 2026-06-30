@@ -209,7 +209,12 @@ def prepare_cutme_intro(
     )
 
 
-def run_cutme_render(config_path: str | Path, output_path: str | Path) -> Path:
+def run_cutme_render(
+    config_path: str | Path,
+    output_path: str | Path,
+    *,
+    renderer: str = "remotion",
+) -> Path:
     config = Path(config_path)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -223,7 +228,17 @@ def run_cutme_render(config_path: str | Path, output_path: str | Path) -> Path:
     env["PYTHONIOENCODING"] = "utf-8"
 
     result = subprocess.run(
-        [sys.executable, "-m", "cutme", str(config), "--output", str(output), "--clean"],
+        [
+            sys.executable,
+            "-m",
+            "cutme",
+            str(config),
+            "--renderer",
+            renderer,
+            "--output",
+            str(output),
+            "--clean",
+        ],
         cwd=str(CUTME_ROOT),
         env=env,
         capture_output=True,
