@@ -261,6 +261,43 @@ def test_build_product_recommendation_package_can_force_cover_only_media(
     assert products[0]["videoAsset"] is None
 
 
+def test_build_final_mp4_package_uses_product_card_without_legacy_image(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    with db.connect() as conn:
+        conn.execute("UPDATE asset_bindings SET status='missing' WHERE asset_type='image' AND uid='P001'")
+        account_label = conn.execute(
+            "SELECT account_label FROM asset_bindings WHERE asset_type='voice' AND uid='P001'"
+        ).fetchone()[0]
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label=account_label,
+        output_mode="final_mp4",
+    )
+
+    product = next(
+        segment
+        for segment in result.package["segments"]
+        if segment.get("productUid") == "P001"
+    )
+
+    assert not any(
+        item["kind"] == "product_image" and item["uid"] == "P001"
+        for item in result.missing
+    )
+    assert product["imageCardAsset"] is None
+    assert product["assetBindingIds"]["image"] is None
+    assert product["productCard"]["coverAsset"].endswith("P001.png")
+    assert "fallbackImageAsset" not in product["productCard"]
+
+
 def test_build_product_recommendation_package_downloads_remote_cover_to_category_cache(
     tmp_path: Path,
     monkeypatch,

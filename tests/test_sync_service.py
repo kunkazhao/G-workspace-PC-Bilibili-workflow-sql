@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from bworkflow_sql.db import Database
@@ -210,6 +211,42 @@ def test_master_sync_forces_fresh_scheme_summary(tmp_path: Path, monkeypatch):
 
     assert calls == [{"workspace_id": "workspace-1", "scheme_id": "scheme-1", "force_refresh": True}]
     assert result["added"] == [{"uid": "JP096", "title": "狼蛛F75Max 客制化", "price_label": "279元", "master_item_id": "", "sort_order": 1}]
+
+
+def test_master_sync_preserves_product_card_fields(tmp_path: Path, monkeypatch):
+    db = Database(tmp_path / "test.db")
+    project_id = db.upsert_project(
+        {
+            "name": "keyboard",
+            "workspace_id": "workspace-1",
+            "scheme_id": "scheme-1",
+        }
+    )
+
+    def fake_fetch_summary(self, *, workspace_id, scheme_id, force_refresh=False):
+        return {
+            "items": [
+                {
+                    "uid": "JP096",
+                    "title": "Alpha Keyboard",
+                    "price": "279",
+                    "cover_url": "https://img.example.com/JP096.jpg",
+                    "remark": "Stable connection.",
+                    "spec": {"switch": "silver", "_internal": "ignored"},
+                }
+            ]
+        }
+
+    monkeypatch.setattr("bworkflow_sql.master_data.MasterDataService.fetch_scheme_summary", fake_fetch_summary)
+
+    result = SyncService(db).sync_master_scheme(project_id)
+    product = Repository(db).products(project_id)[0]
+    card = json.loads(product["product_card_json"])
+
+    assert result["added"][0]["uid"] == "JP096"
+    assert card["coverAsset"] == "https://img.example.com/JP096.jpg"
+    assert card["dataMap"]["remark"] == "Stable connection."
+    assert card["slots"] == [{"label": "switch", "value": "silver"}]
 
 
 def test_master_sync_trusts_matching_category_id_when_names_are_aliases(tmp_path: Path, monkeypatch):

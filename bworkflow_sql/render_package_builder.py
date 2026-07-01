@@ -140,16 +140,6 @@ def build_product_recommendation_package(
         )
         video = _ready_asset(assets, asset_type="video", uid=uid)
         product_missing = False
-        if not image:
-            product_missing = True
-            missing.append(
-                {
-                    "kind": "product_image",
-                    "uid": uid,
-                    "title": title,
-                    "message": "missing ready image for product",
-                }
-            )
         if not voice:
             product_missing = True
             missing.append(
@@ -161,11 +151,8 @@ def build_product_recommendation_package(
                     "message": "missing ready voice for product script",
                 }
             )
-        if product_missing:
-            continue
 
-        voice_path = _absolute_file_path(voice.get("path"))
-        image_path = _absolute_file_path(image.get("path"))
+        image_path = _absolute_file_path(image.get("path")) if image else None
         video_path = (
             _absolute_file_path(video.get("path"))
             if media_mode == "video_preferred" and video
@@ -187,6 +174,20 @@ def build_product_recommendation_package(
                 }
             )
             continue
+        if not image and (output_mode == "jianying_draft" or not product_card):
+            product_missing = True
+            missing.append(
+                {
+                    "kind": "product_image",
+                    "uid": uid,
+                    "title": title,
+                    "message": "missing ready image for product",
+                }
+            )
+        if product_missing:
+            continue
+
+        voice_path = _absolute_file_path(voice.get("path"))
         product_segment = {
             "type": "product_recommendation",
             "id": f"product-{uid}",
@@ -195,13 +196,13 @@ def build_product_recommendation_package(
             "priceRangeLabel": safe_text(product.get("price_label")),
             "spokenText": safe_text(block.get("body")),
             "voiceAsset": str(voice_path),
-            "imageCardAsset": str(image_path),
+            "imageCardAsset": str(image_path) if image_path else None,
             "videoAsset": str(video_path) if video_path else None,
             "productMediaMode": media_mode,
             "duration": get_audio_duration_seconds(voice_path),
             "sourceScriptBlockId": int(block.get("id") or 0),
             "assetBindingIds": {
-                "image": int(image.get("id") or 0),
+                "image": int(image.get("id") or 0) if image else None,
                 "voice": int(voice.get("id") or 0),
                 "video": int(video.get("id") or 0) if video else None,
             },
@@ -311,7 +312,7 @@ def _product_card_payload(
     product: dict[str, Any],
     *,
     project: dict[str, Any],
-    fallback_image_path: Path,
+    fallback_image_path: Path | None,
 ) -> dict[str, Any] | None:
     raw = safe_text(product.get("product_card_json"))
     if not raw:
@@ -344,7 +345,6 @@ def _product_card_payload(
         "templateId": safe_text(payload.get("templateId")) or "xiaoran1",
         "dataMap": _string_map(data_map),
         "slots": _slot_list(slots),
-        "fallbackImageAsset": str(fallback_image_path),
         "coverMediaSlot": {
             "x": 24,
             "y": 140,
@@ -354,6 +354,8 @@ def _product_card_payload(
             "sourceHeight": 480,
         },
     }
+    if fallback_image_path:
+        normalized["fallbackImageAsset"] = str(fallback_image_path)
     if cover_asset:
         normalized["coverAsset"] = cover_asset
         normalized["dataMap"]["cover"] = cover_asset

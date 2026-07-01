@@ -702,6 +702,47 @@ def test_jianying_intro_video_filters_intro_manifest_entries(tmp_path: Path):
     assert any(entry.get("type") == "product" for entry in payload["entries"])
 
 
+def test_jianying_manifest_refreshes_display_slots_before_generation(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    manifest_path = tmp_path / "stale.manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "display_template": "小燃-模板2",
+                "entries": [
+                    {
+                        "type": "product",
+                        "section": "product",
+                        "display_video_path": str(tmp_path / "rollb.mov"),
+                        "display_video_slot": {
+                            "x": 50,
+                            "y": 322,
+                            "width": 1004,
+                            "height": 588,
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    refreshed = service._jianying_manifest_for_intro_video(project_id, manifest_path, intro_video=None)
+    payload = json.loads(refreshed.read_text(encoding="utf-8"))
+
+    assert refreshed != manifest_path
+    assert payload["entries"][0]["display_video_slot"] == {
+        "x": 47,
+        "y": 317,
+        "width": 1003,
+        "height": 588,
+        "display_scale": 0.55,
+    }
+
+
 def test_jianying_generation_skips_subtitles_by_default(tmp_path: Path, monkeypatch):
     db, project_id = seed_project(tmp_path)
     service = WorkflowService(db)

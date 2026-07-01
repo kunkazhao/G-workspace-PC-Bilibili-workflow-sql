@@ -47,6 +47,16 @@ def _voice_text_label(block: dict[str, Any], length: int = 2) -> str:
     return text[:length]
 
 
+def _master_preview_product(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "uid": safe_text(item.get("uid")),
+        "title": safe_text(item.get("title")),
+        "price_label": safe_text(item.get("price_label")),
+        "master_item_id": safe_text(item.get("master_item_id")),
+        "sort_order": int(item.get("sort_order") or 0),
+    }
+
+
 class SyncService:
     def __init__(self, db: Database):
         self.db = db
@@ -69,10 +79,11 @@ class SyncService:
             if not isinstance(item, dict):
                 continue
             source = item.get("item") if isinstance(item.get("item"), dict) else item
+            product_payload = {**item, **source}
             uid = safe_text(source.get("uid") or item.get("uid"))
             if not uid:
                 continue
-            products.append(
+            product_payload.update(
                 {
                     "uid": uid,
                     "title": safe_text(source.get("title") or source.get("name") or item.get("title")),
@@ -81,9 +92,10 @@ class SyncService:
                     "sort_order": index,
                 }
             )
+            products.append(product_payload)
         if not apply_changes:
             existing = {item["uid"]: item for item in self.repo.products(project_id)}
-            incoming = {item["uid"]: item for item in products}
+            incoming = {item["uid"]: _master_preview_product(item) for item in products}
             return {
                 "added": [item for uid, item in incoming.items() if uid not in existing],
                 "updated": [item for uid, item in incoming.items() if uid in existing and (existing[uid]["title"] != item["title"] or existing[uid]["price_label"] != item["price_label"])],

@@ -909,23 +909,50 @@ class WorkflowService:
         return args
 
     def _jianying_manifest_for_intro_video(self, project_id: int, manifest: Path, *, intro_video: Path | None) -> Path:
-        if intro_video is None:
-            return manifest
         payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
         if not isinstance(payload, dict) or not isinstance(payload.get("entries"), list):
             return manifest
+        changed = self._refresh_manifest_display_video_slots(payload)
         entries = [
             entry
             for entry in payload["entries"]
             if not (isinstance(entry, dict) and safe_text(entry.get("section")) == "intro")
-        ]
-        payload["entries"] = entries
-        payload["intro_video_path"] = str(intro_video)
+        ] if intro_video is not None else payload["entries"]
+        if intro_video is not None:
+            if entries != payload["entries"]:
+                changed = True
+            payload["entries"] = entries
+            payload["intro_video_path"] = str(intro_video)
+            changed = True
+        if not changed:
+            return manifest
         output_dir = self._internal_project_dir(project_id) / "jianying"
         output_dir.mkdir(parents=True, exist_ok=True)
-        output = output_dir / f"{manifest.stem}.with-intro-video.json"
+        suffix = "with-intro-video" if intro_video is not None else "jianying-ready"
+        output = output_dir / f"{manifest.stem}.{suffix}.json"
         output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return output
+
+    def _refresh_manifest_display_video_slots(self, payload: dict[str, Any]) -> bool:
+        display_template = safe_text(payload.get("display_template"))
+        if not display_template:
+            return False
+        try:
+            from .template_config import get_template_slot
+
+            slot = get_template_slot(display_template)
+        except ValueError:
+            return False
+        changed = False
+        for entry in payload.get("entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            if not safe_text(entry.get("display_video_path") or entry.get("video_path")):
+                continue
+            if entry.get("display_video_slot") != slot:
+                entry["display_video_slot"] = dict(slot)
+                changed = True
+        return changed
 
     def _required_project(self, project_id: int) -> dict[str, Any]:
         project = self.repo.project(project_id)
