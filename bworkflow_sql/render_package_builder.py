@@ -580,6 +580,19 @@ def _product_card_payload(
     return normalized
 
 
+def product_card_payload_for_product(
+    product: dict[str, Any],
+    *,
+    project: dict[str, Any],
+    fallback_image_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    return _product_card_payload(
+        product,
+        project=project,
+        fallback_image_path=Path(fallback_image_path) if fallback_image_path else None,
+    )
+
+
 def _is_remote_url(value: str) -> bool:
     text = safe_text(value).lower()
     return text.startswith("http://") or text.startswith("https://")
@@ -649,14 +662,27 @@ def product_card_content_fingerprint(product: dict[str, Any], product_card: dict
     if not isinstance(product_card, dict):
         return ""
     data_map = product_card.get("dataMap")
+    normalized_data_map = _string_map(data_map)
+    if "cover" in normalized_data_map:
+        normalized_data_map["cover"] = _cover_asset_identity(normalized_data_map["cover"])
     payload = {
         "version": "product-card-v1",
         "uid": safe_text(product.get("uid")),
         "title": safe_text(product.get("title")),
         "price": safe_text(product.get("price_label")),
         "templateId": safe_text(product_card.get("templateId")),
-        "coverAsset": safe_text(product_card.get("coverAsset")),
-        "dataMap": _string_map(data_map),
+        "coverAsset": _cover_asset_identity(safe_text(product_card.get("coverAsset"))),
+        "dataMap": normalized_data_map,
         "slots": _slot_list(product_card.get("slots")),
     }
     return text_hash(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def _cover_asset_identity(value: str) -> str:
+    text = safe_text(value)
+    if not text:
+        return ""
+    if _is_remote_url(text):
+        parsed = urllib.parse.urlparse(text)
+        return f"{parsed.netloc}/{Path(parsed.path).name}"
+    return Path(text).name

@@ -111,6 +111,7 @@ from .render_package_builder import (
     SUPPORTED_OUTPUT_MODES,
     build_product_recommendation_package,
 )
+from .product_image_generation import regenerate_product_card_images
 
 
 INTERNAL_PREFIX = "internal:"
@@ -374,7 +375,9 @@ class WorkflowService:
                 "ok": False,
                 **base_payload,
                 "next": render_package_stale_product_image_next_step(
-                    base_payload["stale_product_images"]
+                    base_payload["stale_product_images"],
+                    project_id=project_id,
+                    account_label=account_label,
                 ),
             }
 
@@ -404,6 +407,20 @@ class WorkflowService:
                 jianying_manifest_path=jianying_manifest_path,
             ),
         }
+
+    def regenerate_product_card_images(
+        self,
+        project_id: int,
+        *,
+        account_label: str,
+        mode: str = "stale",
+    ) -> dict[str, Any]:
+        return regenerate_product_card_images(
+            self.db,
+            project_id=project_id,
+            account_label=account_label,
+            mode=mode,
+        )
 
     def run_command(self, cmd: list[str]) -> WorkflowRunResult:
         if cmd and cmd[0].startswith(INTERNAL_PREFIX):
@@ -2098,7 +2115,12 @@ def render_package_next_step(
     }
 
 
-def render_package_stale_product_image_next_step(stale_product_images: list[dict[str, Any]]) -> dict[str, Any]:
+def render_package_stale_product_image_next_step(
+    stale_product_images: list[dict[str, Any]],
+    *,
+    project_id: int,
+    account_label: str,
+) -> dict[str, Any]:
     return {
         "mode": "product_image_stale_review",
         "status": "confirmation_required",
@@ -2113,10 +2135,18 @@ def render_package_stale_product_image_next_step(stale_product_images: list[dict
             {
                 "id": "regenerate_stale",
                 "label": "先重生成过期商品图，再重新生成 RenderPackage",
+                "command_hint": (
+                    f"python -m bworkflow_sql product-images {project_id} "
+                    f"--account {account_label} --mode stale"
+                ),
             },
             {
                 "id": "regenerate_all",
                 "label": "重生成全部商品图，再重新生成 RenderPackage",
+                "command_hint": (
+                    f"python -m bworkflow_sql product-images {project_id} "
+                    f"--account {account_label} --mode all"
+                ),
             },
         ],
     }

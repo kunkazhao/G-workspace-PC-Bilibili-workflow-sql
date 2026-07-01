@@ -39,6 +39,61 @@ def test_render_package_parser_registers_command():
     assert args.output == "out.json"
 
 
+def test_product_images_parser_registers_command():
+    args = cli.build_parser().parse_args(
+        [
+            "product-images",
+            "3",
+            "--account",
+            "xiaobo",
+            "--mode",
+            "all",
+        ]
+    )
+
+    assert args.command == "product-images"
+    assert args.project_id == 3
+    assert args.account == "xiaobo"
+    assert args.mode == "all"
+
+
+def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class FakeWorkflow:
+        def regenerate_product_card_images(self, project_id, *, account_label, mode):
+            calls.append(
+                {
+                    "project_id": project_id,
+                    "account_label": account_label,
+                    "mode": mode,
+                }
+            )
+            return {
+                "ok": True,
+                "project_id": project_id,
+                "account": account_label,
+                "mode": mode,
+                "regenerated": [{"uid": "P001"}],
+                "skipped": [],
+            }
+
+    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
+
+    cli.cmd_product_images(Namespace(project_id=3, account="xiaobo", mode="stale"))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["regenerated"] == [{"uid": "P001"}]
+    assert calls == [
+        {
+            "project_id": 3,
+            "account_label": "xiaobo",
+            "mode": "stale",
+        }
+    ]
+
+
 def test_cmd_render_package_writes_success_json_and_package(
     tmp_path,
     capsys,
