@@ -90,7 +90,11 @@ def test_prepare_product_recommendation_output_returns_final_mp4_next_command(
     assert result["next"]["mode"] == "final_mp4"
     assert result["next"]["target_mp4"].endswith(".mp4")
     assert "python -m cutme --package" in result["next"]["command"]
-    assert "BilibiliFullVideo" in result["next"]["render_command_after_job"]
+    assert "--build-render-job" in result["next"]["command"]
+    assert "--render-fast-final" in result["next"]["render_command_after_job"]
+    assert "<job-render-package.json>" in result["next"]["render_command_after_job"]
+    assert "BilibiliFullVideo" not in result["next"]["render_command_after_job"]
+    assert "npm --prefix" not in result["next"]["render_command_after_job"]
 
 
 def test_prepare_product_recommendation_output_rejects_invalid_mode_before_build(
