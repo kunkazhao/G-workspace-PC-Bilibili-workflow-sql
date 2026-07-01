@@ -20,12 +20,94 @@ SUPPORTED_OUTPUT_MODES = {"jianying_draft", "final_mp4"}
 SUPPORTED_PRODUCT_MEDIA_MODES = {"cover_only", "video_preferred"}
 DEFAULT_PRODUCT_MEDIA_MODE = "video_preferred"
 PRODUCT_COVER_CACHE_ROOT = INTERNAL_WORKSPACE_ROOT / "product-covers"
+PRICE_TRANSITION_KEYWORDS = [
+    "品牌完成度",
+    "音质细节",
+    "通话",
+    "连接",
+    "漏音控制",
+    "续航",
+    "调音",
+    "通话降噪",
+    "佩戴",
+    "音质",
+    "省心",
+    "基础功能",
+    "基础体验",
+    "长期用",
+    "尝鲜",
+    "少花钱",
+]
 
 
 @dataclass(frozen=True)
 class ProductRenderPackageResult:
     package: dict[str, Any]
     missing: list[dict[str, Any]]
+
+
+def _trim_transition_text(text: str) -> str:
+    return safe_text(text).strip(" ，。；、,.!?:：")
+
+
+def _split_transition_text(text: str) -> list[str]:
+    parts: list[str] = []
+    for sentence in re.split(r"[。；;！!？?]", safe_text(text)):
+        parts.extend(re.split(r"[，,]", sentence))
+    return [_trim_transition_text(part) for part in parts if _trim_transition_text(part)]
+
+
+def _compact_transition_point(text: str) -> str:
+    value = _trim_transition_text(text)
+    value = re.sub(r"^重点看", "", value)
+    value = re.sub(r"^核心就一件事", "核心", value)
+    value = re.sub(r"^(这个价位|这个区间)", "", value)
+    return value[:80] if re.search(r"[A-Za-z]", value) else value[:12]
+
+
+def _price_transition_headline(label: str, body: str) -> str:
+    chunks = _split_transition_text(body)
+    preferred = next(
+        (
+            chunk
+            for chunk in chunks
+            if re.search(r"性价比|重点|核心|明显提升|旗舰|高端|够用|稳|focuses|maturity", chunk, re.I)
+        ),
+        chunks[1] if len(chunks) > 1 else (chunks[0] if chunks else ""),
+    )
+    headline = _trim_transition_text(preferred.replace(safe_text(label), ""))
+    headline = re.sub(r"^下面(先)?(看|是)", "", headline)
+    headline = re.sub(r"^(这个价位|这个区间)", "", headline)
+    return _trim_transition_text(headline) or "先看这个价位的核心取舍"
+
+
+def _price_transition_key_points(body: str) -> list[str]:
+    text = safe_text(body)
+    found = [keyword for keyword in PRICE_TRANSITION_KEYWORDS if keyword in text]
+    chunks = [_compact_transition_point(chunk) for chunk in _split_transition_text(text)]
+    result: list[str] = []
+    for item in [*found, *chunks]:
+        if item and item not in result:
+            result.append(item)
+        if len(result) >= 3:
+            break
+    return result or ["核心取舍"]
+
+
+def _price_transition_audience(body: str) -> str:
+    match = re.search(r"适合([^。；;，,]+?)(?:。|；|;|，|,|$)", safe_text(body))
+    if match:
+        return f"适合{_trim_transition_text(match.group(1))}"
+    return "按预算和使用频率来选"
+
+
+def _build_price_transition_card(label: str, body: str) -> dict[str, Any]:
+    return {
+        "rangeLabel": safe_text(label),
+        "headline": _price_transition_headline(label, body),
+        "keyPoints": _price_transition_key_points(body),
+        "audience": _price_transition_audience(body),
+    }
 
 
 def build_product_recommendation_package(
@@ -106,11 +188,13 @@ def build_product_recommendation_package(
             continue
         voice_path = _absolute_file_path(voice.get("path"))
         label = safe_text(block.get("price_range_label"))
+        body = safe_text(block.get("body"))
         price_segments[label] = {
             "type": "price_transition",
             "id": f"price-{block.get('id')}",
             "priceRangeLabel": label,
-            "transitionText": safe_text(block.get("body")),
+            "transitionText": body,
+            "priceTransitionCard": _build_price_transition_card(label, body),
             "voiceAsset": str(voice_path),
             "duration": get_audio_duration_seconds(voice_path),
             "sourceScriptBlockId": int(block.get("id") or 0),

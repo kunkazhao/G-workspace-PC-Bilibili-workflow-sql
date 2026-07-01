@@ -296,6 +296,14 @@ def test_build_product_recommendation_package_from_ready_assets(
         "product_recommendation",
         "product_recommendation",
     ]
+    price_transition = result.package["segments"][0]
+    assert price_transition["priceTransitionCard"]["rangeLabel"] == "200-300"
+    assert price_transition["priceTransitionCard"]["headline"] == (
+        "Two to three hundred yuan focuses on brand maturity"
+    )
+    assert price_transition["priceTransitionCard"]["keyPoints"] == [
+        "Two to three hundred yuan focuses on brand maturity"
+    ]
     products = [
         segment
         for segment in result.package["segments"]
