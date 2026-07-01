@@ -23,9 +23,6 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from .render_package_builder import build_product_recommendation_package
-
-
 def _json_out(data: Any) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
 
@@ -417,65 +414,14 @@ def cmd_assets_check(args: argparse.Namespace) -> None:
 # ── parser ────────────────────────────────────────────────────────────
 
 def cmd_render_package(args: argparse.Namespace) -> None:
-    from .settings import INTERNAL_WORKSPACE_ROOT
-
-    db, _, _, _ = _init()
-    result = build_product_recommendation_package(
-        db,
+    _, _, _, wf = _init()
+    result = wf.prepare_product_recommendation_output(
         project_id=args.project_id,
         account_label=args.account,
         output_mode=args.output_mode,
+        package_output_path=args.output or None,
     )
-    output_path = (
-        Path(args.output)
-        if args.output
-        else INTERNAL_WORKSPACE_ROOT
-        / f"project-{args.project_id}"
-        / "render"
-        / f"render-package-{args.account}-{args.output_mode}.json"
-    )
-    if result.missing:
-        _json_out(
-            {
-                "ok": False,
-                "project_id": args.project_id,
-                "account": args.account,
-                "output_mode": args.output_mode,
-                "package_path": str(output_path),
-                "missing": result.missing,
-            }
-        )
-        return
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(result.package, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
-    )
-    _json_out(
-        {
-            "ok": True,
-            "project_id": args.project_id,
-            "account": args.account,
-            "output_mode": args.output_mode,
-            "package_path": str(output_path),
-            "missing": [],
-            "segment_counts": _segment_counts(result.package.get("segments", [])),
-        }
-    )
-
-
-def _segment_counts(segments: object) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    if not isinstance(segments, list):
-        return counts
-    for segment in segments:
-        if not isinstance(segment, dict):
-            continue
-        segment_type = str(segment.get("type") or "").strip()
-        if segment_type:
-            counts[segment_type] = counts.get(segment_type, 0) + 1
-    return counts
+    _json_out(result)
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -22,6 +22,7 @@ from .asset_paths import voice_user_dir
 from .db import Database
 from .repositories import Repository
 from .settings import (
+    CUTME_ROOT,
     DEFAULT_INDEXTTS_DIR,
     DEFAULT_JIANYING_DRAFT_ROOT,
     DEFAULT_OUTPUT_ROOT,
@@ -101,6 +102,12 @@ from .draft_helpers import (  # noqa: F401 – re-exported
     format_duration_cn,
     format_jianying_run_stdout,
     parse_json_object,
+)
+
+
+from .render_package_builder import (
+    SUPPORTED_OUTPUT_MODES,
+    build_product_recommendation_package,
 )
 
 
@@ -305,6 +312,59 @@ class WorkflowService:
         if intro_video:
             cmd += ["--intro-video", intro_video]
         return cmd
+
+    def prepare_product_recommendation_output(
+        self,
+        project_id: int,
+        *,
+        account_label: str,
+        output_mode: str,
+        package_output_path: str | Path | None = None,
+    ) -> dict[str, Any]:
+        mode = safe_text(output_mode) or "jianying_draft"
+        if mode not in SUPPORTED_OUTPUT_MODES:
+            raise ValueError(f"unsupported output_mode: {mode}")
+
+        result = build_product_recommendation_package(
+            self.db,
+            project_id=project_id,
+            account_label=account_label,
+            output_mode=mode,
+        )
+        output_path = (
+            Path(package_output_path)
+            if package_output_path
+            else INTERNAL_WORKSPACE_ROOT
+            / f"project-{project_id}"
+            / "render"
+            / f"render-package-{safe_path_component(account_label)}-{mode}.json"
+        )
+        base_payload: dict[str, Any] = {
+            "project_id": project_id,
+            "account": account_label,
+            "output_mode": mode,
+            "package_path": str(output_path),
+            "missing": result.missing,
+        }
+        if result.missing:
+            return {"ok": False, **base_payload, "next": None}
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(result.package, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        return {
+            "ok": True,
+            **base_payload,
+            "segment_counts": render_segment_counts(result.package.get("segments", [])),
+            "next": render_package_next_step(
+                project_id=project_id,
+                account_label=account_label,
+                output_mode=mode,
+                package_path=output_path,
+            ),
+        }
 
     def run_command(self, cmd: list[str]) -> WorkflowRunResult:
         if cmd and cmd[0].startswith(INTERNAL_PREFIX):
@@ -1875,6 +1935,47 @@ class WorkflowService:
         if lines:
             lines.append("")
         lines.append(body)
+
+
+def render_segment_counts(segments: object) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    if not isinstance(segments, list):
+        return counts
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        segment_type = safe_text(segment.get("type"))
+        if segment_type:
+            counts[segment_type] = counts.get(segment_type, 0) + 1
+    return counts
+
+
+def render_package_next_step(
+    *,
+    project_id: int,
+    account_label: str,
+    output_mode: str,
+    package_path: Path,
+) -> dict[str, Any]:
+    if output_mode == "final_mp4":
+        target_mp4 = package_path.with_suffix(".mp4")
+        return {
+            "mode": "final_mp4",
+            "target_mp4": str(target_mp4),
+            "command": f"python -m cutme --package {package_path} --build-render-job",
+            "render_command_after_job": (
+                f"npm --prefix {CUTME_ROOT / 'remotion-renderer'} run render:job -- "
+                f"--composition BilibiliFullVideo --package-path <job-render-package.json> --out {target_mp4}"
+            ),
+        }
+    return {
+        "mode": "jianying_draft",
+        "status": "adapter_pending",
+        "message": "Package ready; Jianying draft adapter will consume this RenderPackage in the next implementation step.",
+        "package_path": str(package_path),
+        "project_id": project_id,
+        "account": account_label,
+    }
 
 
 def run_subprocess_text(cmd: list[str]) -> WorkflowRunResult:
