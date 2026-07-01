@@ -35,6 +35,9 @@ def build_product_recommendation_package(
     account_label: str,
     output_mode: str = "jianying_draft",
     product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
+    mode: str = "standard",
+    top_uids: list[str] | None = None,
+    product_uids: list[str] | None = None,
 ) -> ProductRenderPackageResult:
     if output_mode not in SUPPORTED_OUTPUT_MODES:
         raise ValueError(f"unsupported output_mode: {output_mode}")
@@ -48,7 +51,12 @@ def build_product_recommendation_package(
         raise ValueError(f"project does not exist: {project_id}")
 
     account = safe_text(account_label)
-    products = repo.products(project_id, include_removed=False)
+    products = _ordered_products(
+        repo.products(project_id, include_removed=False),
+        mode=safe_text(mode) or "standard",
+        top_uids=top_uids or [],
+        product_uids=product_uids or [],
+    )
     blocks = repo.script_blocks(project_id)
     assets = repo.asset_bindings(project_id)
     product_blocks = {
@@ -63,7 +71,8 @@ def build_product_recommendation_package(
     ]
 
     missing: list[dict[str, Any]] = []
-    segments: list[dict[str, Any]] = []
+    price_segments: dict[str, dict[str, Any]] = {}
+    product_segments: dict[str, dict[str, Any]] = {}
 
     if not price_blocks:
         for label in _unique_price_labels(products):
@@ -96,17 +105,16 @@ def build_product_recommendation_package(
             )
             continue
         voice_path = _absolute_file_path(voice.get("path"))
-        segments.append(
-            {
-                "type": "price_transition",
-                "id": f"price-{block.get('id')}",
-                "priceRangeLabel": safe_text(block.get("price_range_label")),
-                "transitionText": safe_text(block.get("body")),
-                "voiceAsset": str(voice_path),
-                "duration": get_audio_duration_seconds(voice_path),
-                "sourceScriptBlockId": int(block.get("id") or 0),
-            }
-        )
+        label = safe_text(block.get("price_range_label"))
+        price_segments[label] = {
+            "type": "price_transition",
+            "id": f"price-{block.get('id')}",
+            "priceRangeLabel": label,
+            "transitionText": safe_text(block.get("body")),
+            "voiceAsset": str(voice_path),
+            "duration": get_audio_duration_seconds(voice_path),
+            "sourceScriptBlockId": int(block.get("id") or 0),
+        }
 
     for product in products:
         uid = safe_text(product.get("uid"))
@@ -210,7 +218,16 @@ def build_product_recommendation_package(
         }
         if product_card:
             product_segment["productCard"] = product_card
-        segments.append(product_segment)
+        product_segments[uid] = product_segment
+
+    segments = _arrange_segments(
+        products,
+        price_blocks=price_blocks,
+        price_segments=price_segments,
+        product_segments=product_segments,
+        mode=safe_text(mode) or "standard",
+        top_uids=top_uids or [],
+    )
 
     package = {
         "schemaVersion": "1.0.0",
@@ -308,6 +325,102 @@ def _unique_price_labels(products: list[dict[str, Any]]) -> list[str]:
     return labels
 
 
+def _ordered_products(
+    products: list[dict[str, Any]],
+    *,
+    mode: str,
+    top_uids: list[str],
+    product_uids: list[str],
+) -> list[dict[str, Any]]:
+    selected = {uid.casefold() for uid in product_uids}
+    if selected:
+        products = [product for product in products if safe_text(product.get("uid")).casefold() in selected]
+    if mode != "top" or not top_uids:
+        return products
+    rank = {uid.casefold(): index for index, uid in enumerate(top_uids)}
+    return sorted(
+        products,
+        key=lambda product: (
+            0,
+            rank[safe_text(product.get("uid")).casefold()],
+        )
+        if safe_text(product.get("uid")).casefold() in rank
+        else (1, int(product.get("sort_order") or 0)),
+    )
+
+
+def _arrange_segments(
+    products: list[dict[str, Any]],
+    *,
+    price_blocks: list[dict[str, Any]],
+    price_segments: dict[str, dict[str, Any]],
+    product_segments: dict[str, dict[str, Any]],
+    mode: str,
+    top_uids: list[str],
+) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    top_set = {uid.casefold() for uid in top_uids} if mode == "top" else set()
+    used_price_labels: set[str] = set()
+
+    for product in products:
+        uid = safe_text(product.get("uid"))
+        if uid.casefold() not in top_set:
+            continue
+        segment = product_segments.get(uid)
+        if segment:
+            segments.append(segment)
+
+    for product in products:
+        uid = safe_text(product.get("uid"))
+        if uid.casefold() in top_set:
+            continue
+        segment = product_segments.get(uid)
+        if not segment:
+            continue
+        price_label = _matching_price_label(product, price_blocks)
+        if price_label and price_label not in used_price_labels:
+            price_segment = price_segments.get(price_label)
+            if price_segment:
+                segments.append(price_segment)
+                used_price_labels.add(price_label)
+        segments.append(segment)
+
+    return segments
+
+
+def _matching_price_label(product: dict[str, Any], price_blocks: list[dict[str, Any]]) -> str:
+    price = _first_number(safe_text(product.get("price_label")))
+    if price is None:
+        return ""
+    for block in price_blocks:
+        label = safe_text(block.get("price_range_label"))
+        if _price_in_range(price, label):
+            return label
+    return ""
+
+
+def _first_number(text: str) -> float | None:
+    match = re.search(r"\d+(?:\.\d+)?", text)
+    return float(match.group(0)) if match else None
+
+
+def _price_in_range(price: float, label: str) -> bool:
+    try:
+        numbers = [float(item) for item in re.findall(r"\d+(?:\.\d+)?", label)]
+    except (ValueError, OverflowError):
+        return False
+    if not numbers:
+        return False
+    if len(numbers) == 1:
+        if any(token in label for token in ("以上", "+", "up")):
+            return price >= numbers[0]
+        if any(token in label for token in ("以下", "以内", "under")):
+            return price <= numbers[0]
+        return abs(price - numbers[0]) < 0.001
+    low, high = min(numbers[0], numbers[1]), max(numbers[0], numbers[1])
+    return low <= price <= high
+
+
 def _product_card_payload(
     product: dict[str, Any],
     *,
@@ -354,8 +467,6 @@ def _product_card_payload(
             "sourceHeight": 480,
         },
     }
-    if fallback_image_path:
-        normalized["fallbackImageAsset"] = str(fallback_image_path)
     if cover_asset:
         normalized["coverAsset"] = cover_asset
         normalized["dataMap"]["cover"] = cover_asset

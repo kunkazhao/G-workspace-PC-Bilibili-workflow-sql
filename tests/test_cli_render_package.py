@@ -17,6 +17,10 @@ def test_render_package_parser_registers_command():
             "final_mp4",
             "--product-media-mode",
             "cover_only",
+            "--mode",
+            "top",
+            "--top-uids",
+            "P003,P001",
             "--output",
             "out.json",
         ]
@@ -27,6 +31,8 @@ def test_render_package_parser_registers_command():
     assert args.account == "xiaobo"
     assert args.output_mode == "final_mp4"
     assert args.product_media_mode == "cover_only"
+    assert args.mode == "top"
+    assert args.top_uids == "P003,P001"
     assert args.output == "out.json"
 
 
@@ -45,6 +51,8 @@ def test_cmd_render_package_writes_success_json_and_package(
             account_label,
             output_mode,
             product_media_mode,
+            mode,
+            top_uids,
             package_output_path,
         ):
             calls.append(
@@ -53,6 +61,8 @@ def test_cmd_render_package_writes_success_json_and_package(
                     "account_label": account_label,
                     "output_mode": output_mode,
                     "product_media_mode": product_media_mode,
+                    "mode": mode,
+                    "top_uids": top_uids,
                     "package_output_path": package_output_path,
                 }
             )
@@ -79,6 +89,8 @@ def test_cmd_render_package_writes_success_json_and_package(
             account="xiaobo",
             output_mode="jianying_draft",
             product_media_mode="video_preferred",
+            mode="standard",
+            top_uids="",
             output=str(output),
         )
     )
@@ -101,6 +113,8 @@ def test_cmd_render_package_writes_success_json_and_package(
             "account_label": "xiaobo",
             "output_mode": "jianying_draft",
             "product_media_mode": "video_preferred",
+            "mode": "standard",
+            "top_uids": "",
             "package_output_path": str(output),
         }
     ]
@@ -121,6 +135,8 @@ def test_cmd_render_package_reports_missing_without_writing_package(
             account_label,
             output_mode,
             product_media_mode,
+            mode,
+            top_uids,
             package_output_path,
         ):
             return {
@@ -142,6 +158,8 @@ def test_cmd_render_package_reports_missing_without_writing_package(
             account="xiaobo",
             output_mode="jianying_draft",
             product_media_mode="video_preferred",
+            mode="standard",
+            top_uids="",
             output=str(output),
         )
     )

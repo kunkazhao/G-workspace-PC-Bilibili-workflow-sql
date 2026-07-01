@@ -185,6 +185,92 @@ def _seed_ready_package_data(tmp_path: Path) -> tuple[Database, int]:
     return db, project_id
 
 
+def _seed_price_group_package_data(tmp_path: Path) -> tuple[Database, int]:
+    db = Database(tmp_path / "price-groups.db")
+    repo = Repository(db)
+    project_id = db.upsert_project(
+        {
+            "name": "earbuds",
+            "category_name": "earbuds",
+            "scheme_id": "scheme-price-groups",
+        }
+    )
+    cover_root = tmp_path / "covers"
+    cover_root.mkdir(parents=True, exist_ok=True)
+    items = [
+        ("P001", "Alpha", "199", "200元以下"),
+        ("P002", "Beta", "168", "200元以下"),
+        ("P003", "Gamma", "279", "200-400元"),
+        ("P004", "Delta", "619", "400元以上"),
+    ]
+    repo.upsert_products_from_master(
+        project_id,
+        [
+            {
+                "uid": uid,
+                "title": title,
+                "price_label": price,
+                "cover": str(cover_root / f"{uid}.png"),
+                "remark": f"{title} remark.",
+                "spec": {"weight": "4g"},
+                "product_card_template_id": "xiaoran1",
+            }
+            for uid, title, price, _range_label in items
+        ],
+    )
+    assets = tmp_path / "assets"
+    price_labels = ["200元以下", "200-400元", "400元以上"]
+    for label in price_labels:
+        body = f"{label} transition."
+        block_id = _insert_script(
+            db,
+            project_id,
+            script_type="price_transition",
+            price_range_label=label,
+            body=body,
+        )
+        _insert_asset(
+            db,
+            project_id,
+            uid="PRICE_TRANSITION",
+            asset_type="voice",
+            path=assets / f"price-{label}.wav",
+            account_label="小燃",
+            script_block_id=block_id,
+            block_label=label,
+            block_hash=text_hash(body),
+        )
+    for uid, title, _price, _range_label in items:
+        body = f"{title} recommendation."
+        block_id = _insert_script(
+            db,
+            project_id,
+            script_type="product",
+            owner_uid=uid,
+            body=body,
+        )
+        _insert_asset(
+            db,
+            project_id,
+            uid=uid,
+            asset_type="image",
+            path=assets / f"{uid}.png",
+            account_label="小燃",
+        )
+        _insert_asset(
+            db,
+            project_id,
+            uid=uid,
+            asset_type="voice",
+            path=assets / f"{uid}.wav",
+            account_label="小燃",
+            script_block_id=block_id,
+            block_label="正文",
+            block_hash=text_hash(body),
+        )
+    return db, project_id
+
+
 def test_build_product_recommendation_package_from_ready_assets(
     tmp_path: Path,
     monkeypatch,
@@ -224,7 +310,7 @@ def test_build_product_recommendation_package_from_ready_assets(
     assert product_card["dataMap"]["price"] == "200-300"
     assert product_card["dataMap"]["remark"] == "A compact keyboard with stable wireless connection."
     assert product_card["coverAsset"].endswith("P001.png")
-    assert product_card["fallbackImageAsset"] == products[0]["imageCardAsset"]
+    assert "fallbackImageAsset" not in product_card
     assert product_card["slots"] == [
         {"label": "switch", "value": "silver"},
         {"label": "battery", "value": "4000mAh"},
@@ -259,6 +345,41 @@ def test_build_product_recommendation_package_can_force_cover_only_media(
     assert result.package["output"]["productMediaMode"] == "cover_only"
     assert products[0]["productMediaMode"] == "cover_only"
     assert products[0]["videoAsset"] is None
+
+
+def test_build_product_recommendation_package_orders_price_groups_after_top_products(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_price_group_package_data(tmp_path)
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小燃",
+        output_mode="final_mp4",
+        mode="top",
+        top_uids=["P003", "P001"],
+    )
+
+    assert result.missing == []
+    assert [
+        (
+            segment["type"],
+            segment.get("productUid") or segment.get("priceRangeLabel"),
+        )
+        for segment in result.package["segments"]
+    ] == [
+        ("product_recommendation", "P003"),
+        ("product_recommendation", "P001"),
+        ("price_transition", "200元以下"),
+        ("product_recommendation", "P002"),
+        ("price_transition", "400元以上"),
+        ("product_recommendation", "P004"),
+    ]
 
 
 def test_build_final_mp4_package_uses_product_card_without_legacy_image(

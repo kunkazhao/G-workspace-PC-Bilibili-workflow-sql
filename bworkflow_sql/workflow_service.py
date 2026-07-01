@@ -322,21 +322,27 @@ class WorkflowService:
         account_label: str,
         output_mode: str,
         product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
+        mode: str = "standard",
+        top_uids: str | list[str] | None = None,
         package_output_path: str | Path | None = None,
     ) -> dict[str, Any]:
-        mode = safe_text(output_mode) or "jianying_draft"
-        if mode not in SUPPORTED_OUTPUT_MODES:
-            raise ValueError(f"unsupported output_mode: {mode}")
+        output_mode_value = safe_text(output_mode) or "jianying_draft"
+        if output_mode_value not in SUPPORTED_OUTPUT_MODES:
+            raise ValueError(f"unsupported output_mode: {output_mode_value}")
         media_mode = safe_text(product_media_mode) or DEFAULT_PRODUCT_MEDIA_MODE
         if media_mode not in SUPPORTED_PRODUCT_MEDIA_MODES:
             raise ValueError(f"unsupported product_media_mode: {media_mode}")
+        sequence_mode = safe_text(mode) or "standard"
+        top_uid_list = split_csv(top_uids) if isinstance(top_uids, str) else list(top_uids or [])
 
         result = build_product_recommendation_package(
             self.db,
             project_id=project_id,
             account_label=account_label,
-            output_mode=mode,
+            output_mode=output_mode_value,
             product_media_mode=media_mode,
+            mode=sequence_mode,
+            top_uids=top_uid_list,
         )
         output_path = (
             Path(package_output_path)
@@ -344,13 +350,15 @@ class WorkflowService:
             else INTERNAL_WORKSPACE_ROOT
             / f"project-{project_id}"
             / "render"
-            / f"render-package-{safe_path_component(account_label)}-{mode}.json"
+            / f"render-package-{safe_path_component(account_label)}-{output_mode_value}.json"
         )
         base_payload: dict[str, Any] = {
             "project_id": project_id,
             "account": account_label,
-            "output_mode": mode,
+            "output_mode": output_mode_value,
             "product_media_mode": media_mode,
+            "mode": sequence_mode,
+            "top_uids": top_uid_list,
             "package_path": str(output_path),
             "missing": result.missing,
         }
@@ -363,7 +371,7 @@ class WorkflowService:
             encoding="utf-8",
         )
         jianying_manifest_path: Path | None = None
-        if mode == "jianying_draft":
+        if output_mode_value == "jianying_draft":
             jianying_manifest_path = output_path.with_suffix(".jianying.manifest.json")
             render_package_to_jianying_manifest(
                 result.package,
@@ -378,7 +386,7 @@ class WorkflowService:
             "next": render_package_next_step(
                 project_id=project_id,
                 account_label=account_label,
-                output_mode=mode,
+                output_mode=output_mode_value,
                 package_path=output_path,
                 jianying_manifest_path=jianying_manifest_path,
             ),

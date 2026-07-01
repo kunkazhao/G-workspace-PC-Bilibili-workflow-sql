@@ -420,6 +420,8 @@ def cmd_render_package(args: argparse.Namespace) -> None:
         account_label=args.account,
         output_mode=args.output_mode,
         product_media_mode=args.product_media_mode,
+        mode=args.mode,
+        top_uids=args.top_uids,
         package_output_path=args.output or None,
     )
     _json_out(result)
@@ -511,6 +513,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="video_preferred",
         help="product display media: cover_only uses only the cover image; video_preferred uses product video when available",
     )
+    p.add_argument(
+        "--mode",
+        choices=["standard", "top"],
+        default="standard",
+        help="segment order mode: standard groups by price range; top puts --top-uids first",
+    )
+    p.add_argument("--top-uids", default="", help="top mode product UIDs, comma separated")
     p.add_argument("--output", "-o", help="render-package.json output path")
 
     return parser

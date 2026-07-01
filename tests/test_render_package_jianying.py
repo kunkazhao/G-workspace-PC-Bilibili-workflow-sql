@@ -119,7 +119,7 @@ def test_prepare_product_recommendation_output_writes_jianying_manifest(
     tmp_path,
     monkeypatch,
 ):
-    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode):
+    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode, mode, top_uids):
         return SimpleNamespace(package=_package(), missing=[])
 
     output = tmp_path / "render-package.json"

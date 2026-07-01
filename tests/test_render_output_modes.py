@@ -22,7 +22,7 @@ def test_prepare_product_recommendation_output_writes_draft_package(
     calls: list[dict[str, object]] = []
     package = {"schemaVersion": "1.0.0", "segments": [{"type": "product_recommendation"}]}
 
-    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode):
+    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode, mode, top_uids):
         calls.append(
             {
                 "db": db,
@@ -30,6 +30,8 @@ def test_prepare_product_recommendation_output_writes_draft_package(
                 "account_label": account_label,
                 "output_mode": output_mode,
                 "product_media_mode": product_media_mode,
+                "mode": mode,
+                "top_uids": top_uids,
             }
         )
         return SimpleNamespace(package=package, missing=[])
@@ -59,6 +61,8 @@ def test_prepare_product_recommendation_output_writes_draft_package(
             "account_label": "灏忓崥",
             "output_mode": "jianying_draft",
             "product_media_mode": "video_preferred",
+            "mode": "standard",
+            "top_uids": [],
         }
     ]
 
@@ -69,7 +73,7 @@ def test_prepare_product_recommendation_output_returns_final_mp4_next_command(
 ):
     package = {"schemaVersion": "1.0.0", "segments": [{"type": "price_transition"}]}
 
-    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode):
+    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode, mode, top_uids):
         return SimpleNamespace(package=package, missing=[])
 
     output = tmp_path / "render-package.json"
@@ -118,7 +122,7 @@ def test_prepare_product_recommendation_output_reports_missing_without_package(
 ):
     missing = [{"kind": "product_voice", "uid": "P001"}]
 
-    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode):
+    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode, mode, top_uids):
         return SimpleNamespace(package={"segments": []}, missing=missing)
 
     output = tmp_path / "render-package.json"
