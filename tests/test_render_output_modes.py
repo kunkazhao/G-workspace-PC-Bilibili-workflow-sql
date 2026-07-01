@@ -47,7 +47,8 @@ def test_prepare_product_recommendation_output_writes_draft_package(
     assert result["package_path"] == str(output)
     assert result["output_mode"] == "jianying_draft"
     assert result["next"]["mode"] == "jianying_draft"
-    assert result["next"]["status"] == "adapter_pending"
+    assert result["next"]["status"] == "ready"
+    assert result["next"]["manifest_path"] == str(output.with_suffix(".jianying.manifest.json"))
     assert "final_mp4" not in result["next"]
     assert json.loads(output.read_text(encoding="utf-8")) == package
     assert calls == [

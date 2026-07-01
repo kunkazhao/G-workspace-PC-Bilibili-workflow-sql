@@ -354,6 +354,15 @@ class WorkflowService:
             json.dumps(result.package, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
+        jianying_manifest_path: Path | None = None
+        if mode == "jianying_draft":
+            jianying_manifest_path = output_path.with_suffix(".jianying.manifest.json")
+            render_package_to_jianying_manifest(
+                result.package,
+                jianying_manifest_path,
+                project_id=project_id,
+                account_label=account_label,
+            )
         return {
             "ok": True,
             **base_payload,
@@ -363,6 +372,7 @@ class WorkflowService:
                 account_label=account_label,
                 output_mode=mode,
                 package_path=output_path,
+                jianying_manifest_path=jianying_manifest_path,
             ),
         }
 
@@ -1956,6 +1966,7 @@ def render_package_next_step(
     account_label: str,
     output_mode: str,
     package_path: Path,
+    jianying_manifest_path: Path | None = None,
 ) -> dict[str, Any]:
     if output_mode == "final_mp4":
         target_mp4 = package_path.with_suffix(".mp4")
@@ -1968,14 +1979,117 @@ def render_package_next_step(
                 f"--composition BilibiliFullVideo --package-path <job-render-package.json> --out {target_mp4}"
             ),
         }
+    manifest_path = jianying_manifest_path or package_path.with_suffix(".jianying.manifest.json")
     return {
         "mode": "jianying_draft",
-        "status": "adapter_pending",
-        "message": "Package ready; Jianying draft adapter will consume this RenderPackage in the next implementation step.",
+        "status": "ready",
+        "message": "Jianying manifest has been generated from the RenderPackage.",
         "package_path": str(package_path),
+        "manifest_path": str(manifest_path),
         "project_id": project_id,
         "account": account_label,
+        "command": (
+            f"python -m bworkflow_sql jianying {project_id} "
+            f"--manifest {manifest_path} --draft-name {safe_path_component(account_label or 'render-package')}"
+        ),
     }
+
+
+def render_package_to_jianying_manifest(
+    package: dict[str, Any],
+    output_path: str | Path,
+    *,
+    project_id: int,
+    account_label: str,
+    display_template: str = "",
+) -> Path:
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    entries: list[dict[str, Any]] = []
+    for order, segment in enumerate(package.get("segments") or [], start=1):
+        if not isinstance(segment, dict):
+            continue
+        segment_type = safe_text(segment.get("type"))
+        if segment_type == "price_transition":
+            label = safe_text(segment.get("priceRangeLabel"))
+            entries.append(
+                {
+                    "type": "transition",
+                    "order_index": order,
+                    "section": "price_transition",
+                    "section_order": order,
+                    "product_uid": "PRICE_TRANSITION",
+                    "product_name": label or "Price transition",
+                    "price_label": "",
+                    "price_range_label": label,
+                    "source_label": f"Price transition {label}".strip(),
+                    "text": safe_text(segment.get("transitionText")),
+                    "audio_path": safe_text(segment.get("voiceAsset")),
+                    "image_path": "",
+                    "video_path": "",
+                    "display_video_path": "",
+                    "display_video_slot": None,
+                    "binding_id": safe_text(segment.get("id")) or f"price:{order}",
+                    "script_id": str(segment.get("sourceScriptBlockId") or ""),
+                    "account_id": "",
+                    "account_label": account_label,
+                    "text_hash": "",
+                }
+            )
+        elif segment_type == "product_recommendation":
+            video_path = safe_text(segment.get("videoAsset"))
+            entries.append(
+                {
+                    "type": "product",
+                    "order_index": order,
+                    "section": "product",
+                    "section_order": order,
+                    "product_uid": safe_text(segment.get("productUid")),
+                    "product_name": safe_text(segment.get("productTitle")),
+                    "price_label": safe_text(segment.get("priceRangeLabel")),
+                    "price_range_label": safe_text(segment.get("priceRangeLabel")),
+                    "source_label": safe_text(segment.get("productTitle")),
+                    "text": safe_text(segment.get("spokenText")),
+                    "audio_path": safe_text(segment.get("voiceAsset")),
+                    "image_path": safe_text(segment.get("imageCardAsset")),
+                    "video_path": video_path,
+                    "display_video_path": video_path,
+                    "display_video_slot": render_package_display_video_slot(
+                        display_template
+                    )
+                    if video_path
+                    else None,
+                    "binding_id": safe_text(segment.get("id"))
+                    or f"product:{safe_text(segment.get('productUid'))}",
+                    "script_id": str(segment.get("sourceScriptBlockId") or ""),
+                    "account_id": "",
+                    "account_label": account_label,
+                    "text_hash": "",
+                    "subtitles": segment.get("subtitles") or [],
+                }
+            )
+    manifest = {
+        "source": "render_package",
+        "project_id": project_id,
+        "project": package.get("project") or {},
+        "account_label": account_label,
+        "display_template": display_template,
+        "created_at": now_iso(),
+        "entries": entries,
+    }
+    output.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return output
+
+
+def render_package_display_video_slot(display_template: str = "") -> dict[str, Any]:
+    if display_template:
+        try:
+            from .template_config import get_template_slot
+
+            return get_template_slot(display_template)
+        except ValueError:
+            pass
+    return dict(DEFAULT_DISPLAY_VIDEO_SLOT)
 
 
 def run_subprocess_text(cmd: list[str]) -> WorkflowRunResult:
