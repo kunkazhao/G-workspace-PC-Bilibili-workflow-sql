@@ -180,8 +180,12 @@ class ProjectPageDialog(BasePage):
 
         action_row = ctk.CTkFrame(content, fg_color="transparent")
         action_row.pack(fill="x", pady=(0, UIStyle.PAD_MD))
-        PrimaryButton(action_row, text="创建/更新文案框架", command=self._init_outline).pack(side="left", padx=(0, UIStyle.PAD_SM))
-        GhostButton(action_row, text="刷新 Master", command=self._refresh_master_for_current, width=96).pack(side="left", padx=(0, UIStyle.PAD_SM))
+        self.init_outline_button = PrimaryButton(action_row, text="创建/更新文案框架", command=None)
+        self.init_outline_button.configure(command=lambda: self._init_outline(self.init_outline_button))
+        self.init_outline_button.pack(side="left", padx=(0, UIStyle.PAD_SM))
+        self.refresh_master_button = GhostButton(action_row, text="刷新 Master", command=None, width=96)
+        self.refresh_master_button.configure(command=lambda: self._refresh_master_for_current(self.refresh_master_button))
+        self.refresh_master_button.pack(side="left", padx=(0, UIStyle.PAD_SM))
         ctk.CTkLabel(
             action_row,
             text="Master、MD、素材同步请到“同步中心”统一操作。",
@@ -420,7 +424,7 @@ class ProjectPageDialog(BasePage):
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
-    def _init_outline(self) -> None:
+    def _init_outline(self, trigger=None) -> None:
         project = self.app.current_project()
         if not project:
             self.toast("请先在“品类项目”中创建或选择项目。", kind="warning")
@@ -459,9 +463,17 @@ class ProjectPageDialog(BasePage):
             self.log(f"已同步 MD 到数据库：入库 {sync_result['upserted']} 条。")
             self.toast("文案框架已更新")
 
-        self.app.run_background("创建文案框架", work, on_success=on_success, success_message="文案框架已更新", show_success_toast=False)
+        self.app.run_background(
+            "创建文案框架",
+            work,
+            on_success=on_success,
+            success_message="文案框架已更新",
+            show_success_toast=False,
+            loading_widget=trigger,
+            loading_text="更新中...",
+        )
 
-    def _refresh_master_for_current(self) -> None:
+    def _refresh_master_for_current(self, trigger=None) -> None:
         project = self.app.current_project()
         if not project:
             self.toast("请先在“品类项目”中创建或选择项目。", kind="warning")
@@ -480,6 +492,8 @@ class ProjectPageDialog(BasePage):
             lambda: self.sync.sync_master_scheme(project["id"], apply_changes=True),
             on_success=on_success,
             show_success_toast=False,
+            loading_widget=trigger,
+            loading_text="刷新中...",
         )
 
     def refresh(self) -> None:

@@ -24,6 +24,7 @@ from ..components import (
     GhostButton,
     NavButton,
     PrimaryButton,
+    add_hover_tooltip,
 )
 from ..copy_writer import preview_copy_write, write_copy_blocks_to_markdown
 from ..db import Database
@@ -71,6 +72,7 @@ from ..ui_helpers import (
     VoiceTaskDraft,
     COLUMN_WIDTHS,
     TYPE_LABELS,
+    _build_dialog_section,
     _build_table,
     _set_tree_rows,
     _center_dialog,
@@ -165,7 +167,9 @@ class SyncStatusCard(ctk.CTkFrame):
             self.button_frame.pack(fill="x", padx=UIStyle.PAD_XL, pady=(0, UIStyle.PAD_XL))
             for index, (text, cmd) in enumerate(buttons):
                 btn_cls = PrimaryButton if index == 0 else GhostButton
-                btn_cls(self.button_frame, text=text, command=cmd, height=36).pack(side="left", padx=(0, UIStyle.PAD_SM), pady=2)
+                button = btn_cls(self.button_frame, text=text, command=None, height=36)
+                button.configure(command=lambda b=button, c=cmd: c(b))
+                button.pack(side="left", padx=(0, UIStyle.PAD_SM), pady=2)
 
     def set_body(self, text: str) -> None:
         self.body_label.configure(text=text)
@@ -195,10 +199,16 @@ class SyncStatusCard(ctk.CTkFrame):
             matched_count = extra[1] if len(extra) > 1 else None
             row = ctk.CTkFrame(self.asset_rows_frame, fg_color="transparent")
             row.pack(fill="x", pady=(0, UIStyle.PAD_MD))
-            ctk.CTkLabel(row, text=label, width=34, font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_MAIN, anchor="w").pack(side="left")
+            row.grid_columnconfigure(0, weight=0, minsize=44)
+            row.grid_columnconfigure(1, weight=1)
+            row.grid_columnconfigure(2, weight=0)
+            row.grid_columnconfigure(3, weight=0, minsize=180)
+            ctk.CTkLabel(row, text=label, width=34, font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_MAIN, anchor="w").grid(row=0, column=0, sticky="w")
             path_box = ctk.CTkFrame(row, fg_color=UIStyle.COLOR_INPUT_BG, corner_radius=UIStyle.RADIUS_MD, border_width=1, border_color=UIStyle.COLOR_BORDER)
-            path_box.pack(side="left", fill="x", expand=True, padx=(0, UIStyle.PAD_SM))
-            ctk.CTkLabel(path_box, text=compact_path(path, 52) or "--", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM, anchor="w").pack(fill="x", padx=UIStyle.PAD_SM, pady=UIStyle.PAD_SM)
+            path_box.grid(row=0, column=1, sticky="ew", padx=(0, UIStyle.PAD_SM))
+            path_label = ctk.CTkLabel(path_box, text=compact_path(path, 46) or "--", font=UIStyle.FONT_BODY, text_color=UIStyle.COLOR_TEXT_DIM, anchor="w")
+            path_label.pack(fill="x", padx=UIStyle.PAD_SM, pady=UIStyle.PAD_SM)
+            add_hover_tooltip((path_box, path_label), path)
             if matched_count is not None:
                 if isinstance(matched_count, str):
                     stat_text = matched_count
@@ -207,12 +217,18 @@ class SyncStatusCard(ctk.CTkFrame):
                     unit = {"图片": "张", "视频": "个", "配音": "个"}.get(label, "个")
                     stat_text = f"已匹配 {matched_count}{unit}" if matched_count else "无匹配"
                     stat_color = UIStyle.COLOR_PRIMARY if matched_count else UIStyle.COLOR_TEXT_DIM
-                ctk.CTkLabel(row, text=stat_text, font=UIStyle.FONT_BODY, text_color=stat_color, anchor="e").pack(side="left", padx=(UIStyle.PAD_SM, UIStyle.PAD_SM))
-            GhostButton(row, text="打开目录", command=open_cmd, height=36, width=84).pack(side="left", padx=(0, UIStyle.PAD_SM))
+                ctk.CTkLabel(row, text=stat_text, font=UIStyle.FONT_BODY, text_color=stat_color, anchor="e", width=142).grid(row=0, column=2, sticky="e", padx=(UIStyle.PAD_XS, UIStyle.PAD_SM))
+            actions = ctk.CTkFrame(row, fg_color="transparent")
+            actions.grid(row=0, column=3, sticky="e")
+            GhostButton(actions, text="打开目录", command=open_cmd, height=36, width=84).pack(side="left", padx=(0, UIStyle.PAD_SM))
             if voice_check_cmd:
-                PrimaryButton(row, text="检查配音", command=voice_check_cmd, height=36, width=84).pack(side="left")
+                button = PrimaryButton(actions, text="检查配音", command=None, height=36, width=84)
+                button.configure(command=lambda b=button, c=voice_check_cmd: c(b))
+                button.pack(side="left")
             else:
-                PrimaryButton(row, text="同步素材", command=sync_cmd, height=36, width=84).pack(side="left")
+                button = PrimaryButton(actions, text="同步素材", command=None, height=36, width=84)
+                button.configure(command=lambda b=button, c=sync_cmd: c(b))
+                button.pack(side="left")
 
     def set_metrics(self, items: list[tuple[str, int]], *, warn_labels: set[str] | None = None) -> None:
         for child in self.metric_frame.winfo_children():
@@ -265,7 +281,9 @@ class SyncPage(BasePage):
         self.template_combo.pack(side="left", padx=(0, UIStyle.PAD_MD))
         self.template_combo.configure(command=lambda _=None: self.refresh())
         GhostButton(top, text="刷新状态", command=self.refresh, width=92).pack(side="left", padx=(0, UIStyle.PAD_SM))
-        PrimaryButton(top, text="一键同步当前品类", command=self._sync_all, width=132).pack(side="left", padx=(0, UIStyle.PAD_SM))
+        self.sync_all_button = PrimaryButton(top, text="一键同步当前品类", command=None, width=132)
+        self.sync_all_button.configure(command=lambda: self._sync_all(self.sync_all_button))
+        self.sync_all_button.pack(side="left", padx=(0, UIStyle.PAD_SM))
 
         # Status cards grid (填充中间区域)
         grid = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -423,8 +441,8 @@ class SyncPage(BasePage):
         self.folder_card.set_body("")
         self.folder_card.set_asset_rows(
             [
-                ("图片", self.asset_paths.get("image", ""), lambda: self._open_asset_path("image"), lambda: self._sync_asset_type("image"), None, asset_counts["image"]),
-                ("视频", self.asset_paths.get("video", ""), lambda: self._open_asset_path("video"), lambda: self._sync_asset_type("video"), None, asset_counts["video"]),
+                ("图片", self.asset_paths.get("image", ""), lambda: self._open_asset_path("image"), lambda button=None: self._sync_asset_type("image", button), None, asset_counts["image"]),
+                ("视频", self.asset_paths.get("video", ""), lambda: self._open_asset_path("video"), lambda button=None: self._sync_asset_type("video", button), None, asset_counts["video"]),
                 ("配音", self.asset_paths.get("voice", ""), lambda: self._open_asset_path("voice"), None, self._check_voice_status, voice_stat),
             ]
         )
@@ -455,7 +473,7 @@ class SyncPage(BasePage):
         row = self.db.fetchone("SELECT created_at, message FROM sync_events WHERE project_id=? AND event_type=? ORDER BY id DESC LIMIT 1", (pid, event_type))
         return f"{row['created_at']} | {row['message']}" if row else ""
 
-    def _sync_master(self) -> None:
+    def _sync_master(self, trigger=None) -> None:
         project = self._current_project_or_warn()
         if not project:
             return
@@ -463,7 +481,10 @@ class SyncPage(BasePage):
             lambda: self.sync.sync_master_scheme(project["id"], apply_changes=False),
             on_success=lambda r: self._confirm_and_sync_master(project["id"], r),
             on_error=lambda exc, tb: self._handle_master_sync_error(project["id"], exc, tb),
-            success_message="")
+            success_message="",
+            loading_widget=trigger,
+            loading_text="预览中...",
+        )
 
     def _handle_master_sync_error(self, project_id: int, exc: Exception, _tb: str) -> None:
         if not is_master_connection_error(exc):
@@ -527,7 +548,7 @@ class SyncPage(BasePage):
             on_success=lambda r: (self.toast(f"Master 已同步：新增 {len(r['added'])}，更新 {len(r['updated'])}，移除 {len(r['removed'])}"), self.refresh()),
             show_success_toast=False)
 
-    def _sync_md(self) -> None:
+    def _sync_md(self, trigger=None) -> None:
         project = self._current_project_or_warn()
         if not project:
             return
@@ -614,9 +635,12 @@ class SyncPage(BasePage):
         self.app.run_background("同步 MD",
             lambda: self.sync.sync_markdown(project["id"]),
             on_success=lambda r: (self.toast(f"MD 已同步：入库 {r['upserted']} 条，缺文案 {len(r['missing_copy'])} 个"), self.refresh()),
-            show_success_toast=False)
+            show_success_toast=False,
+            loading_widget=trigger,
+            loading_text="同步中...",
+        )
 
-    def _sync_assets(self) -> None:
+    def _sync_assets(self, trigger=None) -> None:
         project = self._current_project_or_warn()
         if not project:
             return
@@ -630,9 +654,11 @@ class SyncPage(BasePage):
             return merged
         self.app.run_background("扫描素材", task,
                                 on_success=lambda r: self._finish_asset_sync("全部", r),
-                                show_success_toast=False)
+                                show_success_toast=False,
+                                loading_widget=trigger,
+                                loading_text="扫描中...")
 
-    def _sync_asset_type(self, asset_type: str) -> None:
+    def _sync_asset_type(self, asset_type: str, trigger=None) -> None:
         project = self._current_project_or_warn()
         if not project:
             return
@@ -647,9 +673,11 @@ class SyncPage(BasePage):
             lambda: self.sync.sync_assets(project["id"], asset_type=asset_type, root_override=path),
             on_success=lambda r: self._finish_asset_sync(label, r, focus_type=asset_type, account_filter=selected_user, path_filter=path_filter),
             show_success_toast=False,
+            loading_widget=trigger,
+            loading_text="同步中...",
         )
 
-    def _check_voice_status(self) -> None:
+    def _check_voice_status(self, trigger=None) -> None:
         project = self._current_project_or_warn()
         if not project:
             return
@@ -768,7 +796,7 @@ class SyncPage(BasePage):
         self.app.set_current_project(project_id)
         self.app.show_page("生成配音")
         page = self.app.pages.get("生成配音")
-        if not isinstance(page, VoicePage):
+        if getattr(page, "page_title", "") != "生成配音":
             self.toast("无法打开生成配音页面。", kind="error")
             return
         page.account_var.set(account_label)
@@ -853,7 +881,7 @@ class SyncPage(BasePage):
         _center_dialog(dialog)
         dialog.wait_window()
 
-    def _show_all_gaps(self) -> None:
+    def _show_all_gaps(self, _trigger=None) -> None:
         project = self._current_project_or_warn()
         if not project:
             return
@@ -1024,7 +1052,7 @@ class SyncPage(BasePage):
         dialog.lift()
         dialog.focus_set()
 
-    def _sync_all(self) -> None:
+    def _sync_all(self, trigger=None) -> None:
         project = self._current_project_or_warn()
         if not project:
             return
@@ -1055,7 +1083,10 @@ class SyncPage(BasePage):
             self.sync.sync_assets(project["id"], asset_type="video")
             return {}
         self.app.run_background("一键同步", sync_all_task,
-                                on_success=lambda r: (self.toast(f"一键同步完成", duration=4500), self.refresh()), show_success_toast=False)
+                                on_success=lambda r: (self.toast(f"一键同步完成", duration=4500), self.refresh()),
+                                show_success_toast=False,
+                                loading_widget=trigger,
+                                loading_text="同步中...")
 
     def _open_path(self, key: str) -> None:
         p = self._current_project_or_warn()
@@ -1072,7 +1103,7 @@ class SyncPage(BasePage):
             root_key = {"image": "image_root", "video": "video_root", "voice": "voice_root"}.get(asset_type, "")
             open_path(p.get(root_key))
 
-    def _open_md_folder(self) -> None:
+    def _open_md_folder(self, _trigger=None) -> None:
         p = self._current_project_or_warn()
         if p and p.get("md_path"):
             open_path(Path(p["md_path"]).parent)

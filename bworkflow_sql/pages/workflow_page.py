@@ -161,20 +161,29 @@ class WorkflowPage(BasePage):
         self.log_text = AppTextbox(self.content, height=160)
         self.log_text.pack(fill="both", expand=True)
 
+    def _is_voice_page(self) -> bool:
+        return self.page_title == "生成配音"
+
+    def _is_assemble_page(self) -> bool:
+        return self.page_title == "组合口播稿"
+
+    def _is_jianying_page(self) -> bool:
+        return self.page_title == "生成剪映草稿"
+
     def _command(self) -> list[str]:
         project = self.project_required()
         if not project:
             return []
-        if isinstance(self, VoicePage):
+        if self._is_voice_page():
             uids, script_ids = parse_voice_targets(self.uid_var.get())
             return self.workflow.build_voice_command(
                 project["id"],
                 account_label=self.account_var.get().strip(),
-                voice_provider=self._selected_voice_provider() if isinstance(self, VoicePage) else VOICE_PROVIDER_INDEXTTS,
+                voice_provider=self._selected_voice_provider(),
                 uids=uids or None,
                 script_ids=script_ids or None,
             )
-        if isinstance(self, AssemblePage):
+        if self._is_assemble_page():
             top_uids = parse_uid_list(self.uid_var.get())
             mode = "top" if self.mode_var.get().strip().startswith("Top") else "standard"
             return self.workflow.build_assembly_command(
@@ -201,13 +210,13 @@ class WorkflowPage(BasePage):
             "initialdir": str(default_path.parent),
             "initialfile": default_path.name,
         }
-        if isinstance(self, JianyingPage):
+        if self._is_jianying_page():
             path = filedialog.askopenfilename(**dialog_options)
         else:
             path = filedialog.asksaveasfilename(confirmoverwrite=False, **dialog_options)
         if path:
             self.spoken_md_var.set(path.replace("/", "\\"))
-            if isinstance(self, JianyingPage):
+            if self._is_jianying_page():
                 self._update_jianying_draft_name(force=True)
 
     def _browse_intro_video(self) -> None:
@@ -300,7 +309,7 @@ class WorkflowPage(BasePage):
         self.log(" ".join(f'"{p}"' if " " in p else p for p in cmd))
 
     def _run_command(self) -> None:
-        if isinstance(self, VoicePage):
+        if self._is_voice_page():
             self._run_voice_command()
             return
         try:
@@ -356,7 +365,7 @@ class WorkflowPage(BasePage):
         self.app.run_background("执行任务", work, on_success=on_success, on_error=on_error, show_success_toast=False)
 
     def _append_run_summary(self, progress_dialog: TaskProgressDialog, cmd: list[str]) -> None:
-        if isinstance(self, JianyingPage):
+        if self._is_jianying_page():
             draft_name = self.account_var.get().strip()
             spoken_md = self.spoken_md_var.get().strip()
             intro_video = self.intro_video_var.get().strip()
@@ -539,42 +548,42 @@ class WorkflowPage(BasePage):
         self.app.run_background("生成配音", work, on_success=on_success, on_error=on_error, show_success_toast=False)
 
     def _running_dialog_title(self) -> str:
-        if isinstance(self, JianyingPage):
+        if self._is_jianying_page():
             return "正在生成剪映草稿"
-        if isinstance(self, VoicePage):
+        if self._is_voice_page():
             return "正在生成配音"
-        if isinstance(self, AssemblePage):
+        if self._is_assemble_page():
             return "正在组合口播稿"
         return "正在执行任务"
 
     def _running_dialog_message(self) -> str:
-        if isinstance(self, JianyingPage):
+        if self._is_jianying_page():
             return "通常需要几分钟。窗口会在执行结束后显示结果。"
-        if isinstance(self, VoicePage):
+        if self._is_voice_page():
             return "正在准备配音任务与服务状态，请等待当前任务结束后再继续操作。"
-        if isinstance(self, AssemblePage):
+        if self._is_assemble_page():
             return "正在组合口播稿内容，请等待当前任务结束后再继续操作。"
         return "任务正在执行中，请等待当前任务结束后再继续操作。"
 
     def _success_dialog_headline(self) -> str:
-        if isinstance(self, JianyingPage):
+        if self._is_jianying_page():
             return "剪映草稿生成成功"
-        if isinstance(self, AssemblePage):
+        if self._is_assemble_page():
             return "口播稿组合完成"
         return "执行完成"
 
     def _success_dialog_message(self) -> str:
-        if isinstance(self, JianyingPage):
+        if self._is_jianying_page():
             return "草稿已经写入输出目录，现在可以去剪映里打开。"
-        if isinstance(self, AssemblePage):
+        if self._is_assemble_page():
             return "口播稿与 manifest 已生成完成，可以继续后续流程。"
         return "任务已经完成，可以关闭窗口。"
 
     def _success_dialog_detail(self) -> str:
-        if isinstance(self, JianyingPage):
+        if self._is_jianying_page():
             draft_name = self.account_var.get().strip() or safe_text(self.project_required().get("name"))
             return f"草稿名称：{draft_name}"
-        if isinstance(self, AssemblePage):
+        if self._is_assemble_page():
             output_path = self.spoken_md_var.get().strip()
             return f"输出文件：{output_path}" if output_path else ""
         return ""
@@ -583,7 +592,7 @@ class WorkflowPage(BasePage):
         project = self.project_required()
         if not project:
             return False
-        if isinstance(self, VoicePage):
+        if self._is_voice_page():
             sections, can_continue = self._voice_precheck(project)
             return show_precheck_dialog(
                 self,
@@ -592,7 +601,7 @@ class WorkflowPage(BasePage):
                 sections,
                 can_continue=can_continue,
             )
-        if isinstance(self, JianyingPage):
+        if self._is_jianying_page():
             sections, can_continue = self._jianying_precheck(project)
             return show_precheck_dialog(
                 self,
@@ -601,7 +610,7 @@ class WorkflowPage(BasePage):
                 sections,
                 can_continue=can_continue,
             )
-        if isinstance(self, AssemblePage):
+        if self._is_assemble_page():
             sections, can_continue = self._assembly_precheck(project)
             return show_precheck_dialog(
                 self,
@@ -738,7 +747,7 @@ class WorkflowPage(BasePage):
         sections, _stats, can_continue = self._voice_task_precheck_sections(
             project,
             account_label=self.account_var.get().strip(),
-            voice_provider=self._selected_voice_provider() if isinstance(self, VoicePage) else VOICE_PROVIDER_INDEXTTS,
+            voice_provider=self._selected_voice_provider() if self._is_voice_page() else VOICE_PROVIDER_INDEXTTS,
             target_text=self.uid_var.get(),
         )
         return sections, can_continue
@@ -1082,7 +1091,7 @@ class WorkflowPage(BasePage):
             if self.loaded_project_id != project["id"]:
                 self.spoken_md_var.set(safe_text(project.get("spoken_md_path")))
                 self.loaded_project_id = project["id"]
-        if isinstance(self, VoicePage):
+        if self._is_voice_page():
             users = account_labels_for_voice_provider(self.repo.accounts(), self._selected_voice_provider())
         else:
             users = [a["label"] for a in self.repo.accounts()]
@@ -1091,14 +1100,14 @@ class WorkflowPage(BasePage):
             account_input.configure(values=users)
             if users and self.account_var.get() not in users:
                 self.account_var.set(users[0])
-            elif not users and isinstance(self, VoicePage):
+            elif not users and self._is_voice_page():
                 self.account_var.set("")
-        if isinstance(self, AssemblePage):
+        if self._is_assemble_page():
             self._refresh_intro_choices(project)
             if users:
                 self.asm_user_var.set(self.account_var.get())
             self._on_asm_user_changed()
-        if isinstance(self, JianyingPage):
+        if self._is_jianying_page():
             if project and not self.spoken_md_var.get().strip():
                 self.spoken_md_var.set(
                     safe_text(project.get("spoken_md_path"))
@@ -1110,7 +1119,7 @@ class WorkflowPage(BasePage):
                 safe_text(project.get("spoken_md_path"))
                 or str(default_spoken_markdown_path(project, self.account_var.get().strip())).replace("/", "\\")
             )
-        if isinstance(self, VoicePage):
+        if self._is_voice_page():
             self._update_voice_output_dir(force=True)
 
     def _select_project(self, _=None) -> None:

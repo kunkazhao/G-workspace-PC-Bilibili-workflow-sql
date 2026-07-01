@@ -2,10 +2,109 @@ from __future__ import annotations
 
 """标准化 UI 组件库 —— 基于 customtkinter 封装的项目级组件。"""
 
+import tkinter as tk
 import customtkinter as ctk
 from typing import Any
 
 from .style_config import UIStyle
+
+
+def _button_cget(button: Any, key: str, default: str = "") -> str:
+    try:
+        return str(button.cget(key))
+    except Exception:
+        return default
+
+
+def set_button_loading(button: Any, loading_text: str = "处理中...") -> None:
+    if button is None or getattr(button, "_bworkflow_loading", False):
+        return
+    button._bworkflow_loading = True
+    button._bworkflow_loading_text = _button_cget(button, "text")
+    button._bworkflow_loading_state = _button_cget(button, "state", "normal")
+    button.configure(text=loading_text, state="disabled")
+
+
+def restore_button_loading(button: Any) -> None:
+    if button is None or not getattr(button, "_bworkflow_loading", False):
+        return
+    text = getattr(button, "_bworkflow_loading_text", _button_cget(button, "text"))
+    state = getattr(button, "_bworkflow_loading_state", "normal")
+    button.configure(text=text, state=state)
+    button._bworkflow_loading = False
+
+
+class HoverTooltip:
+    """Simple hover tooltip for compact CustomTkinter controls."""
+
+    def __init__(self, widget: Any | tuple[Any, ...], text: str, *, delay_ms: int = 350, wraplength: int = 680):
+        self.widgets = widget if isinstance(widget, tuple) else (widget,)
+        self.text = text
+        self.delay_ms = delay_ms
+        self.wraplength = wraplength
+        self._tip: tk.Toplevel | None = None
+        self._after_id: str | None = None
+        for item in self.widgets:
+            item.bind("<Enter>", self._schedule, add="+")
+            item.bind("<Leave>", self._hide, add="+")
+            item.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event: tk.Event | None = None) -> None:
+        self._cancel_scheduled()
+        if not self.text:
+            return
+        anchor = self.widgets[0]
+        self._after_id = anchor.after(self.delay_ms, self._show)
+
+    def _cancel_scheduled(self) -> None:
+        if self._after_id:
+            try:
+                self.widgets[0].after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _hide(self, _event: tk.Event | None = None) -> None:
+        self._cancel_scheduled()
+        if self._tip:
+            self._tip.destroy()
+            self._tip = None
+
+    def _show(self) -> None:
+        self._hide()
+        anchor = self.widgets[0]
+        self._tip = tip = tk.Toplevel(anchor)
+        tip.wm_overrideredirect(True)
+        tip.wm_attributes("-topmost", True)
+        label = tk.Label(
+            tip,
+            text=self.text,
+            background="#1E293B",
+            foreground="#F1F5F9",
+            relief="solid",
+            borderwidth=1,
+            font=UIStyle.FONT_SMALL,
+            wraplength=self.wraplength,
+            justify="left",
+            padx=8,
+            pady=5,
+        )
+        label.pack()
+        x = anchor.winfo_rootx()
+        y = anchor.winfo_rooty() + anchor.winfo_height() + 6
+        tip.wm_geometry(f"+{x}+{y}")
+
+
+def add_hover_tooltip(widget: Any | tuple[Any, ...], text: str) -> HoverTooltip | None:
+    if not text:
+        return None
+    tooltip = HoverTooltip(widget, text)
+    widgets = widget if isinstance(widget, tuple) else (widget,)
+    for item in widgets:
+        tooltips = list(getattr(item, "_bworkflow_tooltips", []))
+        tooltips.append(tooltip)
+        item._bworkflow_tooltips = tooltips
+    return tooltip
 
 
 class NavButton(ctk.CTkFrame):
@@ -296,6 +395,7 @@ class BasePage(ctk.CTkFrame):
             **kwargs,
         )
         self.app = app
+        self.page_title = title
         self.db = app.db
         self.repo = app.repo
         self.sync = app.sync

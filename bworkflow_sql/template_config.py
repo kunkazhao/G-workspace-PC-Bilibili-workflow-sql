@@ -16,7 +16,7 @@ TEMPLATE_COORDS: dict[str, dict[str, Any]] = {
     "小博-模板2": {"x": 1015, "y": 154, "width": 680, "height": 520, "display_scale": 0.52},
     "小博-模板3": {"x": 1015, "y": 154, "width": 680, "height": 520, "display_scale": 0.52},
     "小燃-模板1": {"x": -830, "y": -77, "width": 970, "height": 590, "coordinate_mode": "clip_transform_pixels"},
-    "小燃-模板2": {"x": 50, "y": 322, "width": 1004, "height": 588},
+    "小燃-模板2": {"x": 47, "y": 317, "width": 1003, "height": 588, "display_scale": 0.55},
     "小歪-模板1": {"x": -855, "y": -22, "width": 960, "height": 540, "coordinate_mode": "clip_transform_pixels"},
     "小歪-模板2": {"x": -29, "y": 202, "width": 1132, "height": 676, "display_scale": 0.53},
     "知了-模板1": {"x": 67, "y": 185, "width": 990, "height": 576},

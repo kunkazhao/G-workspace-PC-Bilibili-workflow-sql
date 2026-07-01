@@ -71,6 +71,19 @@ def test_xiaobo_template_3_uses_html_cover_frame_slot() -> None:
     }
 
 
+def test_xiaoran_template_2_uses_jianying_ui_coordinates() -> None:
+    assert available_templates("小燃") == ["小燃-模板1", "小燃-模板2"]
+    assert user_for_template("小燃-模板2") == "小燃"
+    assert image_set_for_template("小燃-模板2") == "模板2"
+    assert get_template_slot("小燃-模板2") == {
+        "x": 47,
+        "y": 317,
+        "width": 1003,
+        "height": 588,
+        "display_scale": 0.55,
+    }
+
+
 def test_xiaowai_template_2_uses_html_cover_stage_slot() -> None:
     assert get_template_slot("小歪-模板2") == {
         "x": -29,

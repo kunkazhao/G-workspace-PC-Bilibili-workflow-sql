@@ -191,7 +191,7 @@ class AssemblePage(WorkflowPage):
         PrimaryButton(actions, text="预检查并执行", command=self._run_command).grid(row=0, column=1, sticky="e")
 
     def _on_asm_user_changed(self, _=None, *, update_path: bool = True) -> None:
-        from .template_config import available_templates
+        from ..template_config import available_templates
         self.asm_user_var.set(self.account_var.get().strip())
         templates = available_templates(self.asm_user_var.get())
         self.asm_template_combo.configure(values=templates)

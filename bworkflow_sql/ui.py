@@ -11,6 +11,8 @@ from tkinter import messagebox
 from .components import (
     AppComboBox,
     NavButton,
+    restore_button_loading,
+    set_button_loading,
 )
 from .db import Database
 from .master_data import MasterDataService
@@ -317,6 +319,8 @@ class App(ctk.CTk):
         success_message: str | None = None,
         silent: bool = False,
         show_success_toast: bool = True,
+        loading_widget: Any | None = None,
+        loading_text: str | None = None,
     ) -> bool:
         if self._busy:
             self.toast("当前已有任务在执行，请稍等。", kind="warning")
@@ -324,6 +328,8 @@ class App(ctk.CTk):
         self._busy = True
         self.set_status(f"{title}中...")
         self.configure(cursor="watch")
+        if loading_widget is not None:
+            set_button_loading(loading_widget, loading_text or f"{title}中...")
 
         def finish(result: Any = None, error: Exception | None = None, tb: str = "") -> None:
             self._busy = False
@@ -345,6 +351,8 @@ class App(ctk.CTk):
                     if message and not silent and show_success_toast:
                         self.toast(message, kind="success")
             finally:
+                if loading_widget is not None:
+                    restore_button_loading(loading_widget)
                 if on_done:
                     on_done()
 
