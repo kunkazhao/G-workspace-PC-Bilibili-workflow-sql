@@ -15,6 +15,8 @@ def test_render_package_parser_registers_command():
             "xiaobo",
             "--output-mode",
             "final_mp4",
+            "--product-media-mode",
+            "cover_only",
             "--output",
             "out.json",
         ]
@@ -24,6 +26,7 @@ def test_render_package_parser_registers_command():
     assert args.project_id == 3
     assert args.account == "xiaobo"
     assert args.output_mode == "final_mp4"
+    assert args.product_media_mode == "cover_only"
     assert args.output == "out.json"
 
 
@@ -41,6 +44,7 @@ def test_cmd_render_package_writes_success_json_and_package(
             *,
             account_label,
             output_mode,
+            product_media_mode,
             package_output_path,
         ):
             calls.append(
@@ -48,6 +52,7 @@ def test_cmd_render_package_writes_success_json_and_package(
                     "project_id": project_id,
                     "account_label": account_label,
                     "output_mode": output_mode,
+                    "product_media_mode": product_media_mode,
                     "package_output_path": package_output_path,
                 }
             )
@@ -73,6 +78,7 @@ def test_cmd_render_package_writes_success_json_and_package(
             project_id=3,
             account="xiaobo",
             output_mode="jianying_draft",
+            product_media_mode="video_preferred",
             output=str(output),
         )
     )
@@ -94,6 +100,7 @@ def test_cmd_render_package_writes_success_json_and_package(
             "project_id": 3,
             "account_label": "xiaobo",
             "output_mode": "jianying_draft",
+            "product_media_mode": "video_preferred",
             "package_output_path": str(output),
         }
     ]
@@ -113,6 +120,7 @@ def test_cmd_render_package_reports_missing_without_writing_package(
             *,
             account_label,
             output_mode,
+            product_media_mode,
             package_output_path,
         ):
             return {
@@ -133,6 +141,7 @@ def test_cmd_render_package_reports_missing_without_writing_package(
             project_id=3,
             account="xiaobo",
             output_mode="jianying_draft",
+            product_media_mode="video_preferred",
             output=str(output),
         )
     )

@@ -95,11 +95,31 @@ def test_render_package_to_jianying_manifest_maps_separate_assets(tmp_path):
     assert product_without_video["display_video_slot"] is None
 
 
+def test_render_package_to_jianying_manifest_respects_cover_only_media_mode(tmp_path):
+    package = _package()
+    package["output"] = {"productMediaMode": "cover_only"}
+    output = tmp_path / "package.manifest.json"
+
+    manifest_path = render_package_to_jianying_manifest(
+        package,
+        output,
+        project_id=3,
+        account_label="xiaobo",
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    product_with_video = payload["entries"][1]
+    assert product_with_video["product_uid"] == "P001"
+    assert product_with_video["video_path"] == ""
+    assert product_with_video["display_video_path"] == ""
+    assert product_with_video["display_video_slot"] is None
+
+
 def test_prepare_product_recommendation_output_writes_jianying_manifest(
     tmp_path,
     monkeypatch,
 ):
-    def fake_build(db, *, project_id, account_label, output_mode):
+    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode):
         return SimpleNamespace(package=_package(), missing=[])
 
     output = tmp_path / "render-package.json"

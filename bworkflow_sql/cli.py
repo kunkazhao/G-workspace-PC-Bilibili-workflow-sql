@@ -419,6 +419,7 @@ def cmd_render_package(args: argparse.Namespace) -> None:
         project_id=args.project_id,
         account_label=args.account,
         output_mode=args.output_mode,
+        product_media_mode=args.product_media_mode,
         package_output_path=args.output or None,
     )
     _json_out(result)
@@ -503,6 +504,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-mode",
         choices=["jianying_draft", "final_mp4"],
         default="jianying_draft",
+    )
+    p.add_argument(
+        "--product-media-mode",
+        choices=["cover_only", "video_preferred"],
+        default="video_preferred",
+        help="product display media: cover_only uses only the cover image; video_preferred uses product video when available",
     )
     p.add_argument("--output", "-o", help="render-package.json output path")
 

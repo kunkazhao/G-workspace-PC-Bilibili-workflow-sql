@@ -234,6 +234,108 @@ def test_build_product_recommendation_package_from_ready_assets(
     assert all(Path(segment["imageCardAsset"]).is_absolute() for segment in products)
 
 
+def test_build_product_recommendation_package_can_force_cover_only_media(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+        product_media_mode="cover_only",
+    )
+
+    products = [
+        segment
+        for segment in result.package["segments"]
+        if segment["type"] == "product_recommendation"
+    ]
+    assert result.package["output"]["productMediaMode"] == "cover_only"
+    assert products[0]["productMediaMode"] == "cover_only"
+    assert products[0]["videoAsset"] is None
+
+
+def test_build_product_recommendation_package_downloads_remote_cover_to_category_cache(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE products SET product_card_json=? WHERE project_id=? AND uid='P001'",
+            (
+                '{"coverAsset":"https://img.example.com/covers/P001.webp","dataMap":{"title":"Alpha Keyboard","price":"200-300","cover":"https://img.example.com/covers/P001.webp"},"slots":[]}',
+                project_id,
+            ),
+        )
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", tmp_path / "cover-cache")
+    monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: b"cover-bytes")
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+    )
+
+    product = next(
+        segment
+        for segment in result.package["segments"]
+        if segment.get("productUid") == "P001"
+    )
+    cover_path = Path(product["productCard"]["coverAsset"])
+
+    assert cover_path == tmp_path / "cover-cache" / "keyboard" / "P001.webp"
+    assert cover_path.read_bytes() == b"cover-bytes"
+    assert product["productCard"]["dataMap"]["cover"] == str(cover_path)
+
+
+def test_build_product_recommendation_package_downloads_data_map_cover_url(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE products SET product_card_json=? WHERE project_id=? AND uid='P001'",
+            (
+                '{"dataMap":{"title":"Alpha Keyboard","price":"200-300","cover":"https://img.example.com/covers/P001.jpg"},"slots":[]}',
+                project_id,
+            ),
+        )
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", tmp_path / "cover-cache")
+    monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: b"cover-bytes")
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+    )
+
+    product = next(
+        segment
+        for segment in result.package["segments"]
+        if segment.get("productUid") == "P001"
+    )
+    cover_path = tmp_path / "cover-cache" / "keyboard" / "P001.jpg"
+
+    assert product["productCard"]["coverAsset"] == str(cover_path)
+    assert product["productCard"]["dataMap"]["cover"] == str(cover_path)
+
+
 def test_build_product_recommendation_package_reports_missing_required_assets(
     tmp_path: Path,
     monkeypatch,

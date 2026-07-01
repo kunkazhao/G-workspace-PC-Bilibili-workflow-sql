@@ -106,6 +106,8 @@ from .draft_helpers import (  # noqa: F401 – re-exported
 
 
 from .render_package_builder import (
+    DEFAULT_PRODUCT_MEDIA_MODE,
+    SUPPORTED_PRODUCT_MEDIA_MODES,
     SUPPORTED_OUTPUT_MODES,
     build_product_recommendation_package,
 )
@@ -319,17 +321,22 @@ class WorkflowService:
         *,
         account_label: str,
         output_mode: str,
+        product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
         package_output_path: str | Path | None = None,
     ) -> dict[str, Any]:
         mode = safe_text(output_mode) or "jianying_draft"
         if mode not in SUPPORTED_OUTPUT_MODES:
             raise ValueError(f"unsupported output_mode: {mode}")
+        media_mode = safe_text(product_media_mode) or DEFAULT_PRODUCT_MEDIA_MODE
+        if media_mode not in SUPPORTED_PRODUCT_MEDIA_MODES:
+            raise ValueError(f"unsupported product_media_mode: {media_mode}")
 
         result = build_product_recommendation_package(
             self.db,
             project_id=project_id,
             account_label=account_label,
             output_mode=mode,
+            product_media_mode=media_mode,
         )
         output_path = (
             Path(package_output_path)
@@ -343,6 +350,7 @@ class WorkflowService:
             "project_id": project_id,
             "account": account_label,
             "output_mode": mode,
+            "product_media_mode": media_mode,
             "package_path": str(output_path),
             "missing": result.missing,
         }
@@ -2006,6 +2014,10 @@ def render_package_to_jianying_manifest(
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     entries: list[dict[str, Any]] = []
+    package_output = package.get("output") if isinstance(package.get("output"), dict) else {}
+    package_product_media_mode = (
+        safe_text(package_output.get("productMediaMode")) or DEFAULT_PRODUCT_MEDIA_MODE
+    )
     for order, segment in enumerate(package.get("segments") or [], start=1):
         if not isinstance(segment, dict):
             continue
@@ -2037,7 +2049,12 @@ def render_package_to_jianying_manifest(
                 }
             )
         elif segment_type == "product_recommendation":
-            video_path = safe_text(segment.get("videoAsset"))
+            segment_product_media_mode = safe_text(segment.get("productMediaMode")) or package_product_media_mode
+            video_path = (
+                safe_text(segment.get("videoAsset"))
+                if segment_product_media_mode == "video_preferred"
+                else ""
+            )
             entries.append(
                 {
                     "type": "product",
