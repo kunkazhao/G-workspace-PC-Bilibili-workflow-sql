@@ -60,6 +60,8 @@ class App(ctk.CTk):
         self.current_project_id: int | None = self.db.latest_project_id()
         self.pages: dict[str, ctk.CTkFrame] = {}
         self.nav_buttons: dict[str, NavButton] = {}
+        self.current_page_name: str | None = None
+        self._page_refresh_generation = 0
 
         configure_treeview_style(self)
         self._build_shell()
@@ -228,6 +230,23 @@ class App(ctk.CTk):
                 return
         page = self.pages[name]
         page.grid()
+        self.current_page_name = name
+        self._schedule_page_refresh(name, page)
+
+    def _schedule_page_refresh(self, name: str, page: ctk.CTkFrame) -> None:
+        self._page_refresh_generation += 1
+        generation = self._page_refresh_generation
+
+        def refresh_if_current() -> None:
+            if generation != self._page_refresh_generation:
+                return
+            if self.current_page_name != name:
+                return
+            self._refresh_page(name, page)
+
+        self.after(1, refresh_if_current)
+
+    def _refresh_page(self, name: str, page: ctk.CTkFrame) -> None:
         try:
             page.refresh()
         except Exception as exc:
@@ -242,8 +261,10 @@ class App(ctk.CTk):
     def set_current_project(self, project_id: int) -> None:
         self.current_project_id = project_id
         self.sync_project_selectors()
-        for page in self.pages.values():
-            page.refresh()
+        if self.current_page_name:
+            page = self.pages.get(self.current_page_name)
+            if page is not None:
+                self._schedule_page_refresh(self.current_page_name, page)
 
     def set_status(self, text: str) -> None:
         self.status_var.set(text or "就绪")
