@@ -1551,6 +1551,12 @@ class WorkflowService:
         ts = now_iso()
         account_label = safe_text(account.get("label"))
         account_id = safe_text(account.get("account_id"))
+        self._delete_stale_voice_files(
+            project_id,
+            job=job,
+            account_label=account_label,
+            current_path=path,
+        )
         with self.db.connect() as conn:
             conn.execute(
                 """
@@ -1584,6 +1590,47 @@ class WorkflowService:
                     ts,
                 ),
             )
+
+    def _delete_stale_voice_files(
+        self,
+        project_id: int,
+        *,
+        job: VoiceJob,
+        account_label: str,
+        current_path: Path,
+    ) -> None:
+        rows = self.db.fetchall(
+            """
+            SELECT path FROM asset_bindings
+            WHERE project_id=?
+              AND script_block_id=?
+              AND asset_type='voice'
+              AND account_label=?
+              AND text_hash<>?
+              AND source_kind<>'manual'
+            """,
+            (
+                project_id,
+                job.block["id"],
+                account_label,
+                safe_text(job.block.get("text_hash")),
+            ),
+        )
+        current = current_path.resolve()
+        for row in rows:
+            stale_path = Path(safe_text(row["path"]))
+            if not stale_path:
+                continue
+            try:
+                if stale_path.resolve() == current:
+                    continue
+            except OSError:
+                pass
+            try:
+                if stale_path.is_file():
+                    stale_path.unlink()
+            except OSError:
+                continue
 
     def _ensure_tts_api_ready(
         self,

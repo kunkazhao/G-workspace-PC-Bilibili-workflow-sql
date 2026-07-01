@@ -347,6 +347,62 @@ def test_expired_voice_generation_overwrites_original_filename(tmp_path: Path):
     assert not old_path.with_name(f"{old_path.stem}-1{old_path.suffix}").exists()
 
 
+def test_upserting_new_voice_deletes_stale_generated_voice_file(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    repo = Repository(db)
+    project = repo.project(project_id)
+    account = repo.accounts()[0]
+    block = next(block for block in repo.script_blocks(project_id) if block["script_type"] == "product")
+    job = VoiceJob(
+        block=block,
+        uid="YXEJ002",
+        product_name="Product One",
+        price_label="59",
+        index=1,
+        kind="product",
+    )
+    output_dir = Path(project["voice_root"]) / project["name"] / account["label"]
+    stale_path = output_dir / "old-product-voice.mp3"
+    new_path = output_dir / "new-product-voice.mp3"
+    stale_path.parent.mkdir(parents=True)
+    stale_path.write_bytes(b"stale")
+    new_path.write_bytes(b"new")
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, script_block_id, asset_type, account_label, account_id, block_label, script_id, text_hash, path, status, source_kind, file_size, file_mtime, confirmed, created_at, updated_at)
+            VALUES (?, ?, ?, 'voice', ?, ?, ?, ?, ?, ?, 'ready', 'generated', ?, ?, 1, ?, ?)
+            """,
+            (
+                project_id,
+                job.uid,
+                job.block["id"],
+                account["label"],
+                account["account_id"],
+                job.block["block_label"],
+                job.block["script_id"],
+                "old-hash",
+                str(stale_path),
+                stale_path.stat().st_size,
+                "old",
+                now_iso(),
+                now_iso(),
+            ),
+        )
+
+    service._upsert_voice_asset(project_id, job=job, account=account, path=new_path)
+
+    stale_asset = db.fetchone(
+        "SELECT status FROM asset_bindings WHERE project_id=? AND path=?",
+        (project_id, str(stale_path)),
+    )
+    assert stale_asset["status"] == "expired"
+    assert not stale_path.exists()
+    assert new_path.exists()
+
+
 def test_export_markdown_uses_database_asset_bindings_and_asset_sync_dedupes(tmp_path: Path):
     db, project_id = seed_project(tmp_path)
     project = Repository(db).project(project_id)
