@@ -47,14 +47,14 @@ def test_product_images_parser_registers_command():
             "--account",
             "xiaobo",
             "--mode",
-            "all",
+            "missing",
         ]
     )
 
     assert args.command == "product-images"
     assert args.project_id == 3
     assert args.account == "xiaobo"
-    assert args.mode == "all"
+    assert args.mode == "missing"
 
 
 def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):

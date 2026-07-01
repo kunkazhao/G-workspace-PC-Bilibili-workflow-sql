@@ -116,3 +116,60 @@ def test_regenerate_product_card_images_reports_noop_when_no_stale_images(tmp_pa
     assert result["ok"] is True
     assert result["regenerated"] == []
     assert result["skipped"][0]["uid"] == "P001"
+
+
+def test_regenerate_product_card_images_creates_missing_account_binding(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.product_image_generation as product_images
+
+    db, project_id, _image_path = _seed_project_with_stale_image(tmp_path)
+    monkeypatch.setattr(product_images, "PRODUCT_IMAGE_RENDER_JOB_ROOT", tmp_path / "jobs")
+    with db.connect() as conn:
+        conn.execute("DELETE FROM asset_bindings WHERE asset_type='image'")
+    calls: list[tuple[Path, str, Path]] = []
+
+    def fake_render(package_path: Path, product_uid: str, output_path: Path) -> Path:
+        calls.append((package_path, product_uid, output_path))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"created image")
+        return output_path
+
+    result = regenerate_product_card_images(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        mode="missing",
+        render_product_card_still=fake_render,
+    )
+
+    product = Repository(db).products(project_id, include_removed=False)[0]
+    expected_path = (
+        tmp_path
+        / "images"
+        / "keyboard"
+        / "小博"
+        / "模板1"
+        / "299-P001-Alpha Keyboard.png"
+    )
+    package_payload = json.loads(calls[0][0].read_text(encoding="utf-8"))
+    segment = package_payload["segments"][0]
+    expected_fingerprint = product_card_content_fingerprint(product, segment["productCard"])
+    binding = db.fetchone(
+        "SELECT * FROM asset_bindings WHERE project_id=? AND uid='P001' AND asset_type='image'",
+        (project_id,),
+    )
+
+    assert result["ok"] is True
+    assert result["mode"] == "missing"
+    assert result["regenerated"][0]["uid"] == "P001"
+    assert result["regenerated"][0]["reason"] == "missing_ready_image_binding"
+    assert result["regenerated"][0]["path"] == str(expected_path)
+    assert calls == [(calls[0][0], "P001", expected_path)]
+    assert expected_path.read_bytes() == b"created image"
+    assert binding["account_label"] == "小博"
+    assert binding["path"] == str(expected_path)
+    assert binding["status"] == "ready"
+    assert binding["source_kind"] == "remotion"
+    assert binding["text_hash"] == expected_fingerprint

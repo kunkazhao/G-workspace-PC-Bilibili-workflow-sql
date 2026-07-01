@@ -10,6 +10,7 @@
   python -m bworkflow_sql assets-check 3
   python -m bworkflow_sql voice-counts 3 --account 小博
   python -m bworkflow_sql product-images 3 --account 小博 --mode stale
+  python -m bworkflow_sql product-images 3 --account 小博 --mode missing
 
 所有命令输出 JSON 到 stdout，错误输出 JSON 到 stderr。
 """
@@ -545,9 +546,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--account", required=True)
     p.add_argument(
         "--mode",
-        choices=["stale", "all"],
+        choices=["stale", "missing", "all"],
         default="stale",
-        help="stale regenerates only changed product cards; all regenerates every ready product card image",
+        help="stale regenerates changed product cards; missing creates absent account images; all regenerates both ready and missing images",
     )
 
     return parser
