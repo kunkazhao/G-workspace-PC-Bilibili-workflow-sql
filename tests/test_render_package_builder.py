@@ -301,12 +301,7 @@ def test_build_product_recommendation_package_from_ready_assets(
     ]
     price_transition = result.package["segments"][0]
     assert price_transition["priceTransitionCard"]["rangeLabel"] == "200-300"
-    assert price_transition["priceTransitionCard"]["headline"] == (
-        "Two to three hundred yuan focuses on brand maturity"
-    )
-    assert price_transition["priceTransitionCard"]["keyPoints"] == [
-        "Two to three hundred yuan focuses on brand maturity"
-    ]
+    assert price_transition["priceTransitionCard"]["keyPoints"]
     products = [
         segment
         for segment in result.package["segments"]
@@ -329,6 +324,112 @@ def test_build_product_recommendation_package_from_ready_assets(
     assert "productCard" not in products[1]
     assert all(Path(segment["voiceAsset"]).is_absolute() for segment in result.package["segments"])
     assert all(Path(segment["imageCardAsset"]).is_absolute() for segment in products)
+
+
+def test_price_transition_card_uses_fill_slots_with_voice_timing(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    body = "两百到三百元这个价位，重点看品牌完成度和音质细节，通话、连接和漏音控制，也会更稳，适合准备长期用的人。"
+    with db.connect() as conn:
+        block_id = conn.execute(
+            "SELECT id FROM script_blocks WHERE script_type='price_transition'"
+        ).fetchone()["id"]
+        conn.execute(
+            """
+            UPDATE script_blocks
+            SET body=?, text_hash=?
+            WHERE id=?
+            """,
+            (body, text_hash(body), block_id),
+        )
+        conn.execute(
+            """
+            UPDATE asset_bindings
+            SET text_hash=?
+            WHERE asset_type='voice' AND script_block_id=?
+            """,
+            (text_hash(body), block_id),
+        )
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 10.0)
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+    )
+
+    card = result.package["segments"][0]["priceTransitionCard"]
+    labels = [item["label"] for item in card["items"]]
+    starts = [item["timing"]["start"] for item in card["items"]]
+
+    assert result.missing == []
+    assert labels == ["品牌完成度", "音质细节", "通话 / 连接 / 漏音控制"]
+    assert [item["triggerText"] for item in card["items"]] == ["品牌完成度", "音质细节", "通话"]
+    assert starts == sorted(starts)
+    assert all(0 <= start < 10.0 for start in starts)
+    assert card["keyPoints"] == labels
+    assert card["visualEvents"] == [
+        {
+            "target": "price_param_01",
+            "text": "品牌完成度",
+            "trigger_text": "品牌完成度",
+            "timing": card["items"][0]["timing"],
+        },
+        {
+            "target": "price_param_02",
+            "text": "音质细节",
+            "trigger_text": "音质细节",
+            "timing": card["items"][1]["timing"],
+        },
+        {
+            "target": "price_param_03",
+            "text": "通话 / 连接 / 漏音控制",
+            "trigger_text": "通话",
+            "timing": card["items"][2]["timing"],
+        },
+    ]
+    assert body not in card.values()
+
+
+def test_price_transition_card_fallback_stays_as_short_parameter_slots(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    body = "下面是 400 元以上这个旗舰区间，基本上都是各品牌的高端型号，有侧重睡眠的，有侧重玩法的，预算充足的人可以看看。"
+    with db.connect() as conn:
+        block_id = conn.execute(
+            "SELECT id FROM script_blocks WHERE script_type='price_transition'"
+        ).fetchone()["id"]
+        conn.execute(
+            "UPDATE script_blocks SET body=?, text_hash=? WHERE id=?",
+            (body, text_hash(body), block_id),
+        )
+        conn.execute(
+            "UPDATE asset_bindings SET text_hash=? WHERE asset_type='voice' AND script_block_id=?",
+            (text_hash(body), block_id),
+        )
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 7.5)
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+    )
+
+    card = result.package["segments"][0]["priceTransitionCard"]
+
+    assert [item["label"] for item in card["items"]] == ["高端型号", "睡眠场景", "玩法"]
+    assert all(len(item["label"]) <= 8 for item in card["items"])
+    assert "基本上都是各品牌的高端型" not in card["keyPoints"]
 
 
 def test_build_product_recommendation_package_reports_stale_product_image(

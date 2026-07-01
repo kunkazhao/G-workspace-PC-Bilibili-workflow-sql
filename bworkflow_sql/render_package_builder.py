@@ -38,6 +38,27 @@ PRICE_TRANSITION_KEYWORDS = [
     "尝鲜",
     "少花钱",
 ]
+PRICE_TRANSITION_PARAMETER_GROUPS = [
+    ("品牌完成度", ("品牌完成度",)),
+    ("音质细节", ("音质细节",)),
+    ("通话 / 连接 / 漏音控制", ("通话", "连接", "漏音控制")),
+    ("音质解析编码", ("音质解析编码", "解析编码")),
+    ("外观做工质感", ("外观", "做工质感")),
+    ("性价比", ("性价比",)),
+    ("音质表现", ("音质",)),
+    ("降噪", ("降噪",)),
+    ("高端型号", ("高端型号", "高端")),
+    ("睡眠场景", ("睡眠",)),
+    ("玩法", ("玩法",)),
+    ("预算充足", ("预算充足",)),
+    ("续航", ("续航",)),
+    ("调音", ("调音",)),
+    ("通话降噪", ("通话降噪",)),
+    ("佩戴体验", ("佩戴", "佩戴体验")),
+    ("基础功能", ("基础功能",)),
+    ("基础体验", ("基础体验",)),
+    ("少花钱试戴法", ("花最少的钱", "少花钱")),
+]
 
 
 @dataclass(frozen=True)
@@ -102,11 +123,79 @@ def _price_transition_audience(body: str) -> str:
     return "按预算和使用频率来选"
 
 
-def _build_price_transition_card(label: str, body: str) -> dict[str, Any]:
+def _parameter_match_index(text: str, triggers: tuple[str, ...]) -> tuple[int, str] | None:
+    matches = [(text.find(trigger), trigger) for trigger in triggers if trigger and trigger in text]
+    if not matches:
+        return None
+    return min(matches, key=lambda item: item[0])
+
+
+def _price_transition_parameter_items(body: str, duration: float) -> list[dict[str, Any]]:
+    text = safe_text(body)
+    text_length = max(len(text), 1)
+    detected: list[tuple[int, str, str]] = []
+    matched_labels: set[str] = set()
+    for label, triggers in PRICE_TRANSITION_PARAMETER_GROUPS:
+        match = _parameter_match_index(text, triggers)
+        if match:
+            if label == "音质表现" and matched_labels.intersection({"音质细节", "音质解析编码"}):
+                continue
+            if label == "降噪" and matched_labels.intersection({"通话 / 连接 / 漏音控制", "通话降噪"}):
+                continue
+            detected.append((match[0], label, match[1]))
+            matched_labels.add(label)
+
+    if not detected:
+        fallback_points = _price_transition_key_points(text)
+        detected = [
+            (index, point, point)
+            for index, point in enumerate(fallback_points)
+            if point
+        ]
+
+    visual_duration = max(float(duration or 0), 1.0)
+    latest_start = max(0.45, visual_duration - 0.6)
+    previous_start = -0.5
+    items: list[dict[str, Any]] = []
+    for index, label, trigger_text in sorted(detected, key=lambda item: item[0])[:3]:
+        raw_start = (index / text_length) * visual_duration
+        start = max(0.45, min(raw_start, latest_start))
+        if start <= previous_start:
+            start = min(latest_start, previous_start + 0.55)
+        previous_start = start
+        timing = {
+            "start": round(start, 3),
+            "duration": round(max(0.8, visual_duration - start), 3),
+        }
+        items.append(
+            {
+                "label": label,
+                "triggerText": trigger_text,
+                "timing": timing,
+            }
+        )
+    return items
+
+
+def _build_price_transition_card(label: str, body: str, *, duration: float = 0.0) -> dict[str, Any]:
+    items = _price_transition_parameter_items(body, duration)
+    key_points = [safe_text(item.get("label")) for item in items if safe_text(item.get("label"))]
+    if not key_points:
+        key_points = _price_transition_key_points(body)
     return {
         "rangeLabel": safe_text(label),
-        "headline": _price_transition_headline(label, body),
-        "keyPoints": _price_transition_key_points(body),
+        "headline": "重点参数",
+        "keyPoints": key_points,
+        "items": items,
+        "visualEvents": [
+            {
+                "target": f"price_param_{index + 1:02d}",
+                "text": item["label"],
+                "trigger_text": item["triggerText"],
+                "timing": item["timing"],
+            }
+            for index, item in enumerate(items)
+        ],
         "audience": _price_transition_audience(body),
     }
 
@@ -191,14 +280,15 @@ def build_product_recommendation_package(
         voice_path = _absolute_file_path(voice.get("path"))
         label = safe_text(block.get("price_range_label"))
         body = safe_text(block.get("body"))
+        duration = get_audio_duration_seconds(voice_path)
         price_segments[label] = {
             "type": "price_transition",
             "id": f"price-{block.get('id')}",
             "priceRangeLabel": label,
             "transitionText": body,
-            "priceTransitionCard": _build_price_transition_card(label, body),
+            "priceTransitionCard": _build_price_transition_card(label, body, duration=duration),
             "voiceAsset": str(voice_path),
-            "duration": get_audio_duration_seconds(voice_path),
+            "duration": duration,
             "sourceScriptBlockId": int(block.get("id") or 0),
         }
 
