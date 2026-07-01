@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -155,27 +156,29 @@ def build_product_recommendation_package(
         voice_path = _absolute_file_path(voice.get("path"))
         image_path = _absolute_file_path(image.get("path"))
         video_path = _absolute_file_path(video.get("path")) if video else None
-        segments.append(
-            {
-                "type": "product_recommendation",
-                "id": f"product-{uid}",
-                "productUid": uid,
-                "productTitle": title,
-                "priceRangeLabel": safe_text(product.get("price_label")),
-                "spokenText": safe_text(block.get("body")),
-                "voiceAsset": str(voice_path),
-                "imageCardAsset": str(image_path),
-                "videoAsset": str(video_path) if video_path else None,
-                "duration": get_audio_duration_seconds(voice_path),
-                "sourceScriptBlockId": int(block.get("id") or 0),
-                "assetBindingIds": {
-                    "image": int(image.get("id") or 0),
-                    "voice": int(voice.get("id") or 0),
-                    "video": int(video.get("id") or 0) if video else None,
-                },
-                "subtitles": [],
-            }
-        )
+        product_segment = {
+            "type": "product_recommendation",
+            "id": f"product-{uid}",
+            "productUid": uid,
+            "productTitle": title,
+            "priceRangeLabel": safe_text(product.get("price_label")),
+            "spokenText": safe_text(block.get("body")),
+            "voiceAsset": str(voice_path),
+            "imageCardAsset": str(image_path),
+            "videoAsset": str(video_path) if video_path else None,
+            "duration": get_audio_duration_seconds(voice_path),
+            "sourceScriptBlockId": int(block.get("id") or 0),
+            "assetBindingIds": {
+                "image": int(image.get("id") or 0),
+                "voice": int(voice.get("id") or 0),
+                "video": int(video.get("id") or 0) if video else None,
+            },
+            "subtitles": [],
+        }
+        product_card = _product_card_payload(product, fallback_image_path=image_path)
+        if product_card:
+            product_segment["productCard"] = product_card
+        segments.append(product_segment)
 
     package = {
         "schemaVersion": "1.0.0",
@@ -270,3 +273,64 @@ def _unique_price_labels(products: list[dict[str, Any]]) -> list[str]:
             seen.add(label)
             labels.append(label)
     return labels
+
+
+def _product_card_payload(product: dict[str, Any], *, fallback_image_path: Path) -> dict[str, Any] | None:
+    raw = safe_text(product.get("product_card_json"))
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    data_map = payload.get("dataMap")
+    slots = payload.get("slots")
+    cover_asset = safe_text(payload.get("coverAsset"))
+    if not any([isinstance(data_map, dict), isinstance(slots, list), cover_asset]):
+        return None
+
+    normalized: dict[str, Any] = {
+        "templateId": safe_text(payload.get("templateId")) or "xiaoran1",
+        "dataMap": _string_map(data_map),
+        "slots": _slot_list(slots),
+        "fallbackImageAsset": str(fallback_image_path),
+        "coverMediaSlot": {
+            "x": 24,
+            "y": 140,
+            "width": 507,
+            "height": 318,
+            "sourceWidth": 970,
+            "sourceHeight": 480,
+        },
+    }
+    if cover_asset:
+        normalized["coverAsset"] = cover_asset
+        normalized["dataMap"]["cover"] = cover_asset
+    return normalized
+
+
+def _string_map(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        safe_text(key): safe_text(item)
+        for key, item in value.items()
+        if safe_text(key) and safe_text(item)
+    }
+
+
+def _slot_list(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    slots: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        label = safe_text(item.get("label"))
+        slot_value = safe_text(item.get("value"))
+        if label and slot_value:
+            slots.append({"label": label, "value": slot_value})
+    return slots

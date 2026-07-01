@@ -92,3 +92,31 @@ def test_schema_version_table_exists(tmp_path: Path):
     }
     assert "schema_version" in tables
     db.close()
+
+
+def test_products_store_master_product_card_json(tmp_path: Path):
+    db = Database(tmp_path / "product-card.db")
+    repo = Repository(db)
+    project_id = db.upsert_project({"name": "keyboard"})
+
+    repo.upsert_products_from_master(
+        project_id,
+        [
+            {
+                "uid": "P001",
+                "title": "Alpha Keyboard",
+                "price_label": "199元",
+                "cover": r"G:\covers\P001.png",
+                "remark": "Good for long typing sessions.",
+                "spec": {"switch": "silver", "_meta": "hidden"},
+            }
+        ],
+    )
+
+    product = repo.products(project_id)[0]
+
+    assert '"cover":"G:\\\\covers\\\\P001.png"' in product["product_card_json"]
+    assert '"remark":"Good for long typing sessions."' in product["product_card_json"]
+    assert '"label":"switch"' in product["product_card_json"]
+    assert "_meta" not in product["product_card_json"]
+    db.close()

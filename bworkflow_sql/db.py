@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS products (
     price_label TEXT NOT NULL DEFAULT '',
     sort_order INTEGER NOT NULL DEFAULT 0,
     master_item_id TEXT NOT NULL DEFAULT '',
+    product_card_json TEXT NOT NULL DEFAULT '',
     active INTEGER NOT NULL DEFAULT 1,
     removed_from_master INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -149,7 +150,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 """
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 def _script_id_slug(value: Any) -> str:
@@ -232,6 +233,7 @@ class Database:
         migrations = [
             (1, self._migrate_v1),
             (2, self._migrate_v2),
+            (3, self._migrate_v3),
         ]
         for version, func in migrations:
             if current < version:
@@ -329,6 +331,12 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_sync_event_items_event ON sync_event_items(sync_event_id)",
         ):
             conn.execute(ddl)
+
+    def _migrate_v3(self, conn: sqlite3.Connection) -> None:
+        """Store optional Master product-card payload for Remotion rendering."""
+        product_columns = {row[1] for row in conn.execute("PRAGMA table_info(products)").fetchall()}
+        if "product_card_json" not in product_columns:
+            conn.execute("ALTER TABLE products ADD COLUMN product_card_json TEXT NOT NULL DEFAULT ''")
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> None:
         with self.connect() as conn:

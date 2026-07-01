@@ -18,10 +18,25 @@ def _seed_project(tmp_path: Path) -> tuple[Database, int]:
             "scheme_id": "scheme-1",
         }
     )
+    cover = tmp_path / "assets" / "covers" / "P001.png"
+    cover.parent.mkdir(parents=True, exist_ok=True)
+    cover.write_bytes(b"cover")
     repo.upsert_products_from_master(
         project_id,
         [
-            {"uid": "P001", "title": "Alpha Keyboard", "price_label": "200-300"},
+            {
+                "uid": "P001",
+                "title": "Alpha Keyboard",
+                "price_label": "200-300",
+                "cover": str(cover),
+                "remark": "A compact keyboard with stable wireless connection.",
+                "spec": {
+                    "switch": "silver",
+                    "battery": "4000mAh",
+                    "_internal": "ignored",
+                },
+                "product_card_template_id": "xiaoran1",
+            },
             {"uid": "P002", "title": "Beta Keyboard", "price_label": "200-300"},
         ],
     )
@@ -203,6 +218,18 @@ def test_build_product_recommendation_package_from_ready_assets(
     assert [segment["productUid"] for segment in products] == ["P001", "P002"]
     assert products[0]["videoAsset"]
     assert products[1]["videoAsset"] is None
+    product_card = products[0]["productCard"]
+    assert product_card["templateId"] == "xiaoran1"
+    assert product_card["dataMap"]["title"] == "Alpha Keyboard"
+    assert product_card["dataMap"]["price"] == "200-300"
+    assert product_card["dataMap"]["remark"] == "A compact keyboard with stable wireless connection."
+    assert product_card["coverAsset"].endswith("P001.png")
+    assert product_card["fallbackImageAsset"] == products[0]["imageCardAsset"]
+    assert product_card["slots"] == [
+        {"label": "switch", "value": "silver"},
+        {"label": "battery", "value": "4000mAh"},
+    ]
+    assert "productCard" not in products[1]
     assert all(Path(segment["voiceAsset"]).is_absolute() for segment in result.package["segments"])
     assert all(Path(segment["imageCardAsset"]).is_absolute() for segment in products)
 
