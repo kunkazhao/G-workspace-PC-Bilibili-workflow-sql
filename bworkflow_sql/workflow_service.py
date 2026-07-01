@@ -322,6 +322,7 @@ class WorkflowService:
         account_label: str,
         output_mode: str,
         product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
+        stale_product_image_policy: str = "block",
         mode: str = "standard",
         top_uids: str | list[str] | None = None,
         package_output_path: str | Path | None = None,
@@ -332,6 +333,9 @@ class WorkflowService:
         media_mode = safe_text(product_media_mode) or DEFAULT_PRODUCT_MEDIA_MODE
         if media_mode not in SUPPORTED_PRODUCT_MEDIA_MODES:
             raise ValueError(f"unsupported product_media_mode: {media_mode}")
+        stale_policy = safe_text(stale_product_image_policy) or "block"
+        if stale_policy not in {"block", "reuse"}:
+            raise ValueError(f"unsupported stale_product_image_policy: {stale_policy}")
         sequence_mode = safe_text(mode) or "standard"
         top_uid_list = split_csv(top_uids) if isinstance(top_uids, str) else list(top_uids or [])
 
@@ -361,9 +365,18 @@ class WorkflowService:
             "top_uids": top_uid_list,
             "package_path": str(output_path),
             "missing": result.missing,
+            "stale_product_images": getattr(result, "stale_product_images", []),
         }
         if result.missing:
             return {"ok": False, **base_payload, "next": None}
+        if base_payload["stale_product_images"] and stale_policy == "block":
+            return {
+                "ok": False,
+                **base_payload,
+                "next": render_package_stale_product_image_next_step(
+                    base_payload["stale_product_images"]
+                ),
+            }
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
@@ -2082,6 +2095,30 @@ def render_package_next_step(
             f"python -m bworkflow_sql jianying {project_id} "
             f"--manifest {manifest_path} --draft-name {safe_path_component(account_label or 'render-package')}"
         ),
+    }
+
+
+def render_package_stale_product_image_next_step(stale_product_images: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "mode": "product_image_stale_review",
+        "status": "confirmation_required",
+        "message": "检测到商品数据变了，是否重生成商品图？",
+        "stale_count": len(stale_product_images),
+        "options": [
+            {
+                "id": "reuse",
+                "label": "继续复用旧商品图",
+                "command_hint": "--stale-product-image-policy reuse",
+            },
+            {
+                "id": "regenerate_stale",
+                "label": "先重生成过期商品图，再重新生成 RenderPackage",
+            },
+            {
+                "id": "regenerate_all",
+                "label": "重生成全部商品图，再重新生成 RenderPackage",
+            },
+        ],
     }
 
 

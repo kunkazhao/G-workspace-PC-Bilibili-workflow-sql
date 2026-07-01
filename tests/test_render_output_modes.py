@@ -34,7 +34,7 @@ def test_prepare_product_recommendation_output_writes_draft_package(
                 "top_uids": top_uids,
             }
         )
-        return SimpleNamespace(package=package, missing=[])
+        return SimpleNamespace(package=package, missing=[], stale_product_images=[])
 
     output = tmp_path / "render-package.json"
     monkeypatch.setattr(workflow_service, "build_product_recommendation_package", fake_build)
@@ -74,7 +74,7 @@ def test_prepare_product_recommendation_output_returns_final_mp4_next_command(
     package = {"schemaVersion": "1.0.0", "segments": [{"type": "price_transition"}]}
 
     def fake_build(db, *, project_id, account_label, output_mode, product_media_mode, mode, top_uids):
-        return SimpleNamespace(package=package, missing=[])
+        return SimpleNamespace(package=package, missing=[], stale_product_images=[])
 
     output = tmp_path / "render-package.json"
     monkeypatch.setattr(workflow_service, "build_product_recommendation_package", fake_build)
@@ -127,7 +127,7 @@ def test_prepare_product_recommendation_output_reports_missing_without_package(
     missing = [{"kind": "product_voice", "uid": "P001"}]
 
     def fake_build(db, *, project_id, account_label, output_mode, product_media_mode, mode, top_uids):
-        return SimpleNamespace(package={"segments": []}, missing=missing)
+        return SimpleNamespace(package={"segments": []}, missing=missing, stale_product_images=[])
 
     output = tmp_path / "render-package.json"
     monkeypatch.setattr(workflow_service, "build_product_recommendation_package", fake_build)
@@ -143,3 +143,55 @@ def test_prepare_product_recommendation_output_reports_missing_without_package(
     assert result["missing"] == missing
     assert result["next"] is None
     assert not output.exists()
+
+
+def test_prepare_product_recommendation_output_blocks_stale_product_images_by_default(
+    tmp_path,
+    monkeypatch,
+):
+    stale = [{"kind": "stale_product_image", "uid": "P001"}]
+
+    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode, mode, top_uids):
+        return SimpleNamespace(package={"segments": []}, missing=[], stale_product_images=stale)
+
+    output = tmp_path / "render-package.json"
+    monkeypatch.setattr(workflow_service, "build_product_recommendation_package", fake_build)
+
+    result = _service().prepare_product_recommendation_output(
+        3,
+        account_label="xiaobo",
+        output_mode="jianying_draft",
+        package_output_path=output,
+    )
+
+    assert result["ok"] is False
+    assert result["stale_product_images"] == stale
+    assert result["next"]["mode"] == "product_image_stale_review"
+    assert "检测到商品数据变了" in result["next"]["message"]
+    assert not output.exists()
+
+
+def test_prepare_product_recommendation_output_can_reuse_stale_product_images(
+    tmp_path,
+    monkeypatch,
+):
+    package = {"schemaVersion": "1.0.0", "segments": [{"type": "product_recommendation"}]}
+    stale = [{"kind": "stale_product_image", "uid": "P001"}]
+
+    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode, mode, top_uids):
+        return SimpleNamespace(package=package, missing=[], stale_product_images=stale)
+
+    output = tmp_path / "render-package.json"
+    monkeypatch.setattr(workflow_service, "build_product_recommendation_package", fake_build)
+
+    result = _service().prepare_product_recommendation_output(
+        3,
+        account_label="xiaobo",
+        output_mode="jianying_draft",
+        package_output_path=output,
+        stale_product_image_policy="reuse",
+    )
+
+    assert result["ok"] is True
+    assert result["stale_product_images"] == stale
+    assert output.exists()

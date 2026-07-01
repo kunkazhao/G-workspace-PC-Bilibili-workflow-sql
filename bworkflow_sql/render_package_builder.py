@@ -13,7 +13,7 @@ from .repositories import Repository
 from .settings import INTERNAL_WORKSPACE_ROOT
 from .subtitle_helpers import probe_media_duration_seconds
 from .tts_helpers import DEFAULT_LOUDNORM_I, DEFAULT_LOUDNORM_LRA, DEFAULT_LOUDNORM_TP
-from .utils import safe_text
+from .utils import safe_text, text_hash
 
 
 SUPPORTED_OUTPUT_MODES = {"jianying_draft", "final_mp4"}
@@ -44,6 +44,7 @@ PRICE_TRANSITION_KEYWORDS = [
 class ProductRenderPackageResult:
     package: dict[str, Any]
     missing: list[dict[str, Any]]
+    stale_product_images: list[dict[str, Any]]
 
 
 def _trim_transition_text(text: str) -> str:
@@ -153,6 +154,7 @@ def build_product_recommendation_package(
     ]
 
     missing: list[dict[str, Any]] = []
+    stale_product_images: list[dict[str, Any]] = []
     price_segments: dict[str, dict[str, Any]] = {}
     product_segments: dict[str, dict[str, Any]] = {}
 
@@ -302,6 +304,23 @@ def build_product_recommendation_package(
         }
         if product_card:
             product_segment["productCard"] = product_card
+            card_fingerprint = product_card_content_fingerprint(product, product_card)
+            if card_fingerprint:
+                product_segment["productCardFingerprint"] = card_fingerprint
+                stored_image_fingerprint = safe_text(image.get("text_hash")) if image else ""
+                if stored_image_fingerprint and stored_image_fingerprint != card_fingerprint:
+                    stale_product_images.append(
+                        {
+                            "kind": "stale_product_image",
+                            "uid": uid,
+                            "title": title,
+                            "asset_binding_id": int(image.get("id") or 0) if image else None,
+                            "path": str(image_path) if image_path else "",
+                            "stored_fingerprint": stored_image_fingerprint,
+                            "expected_fingerprint": card_fingerprint,
+                            "message": "product card image content fingerprint changed",
+                        }
+                    )
         product_segments[uid] = product_segment
 
     segments = _arrange_segments(
@@ -345,7 +364,11 @@ def build_product_recommendation_package(
             }
         },
     }
-    return ProductRenderPackageResult(package=package, missing=missing)
+    return ProductRenderPackageResult(
+        package=package,
+        missing=missing,
+        stale_product_images=stale_product_images,
+    )
 
 
 def get_audio_duration_seconds(path: str | Path) -> float:
@@ -620,3 +643,20 @@ def _slot_list(value: Any) -> list[dict[str, str]]:
         if label and slot_value:
             slots.append({"label": label, "value": slot_value})
     return slots
+
+
+def product_card_content_fingerprint(product: dict[str, Any], product_card: dict[str, Any] | None) -> str:
+    if not isinstance(product_card, dict):
+        return ""
+    data_map = product_card.get("dataMap")
+    payload = {
+        "version": "product-card-v1",
+        "uid": safe_text(product.get("uid")),
+        "title": safe_text(product.get("title")),
+        "price": safe_text(product.get("price_label")),
+        "templateId": safe_text(product_card.get("templateId")),
+        "coverAsset": safe_text(product_card.get("coverAsset")),
+        "dataMap": _string_map(data_map),
+        "slots": _slot_list(product_card.get("slots")),
+    }
+    return text_hash(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))

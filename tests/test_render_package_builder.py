@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from bworkflow_sql.db import Database
-from bworkflow_sql.render_package_builder import build_product_recommendation_package
+from bworkflow_sql.render_package_builder import (
+    build_product_recommendation_package,
+    product_card_content_fingerprint,
+)
 from bworkflow_sql.repositories import Repository
 from bworkflow_sql.utils import now_iso, text_hash
 
@@ -326,6 +329,45 @@ def test_build_product_recommendation_package_from_ready_assets(
     assert "productCard" not in products[1]
     assert all(Path(segment["voiceAsset"]).is_absolute() for segment in result.package["segments"])
     assert all(Path(segment["imageCardAsset"]).is_absolute() for segment in products)
+
+
+def test_build_product_recommendation_package_reports_stale_product_image(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE asset_bindings SET text_hash='old-card-fingerprint' WHERE asset_type='image' AND uid='P001'"
+        )
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="jianying_draft",
+    )
+
+    stale = result.stale_product_images
+    product = next(
+        segment
+        for segment in result.package["segments"]
+        if segment.get("productUid") == "P001"
+    )
+
+    assert result.missing == []
+    assert len(stale) == 1
+    assert stale[0]["kind"] == "stale_product_image"
+    assert stale[0]["uid"] == "P001"
+    assert stale[0]["stored_fingerprint"] == "old-card-fingerprint"
+    assert stale[0]["expected_fingerprint"] == product_card_content_fingerprint(
+        {"uid": "P001", "title": "Alpha Keyboard", "price_label": "200-300"},
+        product["productCard"],
+    )
+    assert product["productCardFingerprint"] == stale[0]["expected_fingerprint"]
 
 
 def test_build_product_recommendation_package_can_force_cover_only_media(

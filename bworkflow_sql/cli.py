@@ -420,6 +420,7 @@ def cmd_render_package(args: argparse.Namespace) -> None:
         account_label=args.account,
         output_mode=args.output_mode,
         product_media_mode=args.product_media_mode,
+        stale_product_image_policy=getattr(args, "stale_product_image_policy", "block"),
         mode=args.mode,
         top_uids=args.top_uids,
         package_output_path=args.output or None,
@@ -512,6 +513,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["cover_only", "video_preferred"],
         default="video_preferred",
         help="product display media: cover_only uses only the cover image; video_preferred uses product video when available",
+    )
+    p.add_argument(
+        "--stale-product-image-policy",
+        choices=["block", "reuse"],
+        default="block",
+        help="block when product-card image fingerprints are stale, or explicitly reuse old images",
     )
     p.add_argument(
         "--mode",
