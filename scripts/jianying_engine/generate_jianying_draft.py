@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -153,6 +154,7 @@ def parse_args() -> argparse.Namespace:
         help="字幕对齐引擎。whisper 为现有方案，qwen 为强制对齐方案。",
     )
     parser.add_argument("--skip-subtitles", action="store_true", help="跳过字幕对齐。")
+    parser.add_argument("--subtitle-no-vad", action="store_true", help="字幕 ASR 不启用 VAD，兼容 onnxruntime 不可用的环境。")
     parser.add_argument("--allow-replace", action="store_true", help="允许覆盖同名草稿。")
     parser.add_argument(
         "--template-draft",
@@ -636,7 +638,21 @@ def split_longest_clause(clauses: list[str]) -> list[str]:
     return clauses
 
 
-def run_alignment_asr(audio_path: Path, model_name: str, language: str) -> list[dict[str, Any]]:
+def subtitle_python_commands() -> list[list[str]]:
+    commands: list[list[str]] = []
+    override = normalize_text(os.environ.get("BWORKFLOW_JIANYING_SUBTITLE_PYTHON"))
+    if override:
+        commands.append([override])
+    local_asr_python = Path(__file__).resolve().parents[2] / ".venv-asr" / "Scripts" / "python.exe"
+    if local_asr_python.exists():
+        commands.append([str(local_asr_python)])
+    for command in SYSTEM_PYTHON_COMMANDS:
+        if command not in commands:
+            commands.append(command)
+    return commands
+
+
+def run_alignment_asr(audio_path: Path, model_name: str, language: str, *, vad_filter: bool = True) -> list[dict[str, Any]]:
     code = """
 import json
 import sys
@@ -645,12 +661,13 @@ from faster_whisper import WhisperModel
 audio_path = sys.argv[1]
 model_name = sys.argv[2]
 language = sys.argv[3]
+vad_filter = sys.argv[4] == "1"
 
 model = WhisperModel(model_name, device="cpu", compute_type="int8")
 segments, _info = model.transcribe(
     audio_path,
     language=language,
-    vad_filter=True,
+    vad_filter=vad_filter,
     word_timestamps=True,
     beam_size=5,
 )
@@ -672,10 +689,10 @@ print(json.dumps(payload, ensure_ascii=False))
         temp_audio = Path(temp_dir) / f"audio{audio_path.suffix.lower()}"
         shutil.copy2(audio_path, temp_audio)
         last_error: RuntimeError | None = None
-        for command in SYSTEM_PYTHON_COMMANDS:
+        for command in subtitle_python_commands():
             try:
                 result = subprocess.run(
-                    [*command, "-c", code, str(temp_audio), model_name, language],
+                    [*command, "-c", code, str(temp_audio), model_name, language, "1" if vad_filter else "0"],
                     capture_output=True,
                     text=True,
                     check=True,
@@ -747,6 +764,8 @@ def build_subtitle_segments(
     model_name: str,
     language: str,
     engine: str = "whisper",
+    *,
+    vad_filter: bool = True,
 ) -> list[SubtitleSegment]:
     clauses = split_transcript_clauses(transcript_text)
     if not clauses:
@@ -754,7 +773,7 @@ def build_subtitle_segments(
     if engine == "qwen":
         return build_qwen_subtitle_segments(audio_path, clauses, offset_sec, language)
 
-    asr_segments = run_alignment_asr(audio_path, model_name, language)
+    asr_segments = run_alignment_asr(audio_path, model_name, language, vad_filter=vad_filter)
     if not asr_segments:
         return []
 
@@ -1621,6 +1640,7 @@ def build_generated_draft(
     subtitle_language: str,
     subtitle_engine: str,
     skip_subtitles: bool,
+    subtitle_vad_filter: bool,
     allow_replace: bool,
 ) -> dict[str, Any]:
     timeline_items = ([intro_item] if intro_item is not None else []) + items
@@ -1669,6 +1689,7 @@ def build_generated_draft(
                         subtitle_model,
                         subtitle_language,
                         subtitle_engine,
+                        vad_filter=subtitle_vad_filter,
                     )
                 )
             else:
@@ -1861,6 +1882,7 @@ def main() -> None:
                 subtitle_language=args.subtitle_language,
                 subtitle_engine=args.subtitle_engine,
                 skip_subtitles=args.skip_subtitles,
+                subtitle_vad_filter=not args.subtitle_no_vad,
                 allow_replace=False,
             )
             staging_draft_dir = Path(summary["draft_dir"])
@@ -1889,6 +1911,7 @@ def main() -> None:
                     subtitle_language=args.subtitle_language,
                     subtitle_engine=args.subtitle_engine,
                     skip_subtitles=args.skip_subtitles,
+                    subtitle_vad_filter=not args.subtitle_no_vad,
                     allow_replace=True,
                 )
                 staging_final_dir = draft_root / staging_draft_name

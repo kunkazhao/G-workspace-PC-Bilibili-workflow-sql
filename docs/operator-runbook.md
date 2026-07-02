@@ -107,6 +107,18 @@ script="G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/generate_j
   --skip-subtitles
 ```
 
+默认草稿不生成文本字幕轨。需要自动带可编辑字幕时，用 B-Workflow CLI 的显式开关：
+
+```bash
+python -m bworkflow_sql jianying <project_id> \
+  --manifest "<manifest_path>" \
+  --draft-name "<草稿名>" \
+  --with-subtitles \
+  --subtitle-no-vad
+```
+
+`--subtitle-no-vad` 用于当前机器上 onnxruntime/VAD 初始化失败时的兼容路径；字幕 ASR 会优先使用项目根目录 `.venv-asr\Scripts\python.exe`，也可用 `BWORKFLOW_JIANYING_SUBTITLE_PYTHON` 覆盖。
+
 如果项目内 `.venv` 还没初始化，先执行：
 
 ```bash

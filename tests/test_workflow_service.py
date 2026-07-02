@@ -827,6 +827,36 @@ def test_jianying_generation_skips_subtitles_by_default(tmp_path: Path, monkeypa
     assert captured["cmd"][1] == str(JIANYING_ENGINE_DIR / "generate_jianying_draft.py")
 
 
+def test_jianying_generation_can_enable_subtitles_with_no_vad(tmp_path: Path, monkeypatch):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    project = Repository(db).project(project_id)
+    result = service.run_command(service.build_assembly_command(project_id, account_label="小燃"))
+    assert result.returncode == 0
+    spoken_path = Path(project["spoken_md_path"])
+    manifest_path = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "manifests" / f"{spoken_path.stem}.manifest.json"
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd: list[str]):
+        captured["cmd"] = cmd
+        return workflow_service_module.WorkflowRunResult(cmd, returncode=0, stdout="ok\n")
+
+    monkeypatch.setattr(workflow_service_module, "run_subprocess_text", fake_run)
+
+    draft = service.generate_jianying_draft(
+        project_id,
+        manifest_path=manifest_path,
+        draft_name="test-draft",
+        draft_root=tmp_path / "drafts",
+        include_subtitles=True,
+        subtitle_no_vad=True,
+    )
+
+    assert draft.returncode == 0
+    assert "--skip-subtitles" not in captured["cmd"]
+    assert "--subtitle-no-vad" in captured["cmd"]
+
+
 def test_jianying_generation_summarizes_json_stdout_for_users(tmp_path: Path, monkeypatch):
     db, project_id = seed_project(tmp_path)
     service = WorkflowService(db)

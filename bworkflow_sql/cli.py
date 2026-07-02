@@ -232,6 +232,8 @@ def cmd_jianying(args: argparse.Namespace) -> None:
         draft_name=args.draft_name,
         draft_root=args.draft_root or str(DEFAULT_JIANYING_DRAFT_ROOT),
         intro_video_path=args.intro_video or None,
+        include_subtitles=bool(args.with_subtitles),
+        subtitle_no_vad=bool(args.subtitle_no_vad),
     )
     _json_out({
         "ok": result.returncode == 0,
@@ -487,6 +489,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--draft-name", required=True, help="草稿名称")
     p.add_argument("--draft-root", help="剪映草稿根目录")
     p.add_argument("--intro-video", help="引言视频 MP4 路径")
+    p.add_argument("--with-subtitles", action="store_true", help="生成剪映草稿时同步生成文本字幕轨")
+    p.add_argument("--subtitle-no-vad", action="store_true", help="字幕 ASR 不启用 VAD，兼容 onnxruntime 不可用的环境")
 
     # outline
     p = sub.add_parser("outline", help="创建/更新文案 MD 骨架（价格段自动从 Master scheme 派生）")

@@ -840,6 +840,8 @@ class WorkflowService:
         draft_name: str,
         draft_root: str | Path,
         intro_video_path: str | Path | None = None,
+        include_subtitles: bool = False,
+        subtitle_no_vad: bool = False,
     ) -> WorkflowRunResult:
         _project = self._required_project(project_id)
         manifest = Path(manifest_path)
@@ -863,8 +865,12 @@ class WorkflowService:
             "--draft-root",
             str(draft_root),
             "--allow-replace",
-            "--skip-subtitles",
         ]
+        if include_subtitles:
+            if subtitle_no_vad:
+                cmd.append("--subtitle-no-vad")
+        else:
+            cmd.append("--skip-subtitles")
         if intro_video is not None:
             cmd += ["--intro-video", str(intro_video)]
         completed = run_subprocess_text(cmd)
