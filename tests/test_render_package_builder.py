@@ -8,6 +8,7 @@ from bworkflow_sql.render_package_builder import (
     product_card_content_fingerprint,
 )
 from bworkflow_sql.repositories import Repository
+from bworkflow_sql.subtitle_rules import split_subtitle_text
 from bworkflow_sql.utils import now_iso, text_hash
 
 
@@ -324,6 +325,51 @@ def test_build_product_recommendation_package_from_ready_assets(
     assert "productCard" not in products[1]
     assert all(Path(segment["voiceAsset"]).is_absolute() for segment in result.package["segments"])
     assert all(Path(segment["imageCardAsset"]).is_absolute() for segment in products)
+
+
+def test_final_mp4_package_includes_subtitles_from_shared_split_rules(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    text = "这台机器加热速度非常快而且操作也很简单适合家里每个人用"
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE script_blocks SET body=?, text_hash=? WHERE script_type='product' AND owner_uid='P001'",
+            (text, text_hash(text)),
+        )
+        block_id = conn.execute(
+            "SELECT id FROM script_blocks WHERE script_type='product' AND owner_uid='P001'"
+        ).fetchone()["id"]
+        conn.execute(
+            "UPDATE asset_bindings SET text_hash=? WHERE asset_type='voice' AND uid='P001' AND script_block_id=?",
+            (text_hash(text), block_id),
+        )
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 6.0)
+    monkeypatch.setattr(builder, "_choose_subtitle_style_id", lambda: "bold_yellow")
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+    )
+
+    assert result.package["output"]["subtitles"]["enabled"] is True
+    assert result.package["output"]["subtitles"]["styleId"] == "bold_yellow"
+    assert result.package["output"]["subtitles"]["styleScope"] == "global"
+    product = next(
+        segment
+        for segment in result.package["segments"]
+        if segment["type"] == "product_recommendation" and segment["productUid"] == "P001"
+    )
+    subtitle_texts = [item["text"] for item in product["subtitles"]]
+    assert subtitle_texts == split_subtitle_text(text)
+    assert product["subtitles"][0]["start"] == 0.0
+    assert product["subtitles"][-1]["end"] == 6.0
+    assert all(item["end"] > item["start"] for item in product["subtitles"])
 
 
 def test_price_transition_card_uses_fill_slots_with_voice_timing(

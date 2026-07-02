@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 import urllib.parse
 import urllib.request
@@ -11,7 +12,7 @@ from typing import Any
 from .db import Database
 from .repositories import Repository
 from .settings import INTERNAL_WORKSPACE_ROOT
-from .subtitle_helpers import probe_media_duration_seconds
+from .subtitle_helpers import distribute_subtitle_text, probe_media_duration_seconds
 from .tts_helpers import DEFAULT_LOUDNORM_I, DEFAULT_LOUDNORM_LRA, DEFAULT_LOUDNORM_TP
 from .utils import safe_text, text_hash
 
@@ -19,6 +20,7 @@ from .utils import safe_text, text_hash
 SUPPORTED_OUTPUT_MODES = {"jianying_draft", "final_mp4"}
 SUPPORTED_PRODUCT_MEDIA_MODES = {"cover_only", "video_preferred"}
 DEFAULT_PRODUCT_MEDIA_MODE = "video_preferred"
+GLOBAL_SUBTITLE_STYLE_IDS = ("clean_white", "bold_yellow", "cyan_focus")
 PRODUCT_COVER_CACHE_ROOT = INTERNAL_WORKSPACE_ROOT / "product-covers"
 PRICE_TRANSITION_KEYWORDS = [
     "品牌完成度",
@@ -291,6 +293,8 @@ def build_product_recommendation_package(
             "duration": duration,
             "sourceScriptBlockId": int(block.get("id") or 0),
         }
+        if output_mode == "final_mp4":
+            price_segments[label]["subtitles"] = _segment_subtitles(body, duration)
 
     for product in products:
         uid = safe_text(product.get("uid"))
@@ -372,6 +376,7 @@ def build_product_recommendation_package(
             continue
 
         voice_path = _absolute_file_path(voice.get("path"))
+        duration = get_audio_duration_seconds(voice_path)
         product_segment = {
             "type": "product_recommendation",
             "id": f"product-{uid}",
@@ -383,14 +388,16 @@ def build_product_recommendation_package(
             "imageCardAsset": str(image_path) if image_path else None,
             "videoAsset": str(video_path) if video_path else None,
             "productMediaMode": media_mode,
-            "duration": get_audio_duration_seconds(voice_path),
+            "duration": duration,
             "sourceScriptBlockId": int(block.get("id") or 0),
             "assetBindingIds": {
                 "image": int(image.get("id") or 0) if image else None,
                 "voice": int(voice.get("id") or 0),
                 "video": int(video.get("id") or 0) if video else None,
             },
-            "subtitles": [],
+            "subtitles": _segment_subtitles(safe_text(block.get("body")), duration)
+            if output_mode == "final_mp4"
+            else [],
         }
         if product_card:
             product_segment["productCard"] = product_card
@@ -454,11 +461,36 @@ def build_product_recommendation_package(
             }
         },
     }
+    if output_mode == "final_mp4":
+        package["output"]["subtitles"] = {
+            "enabled": True,
+            "styleId": _choose_subtitle_style_id(),
+            "styleScope": "global",
+        }
     return ProductRenderPackageResult(
         package=package,
         missing=missing,
         stale_product_images=stale_product_images,
     )
+
+
+def _segment_subtitles(text: str, duration: float) -> list[dict[str, Any]]:
+    return [
+        {
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "text": safe_text(chunk),
+        }
+        for start, end, chunk in distribute_subtitle_text(
+            safe_text(text),
+            0.0,
+            max(0.0, float(duration or 0.0)),
+        )
+    ]
+
+
+def _choose_subtitle_style_id() -> str:
+    return random.SystemRandom().choice(GLOBAL_SUBTITLE_STYLE_IDS)
 
 
 def get_audio_duration_seconds(path: str | Path) -> float:
