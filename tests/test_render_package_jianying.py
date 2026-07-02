@@ -95,6 +95,30 @@ def test_render_package_to_jianying_manifest_maps_separate_assets(tmp_path):
     assert product_without_video["display_video_slot"] is None
 
 
+def test_render_package_to_jianying_manifest_infers_template_from_product_card(tmp_path):
+    package = _package()
+    package["segments"][1]["productCard"] = {"templateId": "xiaoran1"}
+    output = tmp_path / "package.manifest.json"
+
+    manifest_path = render_package_to_jianying_manifest(
+        package,
+        output,
+        project_id=3,
+        account_label="小燃",
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    product_with_video = payload["entries"][1]
+    assert payload["display_template"] == "小燃-模板1"
+    assert product_with_video["display_video_slot"] == {
+        "x": -830,
+        "y": -77,
+        "width": 970,
+        "height": 590,
+        "coordinate_mode": "clip_transform_pixels",
+    }
+
+
 def test_render_package_to_jianying_manifest_respects_cover_only_media_mode(tmp_path):
     package = _package()
     package["output"] = {"productMediaMode": "cover_only"}

@@ -33,7 +33,11 @@ from .settings import (
     LEGACY_B_WORKFLOW_SKILL_SCRIPTS,
 )
 from .utils import file_metadata, now_iso, safe_text
-from .template_config import image_set_for_template, user_for_template
+from .template_config import (
+    display_template_for_product_card_template_id,
+    image_set_for_template,
+    user_for_template,
+)
 from .tts_helpers import (  # noqa: F401 – re-exported
     DEFAULT_KEEP_SILENCE_MS,
     DEFAULT_LEADING_SILENCE_MS,
@@ -2169,6 +2173,11 @@ def render_package_to_jianying_manifest(
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     entries: list[dict[str, Any]] = []
+    effective_display_template = render_package_display_template(
+        package,
+        account_label=account_label,
+        display_template=display_template,
+    )
     package_output = package.get("output") if isinstance(package.get("output"), dict) else {}
     package_product_media_mode = (
         safe_text(package_output.get("productMediaMode")) or DEFAULT_PRODUCT_MEDIA_MODE
@@ -2227,7 +2236,7 @@ def render_package_to_jianying_manifest(
                     "video_path": video_path,
                     "display_video_path": video_path,
                     "display_video_slot": render_package_display_video_slot(
-                        display_template
+                        effective_display_template
                     )
                     if video_path
                     else None,
@@ -2245,12 +2254,62 @@ def render_package_to_jianying_manifest(
         "project_id": project_id,
         "project": package.get("project") or {},
         "account_label": account_label,
-        "display_template": display_template,
+        "display_template": effective_display_template,
         "created_at": now_iso(),
         "entries": entries,
     }
     output.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return output
+
+
+def render_package_display_template(
+    package: dict[str, Any],
+    *,
+    account_label: str,
+    display_template: str = "",
+) -> str:
+    explicit = safe_text(display_template)
+    if explicit:
+        return explicit
+    for segment in package.get("segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        product_card = segment.get("productCard")
+        if isinstance(product_card, dict):
+            mapped = display_template_for_product_card_template_id(
+                safe_text(product_card.get("templateId"))
+            )
+            if mapped:
+                return mapped
+        from_path = display_template_from_image_path(
+            safe_text(segment.get("imageCardAsset")),
+            account_label=account_label,
+        )
+        if from_path:
+            return from_path
+    return ""
+
+
+def display_template_from_image_path(image_path: str, *, account_label: str) -> str:
+    account = safe_text(account_label)
+    if not image_path or not account:
+        return ""
+    parts = [part for part in re.split(r"[\\/]+", image_path) if part]
+    for index, part in enumerate(parts[:-1]):
+        if part != account:
+            continue
+        template_dir = parts[index + 1]
+        if not template_dir.startswith("模板"):
+            continue
+        candidate = f"{account}-{template_dir}"
+        try:
+            from .template_config import get_template_slot
+
+            get_template_slot(candidate)
+        except ValueError:
+            continue
+        return candidate
+    return ""
 
 
 def render_package_display_video_slot(display_template: str = "") -> dict[str, Any]:

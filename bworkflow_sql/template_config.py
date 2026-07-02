@@ -24,6 +24,19 @@ TEMPLATE_COORDS: dict[str, dict[str, Any]] = {
     "荣荣-模板2": {"x": 44, "y": 172, "width": 851, "height": 436, "display_scale": 0.42},
 }
 
+PRODUCT_CARD_TEMPLATE_IDS: dict[str, str] = {
+    "xiaobo1": "小博-模板1",
+    "xiaobo2": "小博-模板2",
+    "xiaobo3": "小博-模板3",
+    "xiaoran1": "小燃-模板1",
+    "xiaoran2": "小燃-模板2",
+    "xiaowai1": "小歪-模板1",
+    "xiaowai2": "小歪-模板2",
+    "zhiliao1": "知了-模板1",
+    "rongrong1": "荣荣-模板1",
+    "rongrong2": "荣荣-模板2",
+}
+
 # 每个用户对应的可用模板列表
 USER_TEMPLATES: dict[str, list[str]] = {
     "小博": ["小博-模板1", "小博-模板2", "小博-模板3"],
@@ -40,6 +53,12 @@ def get_template_slot(template_name: str) -> dict[str, Any]:
     if coords is None:
         raise ValueError(f"未知模板：{template_name}")
     return dict(coords)
+
+
+def display_template_for_product_card_template_id(template_id: str) -> str:
+    """把商品图模板 ID 映射到剪映显示模板名。"""
+    normalized = "".join(ch for ch in template_id.strip().casefold() if ch.isalnum())
+    return PRODUCT_CARD_TEMPLATE_IDS.get(normalized, "")
 
 
 def available_templates(user_label: str) -> list[str]:
