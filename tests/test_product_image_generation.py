@@ -118,6 +118,40 @@ def test_regenerate_product_card_images_reports_noop_when_no_stale_images(tmp_pa
     assert result["skipped"][0]["uid"] == "P001"
 
 
+def test_regenerate_product_card_images_can_filter_single_product_uid(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.product_image_generation as product_images
+
+    db, project_id, _image_path = _seed_project_with_stale_image(tmp_path)
+    monkeypatch.setattr(product_images, "PRODUCT_IMAGE_RENDER_JOB_ROOT", tmp_path / "jobs")
+    with db.connect() as conn:
+        conn.execute("DELETE FROM asset_bindings WHERE asset_type='image'")
+    calls: list[tuple[Path, str, Path]] = []
+
+    def fake_render(package_path: Path, product_uid: str, output_path: Path) -> Path:
+        calls.append((package_path, product_uid, output_path))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"created image")
+        return output_path
+
+    result = regenerate_product_card_images(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        mode="missing",
+        product_uid="P001",
+        render_product_card_still=fake_render,
+    )
+
+    assert result["ok"] is True
+    assert result["product_uid"] == "P001"
+    assert [item["uid"] for item in result["regenerated"]] == ["P001"]
+    assert [call[1] for call in calls] == ["P001"]
+    assert all(item["uid"] != "P002" for item in result["skipped"])
+
+
 def test_regenerate_product_card_images_creates_missing_account_binding(
     tmp_path: Path,
     monkeypatch,

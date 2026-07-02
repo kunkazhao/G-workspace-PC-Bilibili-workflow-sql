@@ -120,6 +120,8 @@ def test_render_package_to_jianying_manifest_infers_template_from_product_card(t
         "width": 970,
         "height": 590,
         "coordinate_mode": "clip_transform_pixels",
+        "scale_x": 970 / 1936,
+        "scale_y": 590 / 1080,
     }
 
 

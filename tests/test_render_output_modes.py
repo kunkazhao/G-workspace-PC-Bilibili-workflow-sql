@@ -169,7 +169,7 @@ def test_prepare_product_recommendation_output_blocks_stale_product_images_by_de
     assert result["next"]["mode"] == "product_image_stale_review"
     assert "检测到商品数据变了" in result["next"]["message"]
     assert result["next"]["options"][1]["command_hint"] == (
-        "python -m bworkflow_sql product-images 3 --account xiaobo --mode stale"
+        "python -m bworkflow_sql product-images 3 --account xiaobo --mode stale --product-uid P001"
     )
     assert result["next"]["options"][2]["command_hint"] == (
         "python -m bworkflow_sql product-images 3 --account xiaobo --mode all"

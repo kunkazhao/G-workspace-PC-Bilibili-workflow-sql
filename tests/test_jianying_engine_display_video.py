@@ -57,3 +57,28 @@ def test_display_video_panel_pixel_mode_uses_jianying_transform_coordinates(monk
     assert settings.transform_y == -77 / 1080
     assert settings.scale_x == 970 / 1936
     assert settings.scale_y == 590 / 1080
+
+
+def test_display_video_panel_pixel_mode_can_use_calibrated_fixed_scale(monkeypatch):
+    monkeypatch.setattr(engine, "draft", SimpleNamespace(ClipSettings=FakeClipSettings))
+    monkeypatch.setattr(engine, "probe_video_size", lambda _path: (1280, 720))
+
+    settings = engine.build_display_video_clip_settings(
+        Path("roll-b-720p.mp4"),
+        {
+            "x": -830,
+            "y": -77,
+            "width": 970,
+            "height": 590,
+            "coordinate_mode": "clip_transform_pixels",
+            "scale_x": 970 / 1936,
+            "scale_y": 590 / 1080,
+        },
+        1920,
+        1080,
+    )
+
+    assert settings.transform_x == -830 / 1920
+    assert settings.transform_y == -77 / 1080
+    assert settings.scale_x == 970 / 1936
+    assert settings.scale_y == 590 / 1080

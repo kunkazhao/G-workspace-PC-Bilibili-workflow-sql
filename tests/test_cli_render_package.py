@@ -48,6 +48,8 @@ def test_product_images_parser_registers_command():
             "xiaobo",
             "--mode",
             "missing",
+            "--product-uid",
+            "P001",
         ]
     )
 
@@ -55,6 +57,7 @@ def test_product_images_parser_registers_command():
     assert args.project_id == 3
     assert args.account == "xiaobo"
     assert args.mode == "missing"
+    assert args.product_uid == "P001"
 
 
 def test_template_calibrate_parser_registers_command():
@@ -88,12 +91,13 @@ def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):
     calls: list[dict[str, object]] = []
 
     class FakeWorkflow:
-        def regenerate_product_card_images(self, project_id, *, account_label, mode):
+        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid):
             calls.append(
                 {
                     "project_id": project_id,
                     "account_label": account_label,
                     "mode": mode,
+                    "product_uid": product_uid,
                 }
             )
             return {
@@ -107,7 +111,7 @@ def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):
 
     monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
 
-    cli.cmd_product_images(Namespace(project_id=3, account="xiaobo", mode="stale"))
+    cli.cmd_product_images(Namespace(project_id=3, account="xiaobo", mode="stale", product_uid="P001"))
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
@@ -117,6 +121,7 @@ def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):
             "project_id": 3,
             "account_label": "xiaobo",
             "mode": "stale",
+            "product_uid": "P001",
         }
     ]
 

@@ -1029,9 +1029,20 @@ def build_display_video_clip_settings(
 
     if normalize_text(slot.get('coordinate_mode')) == 'clip_transform_pixels':
         # clip_transform_pixels模式：x/y 是剪映位置面板里的像素位移值，
-        # width/height 是最终显示尺寸（允许变形）。
+        # width/height 是旧的参考尺寸；剪映 scale 不能可靠按不同源视频尺寸推导，
+        # 所以允许模板写入校准后的固定 scale_x/scale_y。
         scale_x = slot_width / source_width
         scale_y = slot_height / source_height
+        if slot.get("scale_x") is not None:
+            try:
+                scale_x = float(slot.get("scale_x"))
+            except (TypeError, ValueError):
+                pass
+        if slot.get("scale_y") is not None:
+            try:
+                scale_y = float(slot.get("scale_y"))
+            except (TypeError, ValueError):
+                pass
         return draft.ClipSettings(
             scale_x=scale_x,
             scale_y=scale_y,

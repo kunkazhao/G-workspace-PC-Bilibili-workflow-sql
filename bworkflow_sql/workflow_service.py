@@ -418,12 +418,14 @@ class WorkflowService:
         *,
         account_label: str,
         mode: str = "stale",
+        product_uid: str = "",
     ) -> dict[str, Any]:
         return regenerate_product_card_images(
             self.db,
             project_id=project_id,
             account_label=account_label,
             mode=mode,
+            product_uid=product_uid,
         )
 
     def template_calibration_probe(
@@ -2212,6 +2214,14 @@ def render_package_stale_product_image_next_step(
     project_id: int,
     account_label: str,
 ) -> dict[str, Any]:
+    stale_command = (
+        f"python -m bworkflow_sql product-images {project_id} "
+        f"--account {account_label} --mode stale"
+    )
+    if len(stale_product_images) == 1:
+        uid = safe_text(stale_product_images[0].get("uid"))
+        if uid:
+            stale_command = f"{stale_command} --product-uid {uid}"
     return {
         "mode": "product_image_stale_review",
         "status": "confirmation_required",
@@ -2226,10 +2236,7 @@ def render_package_stale_product_image_next_step(
             {
                 "id": "regenerate_stale",
                 "label": "先重生成过期商品图，再重新生成 RenderPackage",
-                "command_hint": (
-                    f"python -m bworkflow_sql product-images {project_id} "
-                    f"--account {account_label} --mode stale"
-                ),
+                "command_hint": stale_command,
             },
             {
                 "id": "regenerate_all",

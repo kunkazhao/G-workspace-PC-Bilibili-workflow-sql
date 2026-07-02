@@ -84,6 +84,18 @@ def test_xiaoran_template_2_uses_jianying_ui_coordinates() -> None:
     }
 
 
+def test_xiaoran_template_1_uses_calibrated_fixed_video_scale() -> None:
+    assert get_template_slot("小燃-模板1") == {
+        "x": -830,
+        "y": -77,
+        "width": 970,
+        "height": 590,
+        "coordinate_mode": "clip_transform_pixels",
+        "scale_x": 970 / 1936,
+        "scale_y": 590 / 1080,
+    }
+
+
 def test_xiaowai_template_2_uses_html_cover_stage_slot() -> None:
     assert get_template_slot("小歪-模板2") == {
         "x": -29,

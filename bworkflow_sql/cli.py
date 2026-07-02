@@ -10,6 +10,7 @@
   python -m bworkflow_sql assets-check 3
   python -m bworkflow_sql voice-counts 3 --account 小博
   python -m bworkflow_sql product-images 3 --account 小博 --mode stale
+  python -m bworkflow_sql product-images 3 --account 小博 --mode stale --product-uid P001
   python -m bworkflow_sql product-images 3 --account 小博 --mode missing
   python -m bworkflow_sql template-calibrate 3 --account 小燃 --product-uid R001
 
@@ -439,6 +440,7 @@ def cmd_product_images(args: argparse.Namespace) -> None:
         project_id=args.project_id,
         account_label=args.account,
         mode=args.mode,
+        product_uid=args.product_uid or "",
     )
     _json_out(result)
 
@@ -568,6 +570,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="stale",
         help="stale regenerates changed product cards; missing creates absent account images; all regenerates both ready and missing images",
     )
+    p.add_argument("--product-uid", default="", help="只重生成指定商品 UID 的商品图")
 
     p = sub.add_parser("template-calibrate", help="生成单商品剪映模板位置校准草稿")
     p.add_argument("project_id", type=int)

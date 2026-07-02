@@ -33,11 +33,13 @@ def regenerate_product_card_images(
     project_id: int,
     account_label: str,
     mode: str = "stale",
+    product_uid: str = "",
     render_product_card_still: ProductCardStillRenderer | None = None,
 ) -> dict[str, Any]:
     mode_value = safe_text(mode) or "stale"
     if mode_value not in {"stale", "missing", "all"}:
         raise ValueError(f"unsupported product image regenerate mode: {mode_value}")
+    target_uid = safe_text(product_uid)
 
     repo = Repository(db)
     project = repo.project(project_id)
@@ -50,7 +52,13 @@ def regenerate_product_card_images(
     regenerated: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
 
-    for product in repo.products(project_id, include_removed=False):
+    products = repo.products(project_id, include_removed=False)
+    if target_uid:
+        products = [product for product in products if safe_text(product.get("uid")) == target_uid]
+        if not products:
+            raise ValueError(f"product uid does not exist in project {project_id}: {target_uid}")
+
+    for product in products:
         uid = safe_text(product.get("uid"))
         image = _ready_image_asset(assets, uid=uid, account_label=account_label)
         if not image:
@@ -121,6 +129,7 @@ def regenerate_product_card_images(
         "project_id": project_id,
         "account": account_label,
         "mode": mode_value,
+        "product_uid": target_uid or None,
         "regenerated": regenerated,
         "skipped": skipped,
     }
