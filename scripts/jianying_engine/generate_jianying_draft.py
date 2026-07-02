@@ -1028,14 +1028,15 @@ def build_display_video_clip_settings(
     transform_y = -((center_y - canvas_height /2) / (canvas_height /2))
 
     if normalize_text(slot.get('coordinate_mode')) == 'clip_transform_pixels':
-        # clip_transform_pixels模式：视频直接贴到 slot矩形（允许变形），渲染尺寸 = slot尺寸。
+        # clip_transform_pixels模式：x/y 是剪映位置面板里的像素位移值，
+        # width/height 是最终显示尺寸（允许变形）。
         scale_x = slot_width / source_width
         scale_y = slot_height / source_height
         return draft.ClipSettings(
             scale_x=scale_x,
             scale_y=scale_y,
-            transform_x=transform_x,
-            transform_y=transform_y,
+            transform_x=slot_x / canvas_width,
+            transform_y=slot_y / canvas_height,
         )
 
     # 默认模式：保持视频宽高比，让视频填满 slot 长边，video中心 = slot中心（letterbox/pillarbox）。
