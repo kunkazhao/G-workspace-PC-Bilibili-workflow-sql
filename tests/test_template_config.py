@@ -1,4 +1,10 @@
-from bworkflow_sql.template_config import available_templates, get_template_slot, image_set_for_template, user_for_template
+from bworkflow_sql.template_config import (
+    available_templates,
+    display_template_from_image_path,
+    get_template_slot,
+    image_set_for_template,
+    user_for_template,
+)
 
 
 def test_zhiliao_template_preset_available() -> None:
@@ -32,6 +38,12 @@ def test_rongrong_template_preset_available() -> None:
         "height": 436,
         "display_scale": 0.42,
     }
+
+
+def test_display_template_from_image_path_uses_account_template_folder() -> None:
+    path = r"G:\2026项目-b站\素材-商品ppt图片\数码-屏幕挂灯\荣荣\模板2\1399-PMGD001-明基 Halo2.png"
+
+    assert display_template_from_image_path(path, account_label="荣荣") == "荣荣-模板2"
 
 
 def test_hyphen_template_still_uses_template_suffix() -> None:

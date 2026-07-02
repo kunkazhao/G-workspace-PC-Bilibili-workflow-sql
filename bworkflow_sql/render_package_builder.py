@@ -13,6 +13,7 @@ from .db import Database
 from .repositories import Repository
 from .settings import INTERNAL_WORKSPACE_ROOT
 from .subtitle_helpers import distribute_subtitle_text, probe_media_duration_seconds
+from .template_config import display_template_from_image_path, get_template_slot
 from .tts_helpers import DEFAULT_LOUDNORM_I, DEFAULT_LOUDNORM_LRA, DEFAULT_LOUDNORM_TP
 from .utils import safe_text, text_hash
 
@@ -408,6 +409,11 @@ def build_product_recommendation_package(
                             "message": "product card image content fingerprint changed",
                         }
                     )
+        elif video_path and image_path:
+            display_template = display_template_from_image_path(str(image_path), account_label=account)
+            if display_template:
+                product_segment["displayTemplate"] = display_template
+                product_segment["displayVideoSlot"] = _display_video_slot_for_template(display_template)
         product_segments[uid] = product_segment
 
     segments = _arrange_segments(
@@ -481,6 +487,13 @@ def _segment_subtitles(text: str, duration: float) -> list[dict[str, Any]]:
 
 def _choose_subtitle_style_id() -> str:
     return random.SystemRandom().choice(GLOBAL_SUBTITLE_STYLE_IDS)
+
+
+def _display_video_slot_for_template(display_template: str) -> dict[str, Any]:
+    slot = get_template_slot(display_template)
+    slot.setdefault("sourceWidth", 1920)
+    slot.setdefault("sourceHeight", 1080)
+    return slot
 
 
 def get_audio_duration_seconds(path: str | Path) -> float:

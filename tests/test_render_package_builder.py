@@ -544,6 +544,48 @@ def test_build_product_recommendation_package_can_force_cover_only_media(
     assert products[0]["videoAsset"] is None
 
 
+def test_build_package_adds_display_video_slot_without_product_card(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    image_path = tmp_path / "素材-商品ppt图片" / "keyboard" / "小博" / "模板2" / "P001.png"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(b"image")
+    with db.connect() as conn:
+        conn.execute("UPDATE products SET product_card_json='' WHERE project_id=? AND uid='P001'", (project_id,))
+        conn.execute(
+            "UPDATE asset_bindings SET path=? WHERE project_id=? AND asset_type='image' AND uid='P001'",
+            (str(image_path), project_id),
+        )
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+        product_media_mode="video_preferred",
+    )
+
+    product = next(segment for segment in result.package["segments"] if segment.get("productUid") == "P001")
+
+    assert "productCard" not in product
+    assert product["videoAsset"]
+    assert product["displayTemplate"] == "小博-模板2"
+    assert product["displayVideoSlot"] == {
+        "x": 1015,
+        "y": 154,
+        "width": 680,
+        "height": 520,
+        "display_scale": 0.52,
+        "sourceWidth": 1920,
+        "sourceHeight": 1080,
+    }
+
+
 def test_build_product_recommendation_package_orders_price_groups_after_top_products(
     tmp_path: Path,
     monkeypatch,

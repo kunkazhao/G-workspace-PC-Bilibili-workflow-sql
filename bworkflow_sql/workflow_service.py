@@ -34,6 +34,7 @@ from .settings import (
 )
 from .utils import file_metadata, now_iso, safe_text
 from .template_config import (
+    display_template_from_image_path,
     display_template_for_product_card_template_id,
     image_set_for_template,
     user_for_template,
@@ -2411,28 +2412,6 @@ def render_package_display_template(
         )
         if from_path:
             return from_path
-    return ""
-
-
-def display_template_from_image_path(image_path: str, *, account_label: str) -> str:
-    account = safe_text(account_label)
-    if not image_path or not account:
-        return ""
-    parts = [part for part in re.split(r"[\\/]+", image_path) if part]
-    for index, part in enumerate(parts[:-1]):
-        if part != account:
-            continue
-        template_dir = parts[index + 1]
-        if not template_dir.startswith("模板"):
-            continue
-        candidate = f"{account}-{template_dir}"
-        try:
-            from .template_config import get_template_slot
-
-            get_template_slot(candidate)
-        except ValueError:
-            continue
-        return candidate
     return ""
 
 

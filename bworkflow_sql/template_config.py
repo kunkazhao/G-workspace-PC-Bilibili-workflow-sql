@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # 每个模板的视频展示区域坐标（相对于 1920*1080 画布）
@@ -81,6 +82,26 @@ def image_set_for_template(template_name: str) -> str:
     if "-" in template_name:
         return template_name.split("-", 1)[1]
     return template_name
+
+
+def display_template_from_image_path(image_path: str, *, account_label: str) -> str:
+    account = account_label.strip()
+    if not image_path or not account:
+        return ""
+    parts = [part for part in re.split(r"[\\/]+", image_path) if part]
+    for index, part in enumerate(parts[:-1]):
+        if part != account:
+            continue
+        template_dir = parts[index + 1]
+        if not template_dir.startswith("模板"):
+            continue
+        candidate = f"{account}-{template_dir}"
+        try:
+            get_template_slot(candidate)
+        except ValueError:
+            continue
+        return candidate
+    return ""
 
 
 def user_for_template(template_name: str) -> str:
