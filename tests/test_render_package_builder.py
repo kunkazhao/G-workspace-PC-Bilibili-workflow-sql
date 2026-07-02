@@ -720,7 +720,7 @@ def test_build_product_recommendation_package_reports_missing_required_assets(
     assert any(item["uid"] == "P002" for item in result.missing)
 
 
-def test_build_product_recommendation_package_reports_missing_price_script(
+def test_build_product_recommendation_package_skips_missing_price_script(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -738,8 +738,12 @@ def test_build_product_recommendation_package_reports_missing_price_script(
         output_mode="jianying_draft",
     )
 
-    assert result.missing[0]["kind"] == "price_script"
-    assert result.missing[0]["price_range_label"] == "200-300"
+    assert result.missing == []
+    assert [segment["type"] for segment in result.package["segments"]] == [
+        "product_recommendation",
+        "product_recommendation",
+    ]
+    assert [segment["productUid"] for segment in result.package["segments"]] == ["P001", "P002"]
 
 
 def test_build_product_recommendation_package_rejects_invalid_output_mode(

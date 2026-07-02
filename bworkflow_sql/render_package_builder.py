@@ -249,16 +249,6 @@ def build_product_recommendation_package(
     price_segments: dict[str, dict[str, Any]] = {}
     product_segments: dict[str, dict[str, Any]] = {}
 
-    if not price_blocks:
-        for label in _unique_price_labels(products):
-            missing.append(
-                {
-                    "kind": "price_script",
-                    "price_range_label": label,
-                    "message": "missing price transition script",
-                }
-            )
-
     for block in price_blocks:
         voice = _ready_asset(
             assets,
@@ -541,17 +531,6 @@ def _ready_asset(
 def _absolute_file_path(value: Any) -> Path:
     path = Path(safe_text(value))
     return path if path.is_absolute() else path.resolve()
-
-
-def _unique_price_labels(products: list[dict[str, Any]]) -> list[str]:
-    seen: set[str] = set()
-    labels: list[str] = []
-    for product in products:
-        label = safe_text(product.get("price_label"))
-        if label and label not in seen:
-            seen.add(label)
-            labels.append(label)
-    return labels
 
 
 def _ordered_products(
