@@ -110,3 +110,40 @@ def test_build_subtitle_segments_preserves_shared_rule_text(tmp_path: Path, monk
         "降噪、音质、LDAC高清编码",
         "蓝牙6.0也稳",
     ]
+
+
+def test_build_subtitle_segments_keeps_chunks_when_asr_returns_one_large_segment(tmp_path: Path, monkeypatch):
+    module = load_engine_module()
+    audio_path = tmp_path / "voice.wav"
+    audio_path.write_bytes(b"fake-wave")
+
+    def fake_asr(*_: object, **__: object) -> list[dict[str, object]]:
+        return [
+            {
+                "start": 0.0,
+                "end": 4.0,
+                "text": "漫步者FitBuds大厂出的稳妥款图个牌子靠谱又想要多模式降噪的人很合适",
+            }
+        ]
+
+    monkeypatch.setattr(module, "run_alignment_asr", fake_asr)
+
+    transcript = "漫步者FitBuds大厂出的稳妥款图个牌子靠谱、又想要多模式降噪的人很合适"
+    expected_chunks = module.split_transcript_clauses(transcript)
+
+    segments = module.build_subtitle_segments(
+        audio_path,
+        transcript,
+        0.0,
+        "base",
+        "zh",
+    )
+
+    texts = [segment.text for segment in segments]
+    assert texts == expected_chunks
+    assert len(texts) > 1
+    assert all(len(text) <= 24 for text in texts)
+    assert all(
+        segments[index].start_sec + segments[index].duration_sec <= segments[index + 1].start_sec - 0.015
+        for index in range(len(segments) - 1)
+    )

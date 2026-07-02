@@ -760,6 +760,59 @@ def partition_clauses_to_segments(clauses: list[str], segment_weights: list[floa
     return groups
 
 
+def distribute_clauses_over_asr_span(
+    clauses: list[str],
+    asr_segments: list[dict[str, Any]],
+    offset_sec: float,
+) -> list[SubtitleSegment]:
+    if not clauses or not asr_segments:
+        return []
+    span_start = float(asr_segments[0]["start"])
+    span_end = float(asr_segments[-1]["end"])
+    if span_end <= span_start:
+        span_end = span_start + 0.1 * len(clauses)
+
+    total_duration = span_end - span_start
+    weights = [max(len(normalize_subtitle_text(clause)), 1) for clause in clauses]
+    total_weight = sum(weights) or len(clauses)
+    cursor = span_start
+    results: list[SubtitleSegment] = []
+    for index, (clause, weight) in enumerate(zip(clauses, weights)):
+        if index == len(clauses) - 1:
+            end = span_end
+        else:
+            end = cursor + total_duration * (weight / total_weight)
+        if end <= cursor:
+            end = cursor + 0.1
+        results.append(
+            SubtitleSegment(
+                start_sec=offset_sec + cursor,
+                duration_sec=max(end - cursor, 0.1),
+                text=clause,
+            )
+        )
+        cursor = end
+    return results
+
+
+def enforce_subtitle_gaps(segments: list[SubtitleSegment], gap_sec: float = 0.02) -> list[SubtitleSegment]:
+    if len(segments) < 2:
+        return segments
+    adjusted = segments[:]
+    for index in range(len(adjusted) - 1):
+        current = adjusted[index]
+        next_segment = adjusted[index + 1]
+        max_end = next_segment.start_sec - gap_sec
+        current_end = current.start_sec + current.duration_sec
+        if current_end > max_end:
+            adjusted[index] = SubtitleSegment(
+                start_sec=current.start_sec,
+                duration_sec=max(max_end - current.start_sec, 0.1),
+                text=current.text,
+            )
+    return adjusted
+
+
 def build_subtitle_segments(
     audio_path: Path,
     transcript_text: str,
@@ -779,6 +832,8 @@ def build_subtitle_segments(
     asr_segments = run_alignment_asr(audio_path, model_name, language, vad_filter=vad_filter)
     if not asr_segments:
         return []
+    if len(asr_segments) < len(clauses):
+        return enforce_subtitle_gaps(distribute_clauses_over_asr_span(clauses, asr_segments, offset_sec))
 
     weights = [
         max(len(normalize_subtitle_text(segment.get("text", ""))), segment["end"] - segment["start"], 1.0)
@@ -798,7 +853,7 @@ def build_subtitle_segments(
                 text=display_text,
             )
         )
-    return results
+    return enforce_subtitle_gaps(results)
 
 
 def get_qwen_forced_aligner() -> Any:
