@@ -17,7 +17,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from python_env import inject_local_site_packages, preferred_python_commands
+from bworkflow_sql.subtitle_rules import split_subtitle_text
 from image_index import DEFAULT_IMAGE_INDEX_PATH, resolve_image_paths
 from PIL import Image, ImageDraw, ImageFont
 
@@ -69,7 +74,6 @@ def _resolve_default_background() -> str:
 DEFAULT_BACKGROUND_IMAGE = _resolve_default_background()
 PUNCTUATION_TRANSLATION = str.maketrans("", "", "，。！？；：、,.!?;:()（）【】[]《》<>“”\\\"'‘’`~…—-")
 WHITESPACE_RE = re.compile(r"\s+")
-TRANSCRIPT_SPLIT_RE = re.compile(r"[，。！？；：、,.!?;:\n\r]+")
 SYSTEM_PYTHON_COMMANDS = preferred_python_commands()
 QWEN_FORCED_ALIGNER_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B"
 QWEN_LANGUAGE_MAP = {
@@ -622,8 +626,7 @@ def normalize_subtitle_text(text: str) -> str:
 
 
 def split_transcript_clauses(text: str) -> list[str]:
-    clauses = [normalize_subtitle_text(part) for part in TRANSCRIPT_SPLIT_RE.split(text)]
-    return [clause for clause in clauses if clause]
+    return split_subtitle_text(text)
 
 
 def split_longest_clause(clauses: list[str]) -> list[str]:
@@ -785,14 +788,14 @@ def build_subtitle_segments(
 
     results: list[SubtitleSegment] = []
     for segment, text in zip(asr_segments, texts):
-        cleaned_text = normalize_subtitle_text(text)
-        if not cleaned_text:
+        display_text = text.strip()
+        if not normalize_subtitle_text(display_text):
             continue
         results.append(
             SubtitleSegment(
                 start_sec=offset_sec + float(segment["start"]),
                 duration_sec=max(float(segment["end"]) - float(segment["start"]), 0.1),
-                text=cleaned_text,
+                text=display_text,
             )
         )
     return results

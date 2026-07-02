@@ -67,3 +67,46 @@ def test_alignment_asr_uses_subtitle_python_override_and_can_disable_vad(tmp_pat
     assert segments == [{"start": 0.0, "end": 1.0, "text": "测试"}]
     assert captured["command"][0] == str(override_python)
     assert captured["command"][-1] == "0"
+
+
+def test_engine_subtitle_chunks_use_shared_bworkflow_rules():
+    module = load_engine_module()
+
+    chunks = module.split_transcript_clauses(
+        "人声也不容易被糊住。颜值简约高级，可以连接App联动。降噪、音质、LDAC高清编码，蓝牙6.0和100元价位都要保留。"
+    )
+
+    assert chunks == [
+        "人声也不容易被糊住",
+        "颜值简约高级",
+        "可以连接App联动",
+        "降噪、音质、LDAC高清编码",
+        "蓝牙6.0和100元价位都要保留",
+    ]
+
+
+def test_build_subtitle_segments_preserves_shared_rule_text(tmp_path: Path, monkeypatch):
+    module = load_engine_module()
+    audio_path = tmp_path / "voice.wav"
+    audio_path.write_bytes(b"fake-wave")
+
+    def fake_asr(*_: object, **__: object) -> list[dict[str, object]]:
+        return [
+            {"start": 0.0, "end": 1.0, "text": "降噪音质LDAC高清编码"},
+            {"start": 1.0, "end": 2.0, "text": "蓝牙60也稳"},
+        ]
+
+    monkeypatch.setattr(module, "run_alignment_asr", fake_asr)
+
+    segments = module.build_subtitle_segments(
+        audio_path,
+        "降噪、音质、LDAC高清编码，蓝牙6.0也稳。",
+        0.0,
+        "base",
+        "zh",
+    )
+
+    assert [segment.text for segment in segments] == [
+        "降噪、音质、LDAC高清编码",
+        "蓝牙6.0也稳",
+    ]
