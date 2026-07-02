@@ -1,4 +1,5 @@
 from bworkflow_sql.ui import App
+from bworkflow_sql.pages.project_page import ProjectPageDialog
 
 
 class _FakePage:
@@ -66,3 +67,43 @@ def test_show_page_defers_refresh_until_page_is_visible():
     scheduled[-1]()
 
     assert app.pages["同步中心"].refresh_count == 1
+
+
+class _FakeVar:
+    def __init__(self) -> None:
+        self.value = ""
+
+    def set(self, value: str) -> None:
+        self.value = value
+
+
+class _FakeRepo:
+    def projects(self):
+        return [{"id": 7, "name": "数码-耳夹蓝牙耳机"}]
+
+
+class _FakeApp:
+    current_project_id = 7
+
+    def sync_project_selectors(self) -> None:
+        pass
+
+
+def test_project_page_refresh_does_not_auto_load_master_workspaces():
+    page = ProjectPageDialog.__new__(ProjectPageDialog)
+    page.repo = _FakeRepo()
+    page.app = _FakeApp()
+    page.project_var = _FakeVar()
+    page.fields = {}
+    page.display_labels = {}
+    page.display_label_widgets = {}
+    page.workspaces = []
+    filled = []
+    load_calls = []
+    page._fill = lambda project_id: filled.append(project_id)
+    page._load_workspaces = lambda **kwargs: load_calls.append(kwargs)
+
+    ProjectPageDialog.refresh(page)
+
+    assert filled == [7]
+    assert load_calls == []

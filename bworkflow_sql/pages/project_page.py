@@ -512,8 +512,6 @@ class ProjectPageDialog(BasePage):
                 var.set("未配置")
             for widget in self.display_label_widgets.values():
                 widget.configure(text_color=UIStyle.COLOR_FIELD_EMPTY_TEXT)
-        if not self.workspaces:
-            self._load_workspaces(force_refresh=False, quiet=True)
 
     def _load_workspaces(self, *, force_refresh: bool = False, quiet: bool = False, editor_state: ProjectEditorState | None = None) -> None:
         if getattr(self, "_workspaces_loading", False):
