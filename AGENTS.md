@@ -27,6 +27,7 @@
 | 小歪当前音色 | IndexTTS 参考音频：`G:\Tools\自己用的音色\小歪10秒新.mp3`；MiniMax voice id：`xiaowai-v6`。 |
 | 小歪结尾配音 | `accounts.closing_audio_path` 当前为 `G:\2026项目-b站\素材-配音\公共-结尾\小歪\结尾-小歪.mp3`；生成草稿时 `_closing_manifest_entry(...)` 只在文件存在时写入结尾音频。 |
 | 弹窗居中 | 新建 `CTkToplevel` 后统一调用 `_center_dialog(dialog)`；该函数按父窗口/主窗口居中，只有父窗口几何不可用时才兜底按屏幕居中。不要新写 `winfo_screenwidth()` 居中逻辑。 |
+| 模板视频位置校准 | 商品视频位置、`display_video_slot`、封面区域对齐、新增/修改商品图模板、剪映坐标/X/Y/缩放问题，先用 `zhaoer-flow-templatepreset` skill；再运行 `python -m bworkflow_sql template-calibrate <project_id> --account <账号> --product-uid <UID> --draft-name 模板校准-<账号>-<UID>` 生成单商品校准草稿，不要跑整批草稿调一个位置。 |
 | 字幕断行 | 统一维护在 `bworkflow_sql/subtitle_rules.py::split_subtitle_text(...)`；SRT 导出和剪映文本字幕轨都复用它。对超长分句做语义断行，保留数字+单位、英文型号、小数和 `的/地/得` 结构，优先在连词前断。 |
 | 剪映字幕轨 | `bworkflow_sql jianying` 默认仍跳过字幕；显式加 `--with-subtitles` 才生成可编辑文本轨。当前机器如遇 onnxruntime/VAD 初始化失败，再加 `--subtitle-no-vad`。 |
 | 验证命令 | 从仓库根目录运行 `python -m pytest`，不要用裸 `pytest`。最小回归常用：`python -m pytest -q tests/test_workflow_service.py tests/test_ui_helpers.py tests/test_repositories.py tests/test_sync_service.py`。 |

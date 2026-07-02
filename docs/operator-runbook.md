@@ -9,6 +9,7 @@
 | IndexTTS 小歪音色 | `data\bworkflow.db.voice_profiles`、IndexTTS `voices.json` | 当前小歪参考音频是 `G:\Tools\自己用的音色\小歪10秒新.mp3`。更换时必须同步 DB 和 `voices.json` 指纹。 | `python scripts/_check_xiaowai.py`，路径应指向新参考音频。 |
 | 结尾配音 | `accounts.closing_audio_path` | 生成口播 manifest 时 `_closing_manifest_entry(...)` 读取当前用户 `closing_audio_path`；文件存在才写入结尾音频。当前小歪结尾配音是 `G:\2026项目-b站\素材-配音\公共-结尾\小歪\结尾-小歪.mp3`。 | 查询 `SELECT label, closing_audio_path FROM accounts WHERE label='小歪'`；运行 `python -m pytest -q tests/test_workflow_service.py -k closing`。 |
 | 弹窗居中 | `bworkflow_sql/ui.py::_center_dialog` | 所有 `CTkToplevel` 应调用 `_center_dialog(dialog)`；该函数优先按父窗口/主窗口居中，父窗口几何不可用时才按屏幕居中。不要在新弹窗里手写 `winfo_screenwidth()` 居中。 | `python -m py_compile bworkflow_sql\ui.py` 和 `python -m pytest -q tests/test_ui_helpers.py`。 |
+| 模板视频位置校准 | `python -m bworkflow_sql template-calibrate <project_id> --account <账号> --product-uid <UID> --draft-name 模板校准-<账号>-<UID>` | 商品视频位置、封面区域对齐、`display_video_slot`、剪映坐标/X/Y/缩放、新增或修改商品图模板时，先生成单商品校准草稿；不要跑整批商品草稿调一个位置。`coordinate_mode="clip_transform_pixels"` 是剪映位置面板坐标，负数 X/Y 可能正确。 | 打开生成的短草稿确认视觉位置；再跑 `python -m pytest -q tests/test_render_package_jianying.py tests/test_cli_render_package.py tests/test_jianying_engine_display_video.py`。 |
 | 字幕语义断行 | `bworkflow_sql/workflow_service.py::split_subtitle_text` | 长分句二次切分时保留数字+单位、英文型号、小数和“的/地/得”结构，优先在“但是/而且/所以”等连词前断。 | `python -m pytest -q tests/test_workflow_service.py -k subtitle`。 |
 
 ## MiniMax 换音色流程
@@ -160,6 +161,7 @@ python -m venv "G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/.v
 | 最小 UI 回归 | `python -m pytest -q tests/test_ui_helpers.py` |
 | 结尾配音回归 | `python -m pytest -q tests/test_workflow_service.py -k closing` |
 | 字幕断行回归 | `python -m pytest -q tests/test_workflow_service.py -k subtitle` |
+| 模板校准回归 | `python -m pytest -q tests/test_render_package_jianying.py tests/test_cli_render_package.py tests/test_jianying_engine_display_video.py` |
 | 引言场景 ASR 对齐回归 | `python -m pytest -q tests/test_cutme_intro.py tests/test_intro_timeline.py` |
 | 常用服务回归 | `python -m pytest -q tests/test_workflow_service.py tests/test_ui_helpers.py tests/test_repositories.py tests/test_sync_service.py` |
 

@@ -141,7 +141,13 @@ Output rules:
 - Voice clips use a `100ms` timeline gap between adjacent clips.
 - Template slots normally use 1920x1080 canvas rectangle coordinates: `x`, `y`, `width`, and `height`.
 - `小燃-模板1` uses Jianying position-panel coordinates instead: `x=-830`, `y=-77`, `width=970`, `height=590`, with `coordinate_mode="clip_transform_pixels"`.
-- For fast alignment checks, regenerate `data/tmp_jianying_probe/xiaoran1-three-products.manifest.json` and run `data/tmp_jianying_probe/run_xiaoran1_three_product_draft.py`. The smoke draft contains 3 products and skips subtitles.
+- For product-video/template alignment checks, use the one-product calibration command before generating a full draft:
+
+```powershell
+python -m bworkflow_sql template-calibrate <project_id> --account <账号> --product-uid <UID> --draft-name 模板校准-<账号>-<UID>
+```
+
+It refreshes the RenderPackage/Jianying manifest, extracts the requested product only, writes a probe manifest under `data/workspace/project-<id>/template-calibration/`, and creates a short Jianying draft for visual confirmation.
 - Subtitle export uses semantic line breaking for long clauses: it keeps decimal numbers, number-unit phrases, English model names, and `的/地/得` structures together where possible.
 
 ## Markdown Contract
