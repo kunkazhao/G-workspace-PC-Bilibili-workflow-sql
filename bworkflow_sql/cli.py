@@ -11,6 +11,7 @@
   python -m bworkflow_sql voice-counts 3 --account 小博
   python -m bworkflow_sql product-images 3 --account 小博 --mode stale
   python -m bworkflow_sql product-images 3 --account 小博 --mode missing
+  python -m bworkflow_sql template-calibrate 3 --account 小燃 --product-uid R001
 
 所有命令输出 JSON 到 stdout，错误输出 JSON 到 stderr。
 """
@@ -442,6 +443,19 @@ def cmd_product_images(args: argparse.Namespace) -> None:
     _json_out(result)
 
 
+def cmd_template_calibrate(args: argparse.Namespace) -> None:
+    _, _, _, wf = _init()
+    result = wf.template_calibration_probe(
+        project_id=args.project_id,
+        account_label=args.account,
+        product_uid=args.product_uid,
+        draft_name=args.draft_name or "",
+        draft_root=args.draft_root or None,
+        product_media_mode=args.product_media_mode,
+    )
+    _json_out(result)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bworkflow_sql",
@@ -555,6 +569,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="stale regenerates changed product cards; missing creates absent account images; all regenerates both ready and missing images",
     )
 
+    p = sub.add_parser("template-calibrate", help="生成单商品剪映模板位置校准草稿")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--account", required=True, help="账号/用户标签，如 小燃")
+    p.add_argument("--product-uid", required=True, help="用于校准的商品 UID")
+    p.add_argument("--draft-name", default="", help="校准草稿名称")
+    p.add_argument("--draft-root", default="", help="剪映草稿根目录")
+    p.add_argument(
+        "--product-media-mode",
+        choices=["video_preferred"],
+        default="video_preferred",
+        help="模板校准必须使用商品视频模式",
+    )
+
     return parser
 
 
@@ -572,6 +599,7 @@ DISPATCH = {
     "assets-check": cmd_assets_check,
     "render-package": cmd_render_package,
     "product-images": cmd_product_images,
+    "template-calibrate": cmd_template_calibrate,
 }
 
 

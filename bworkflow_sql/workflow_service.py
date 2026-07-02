@@ -426,6 +426,87 @@ class WorkflowService:
             mode=mode,
         )
 
+    def template_calibration_probe(
+        self,
+        project_id: int,
+        *,
+        account_label: str,
+        product_uid: str,
+        draft_name: str = "",
+        draft_root: str | Path | None = None,
+        product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
+        stale_product_image_policy: str = "reuse",
+    ) -> dict[str, Any]:
+        account = safe_text(account_label)
+        uid = safe_text(product_uid)
+        if not account:
+            raise ValueError("模板校准需要指定账号。")
+        if not uid:
+            raise ValueError("模板校准需要指定商品 UID。")
+
+        output_dir = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "template-calibration"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"template-calibrate-{safe_path_component(account)}-{safe_path_component(uid)}"
+        package_path = output_dir / f"{stem}.render-package.json"
+        package_result = self.prepare_product_recommendation_output(
+            project_id=project_id,
+            account_label=account,
+            output_mode="jianying_draft",
+            product_media_mode=product_media_mode,
+            stale_product_image_policy=stale_product_image_policy,
+            package_output_path=package_path,
+        )
+        if not package_result.get("ok"):
+            return {
+                "ok": False,
+                "project_id": project_id,
+                "account": account,
+                "product_uid": uid,
+                "package": package_result,
+                "next": package_result.get("next"),
+            }
+
+        next_hint = package_result.get("next") if isinstance(package_result.get("next"), dict) else {}
+        source_manifest = Path(safe_text(next_hint.get("manifest_path")))
+        if not source_manifest.exists():
+            raise ValueError(f"模板校准缺少剪映 manifest：{source_manifest}")
+
+        payload = json.loads(source_manifest.read_text(encoding="utf-8-sig"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"剪映 manifest 格式异常：{source_manifest}")
+        probe_payload = build_template_calibration_probe_manifest(
+            payload,
+            product_uid=uid,
+            created_from=str(source_manifest),
+        )
+        probe_manifest = output_dir / f"{stem}.manifest.json"
+        probe_manifest.write_text(
+            json.dumps(probe_payload, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        draft = self.generate_jianying_draft(
+            project_id,
+            manifest_path=probe_manifest,
+            draft_name=safe_path_component(draft_name or f"模板校准-{account}-{uid}"),
+            draft_root=draft_root or DEFAULT_JIANYING_DRAFT_ROOT,
+        )
+        entry = probe_payload["entries"][0]
+        return {
+            "ok": draft.returncode == 0,
+            "project_id": project_id,
+            "account": account,
+            "product_uid": uid,
+            "display_template": safe_text(probe_payload.get("display_template")),
+            "display_video_slot": entry.get("display_video_slot"),
+            "source_manifest_path": str(source_manifest),
+            "probe_manifest_path": str(probe_manifest),
+            "draft": {
+                "returncode": draft.returncode,
+                "stdout": draft.stdout,
+                "stderr": draft.stderr,
+            },
+        }
+
     def run_command(self, cmd: list[str]) -> WorkflowRunResult:
         if cmd and cmd[0].startswith(INTERNAL_PREFIX):
             return self._run_internal(cmd)
@@ -2260,6 +2341,42 @@ def render_package_to_jianying_manifest(
     }
     output.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return output
+
+
+def build_template_calibration_probe_manifest(
+    manifest: dict[str, Any],
+    *,
+    product_uid: str,
+    created_from: str = "",
+) -> dict[str, Any]:
+    uid = safe_text(product_uid)
+    if not uid:
+        raise ValueError("校准商品 UID 不能为空。")
+    entries = manifest.get("entries") if isinstance(manifest.get("entries"), list) else []
+    matches = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict)
+        and safe_text(entry.get("type")) == "product"
+        and safe_text(entry.get("product_uid")).casefold() == uid.casefold()
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"期望找到 1 条商品 {uid}，实际找到 {len(matches)} 条。")
+    selected = json.loads(json.dumps(matches[0], ensure_ascii=False, default=str))
+    if not safe_text(selected.get("display_video_path")):
+        raise ValueError(f"商品 {uid} 没有 display_video_path，不能校准商品视频位置。")
+    if not isinstance(selected.get("display_video_slot"), dict):
+        raise ValueError(f"商品 {uid} 没有 display_video_slot，不能校准商品视频位置。")
+    selected["order_index"] = 1
+    selected["section_order"] = 1
+
+    probe = json.loads(json.dumps(manifest, ensure_ascii=False, default=str))
+    probe["entries"] = [selected]
+    probe["mode"] = "template_calibration_probe"
+    if created_from:
+        probe["created_from"] = created_from
+    probe["probe_note"] = "Single-product display-video template calibration probe."
+    return probe
 
 
 def render_package_display_template(
