@@ -87,6 +87,42 @@ def test_template_calibrate_parser_registers_command():
     assert args.product_media_mode == "video_preferred"
 
 
+def test_render_final_video_parser_registers_command():
+    args = cli.build_parser().parse_args(
+        [
+            "render-final-video",
+            "3",
+            "--account",
+            "小燃",
+            "--product-media-mode",
+            "cover_only",
+            "--product-image-mode",
+            "missing",
+            "--stale-product-image-policy",
+            "reuse",
+            "--mode",
+            "top",
+            "--top-uids",
+            "P003,P001",
+            "--package-output",
+            "package.json",
+            "--output",
+            "out.mp4",
+        ]
+    )
+
+    assert args.command == "render-final-video"
+    assert args.project_id == 3
+    assert args.account == "小燃"
+    assert args.product_media_mode == "cover_only"
+    assert args.product_image_mode == "missing"
+    assert args.stale_product_image_policy == "reuse"
+    assert args.mode == "top"
+    assert args.top_uids == "P003,P001"
+    assert args.package_output == "package.json"
+    assert args.output == "out.mp4"
+
+
 def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):
     calls: list[dict[str, object]] = []
 

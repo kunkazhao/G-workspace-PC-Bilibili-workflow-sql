@@ -105,6 +105,7 @@ Output rules:
 - Internal generated files are kept under `data/workspace`.
 - Jianying drafts are written to `E:\剪辑-剪映\草稿\JianyingPro Drafts`.
 - Standalone voice files default to `G:\2026项目-b站` and do not write `asset_bindings`.
+- Final MP4 can be produced from the CLI with `python -m bworkflow_sql render-final-video <project_id> --account <账号> --product-media-mode video_preferred`. This keeps B-Workflow as the orchestration layer, generates a `final_mp4` RenderPackage, builds a CutMe job-local package, runs the fast-final renderer, verifies the MP4 with `ffprobe`/`loudnorm`, extracts acceptance frames, and returns an `output_mp4_link` field for direct opening.
 
 ## Voice Generation Notes
 

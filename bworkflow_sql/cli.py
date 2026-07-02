@@ -13,6 +13,7 @@
   python -m bworkflow_sql product-images 3 --account 小博 --mode stale --product-uid P001
   python -m bworkflow_sql product-images 3 --account 小博 --mode missing
   python -m bworkflow_sql template-calibrate 3 --account 小燃 --product-uid R001
+  python -m bworkflow_sql render-final-video 3 --account 小燃 --product-media-mode video_preferred
 
 所有命令输出 JSON 到 stdout，错误输出 JSON 到 stderr。
 """
@@ -458,6 +459,25 @@ def cmd_template_calibrate(args: argparse.Namespace) -> None:
     _json_out(result)
 
 
+def cmd_render_final_video(args: argparse.Namespace) -> None:
+    from .final_video_pipeline import run_final_video_pipeline
+
+    _, _, _, wf = _init()
+    result = run_final_video_pipeline(
+        wf,
+        project_id=args.project_id,
+        account_label=args.account,
+        product_media_mode=args.product_media_mode,
+        product_image_mode=args.product_image_mode,
+        stale_product_image_policy=args.stale_product_image_policy,
+        mode=args.mode,
+        top_uids=args.top_uids,
+        package_output_path=args.package_output or None,
+        output_path=args.output or None,
+    )
+    _json_out(result)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bworkflow_sql",
@@ -561,6 +581,37 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top-uids", default="", help="top mode product UIDs, comma separated")
     p.add_argument("--output", "-o", help="render-package.json output path")
 
+    p = sub.add_parser("render-final-video", help="Generate final MP4 through RenderPackage and CutMe")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--account", required=True)
+    p.add_argument(
+        "--product-media-mode",
+        choices=["cover_only", "video_preferred"],
+        default="video_preferred",
+        help="cover_only uses only the cover image; video_preferred uses product video when available",
+    )
+    p.add_argument(
+        "--product-image-mode",
+        choices=["skip", "missing", "stale", "all"],
+        default="missing",
+        help="missing creates absent product-card images before rendering; stale/all regenerate changed images; skip only checks package inputs",
+    )
+    p.add_argument(
+        "--stale-product-image-policy",
+        choices=["block", "reuse"],
+        default="block",
+        help="block when product-card image fingerprints are stale, or explicitly reuse old images",
+    )
+    p.add_argument(
+        "--mode",
+        choices=["standard", "top"],
+        default="standard",
+        help="segment order mode: standard groups by price range; top puts --top-uids first",
+    )
+    p.add_argument("--top-uids", default="", help="top mode product UIDs, comma separated")
+    p.add_argument("--package-output", help="render-package.json output path")
+    p.add_argument("--output", "-o", help="final mp4 output path")
+
     p = sub.add_parser("product-images", help="Regenerate Remotion product-card images")
     p.add_argument("project_id", type=int)
     p.add_argument("--account", required=True)
@@ -601,6 +652,7 @@ DISPATCH = {
     "scaffold": cmd_scaffold,
     "assets-check": cmd_assets_check,
     "render-package": cmd_render_package,
+    "render-final-video": cmd_render_final_video,
     "product-images": cmd_product_images,
     "template-calibrate": cmd_template_calibrate,
 }
