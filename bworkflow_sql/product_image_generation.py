@@ -17,7 +17,7 @@ from .render_package_builder import (
 )
 from .repositories import Repository
 from .settings import CUTME_ROOT, DEFAULT_IMAGE_ROOT, INTERNAL_WORKSPACE_ROOT
-from .template_config import available_templates, image_set_for_template
+from .template_config import available_templates, image_set_for_template, resolve_product_card_template
 from .utils import file_metadata, now_iso, safe_text
 
 PRODUCT_IMAGE_RENDER_JOB_ROOT = INTERNAL_WORKSPACE_ROOT / "product-image-jobs"
@@ -34,6 +34,7 @@ def regenerate_product_card_images(
     account_label: str,
     mode: str = "stale",
     product_uid: str = "",
+    product_card_template_id: str = "",
     render_product_card_still: ProductCardStillRenderer | None = None,
 ) -> dict[str, Any]:
     mode_value = safe_text(mode) or "stale"
@@ -47,6 +48,12 @@ def regenerate_product_card_images(
         raise ValueError(f"project does not exist: {project_id}")
 
     renderer = render_product_card_still or render_product_card_still_via_cutme
+    selected_template = resolve_product_card_template(account_label, product_card_template_id)
+    selected_template_id = safe_text(selected_template.get("templateId")) or safe_text(product_card_template_id)
+    default_image_set = _default_image_set_for_account(
+        account_label,
+        product_card_template_id=selected_template_id,
+    )
     assets = repo.asset_bindings(project_id)
     accounts = {safe_text(item.get("label")): item for item in repo.accounts()}
     regenerated: list[dict[str, Any]] = []
@@ -64,8 +71,8 @@ def regenerate_product_card_images(
             project=project,
             product=product,
             account_label=account_label,
+            image_set=default_image_set,
         )
-        default_image_set = _default_image_set_for_account(account_label)
         image = _ready_image_asset(assets, uid=uid, account_label=account_label)
         image_matches_default_template = bool(
             image
@@ -95,6 +102,7 @@ def regenerate_product_card_images(
             project=project,
             fallback_image_path=image_path,
             account_label=account_label,
+            product_card_template_id=selected_template_id,
         )
         if not product_card:
             skipped.append({"uid": uid, "reason": "missing_product_card"})
@@ -145,6 +153,7 @@ def regenerate_product_card_images(
         "account": account_label,
         "mode": mode_value,
         "product_uid": target_uid or None,
+        "product_card_template_id": selected_template_id or None,
         "regenerated": regenerated,
         "skipped": skipped,
     }
@@ -296,10 +305,11 @@ def _default_image_output_path(
     project: dict[str, Any],
     product: dict[str, Any],
     account_label: str,
+    image_set: str = "",
 ) -> Path:
     root = Path(safe_text(project.get("image_root")) or DEFAULT_IMAGE_ROOT)
     category = project_category_folder(project)
-    template = _default_image_set_for_account(account_label)
+    template = safe_text(image_set) or _default_image_set_for_account(account_label)
     uid = safe_text(product.get("uid")) or "product"
     title = safe_text(product.get("title")) or uid
     price = _filename_price_label(safe_text(product.get("price_label")))
@@ -307,7 +317,12 @@ def _default_image_output_path(
     return root / _safe_path_component(category) / _safe_path_component(account_label) / template / filename
 
 
-def _default_image_set_for_account(account_label: str) -> str:
+def _default_image_set_for_account(account_label: str, *, product_card_template_id: str = "") -> str:
+    selected_template = resolve_product_card_template(account_label, product_card_template_id)
+    if selected_template:
+        display_name = safe_text(selected_template.get("displayName"))
+        if display_name:
+            return _safe_path_component(image_set_for_template(display_name))
     templates = available_templates(safe_text(account_label))
     if templates:
         return _safe_path_component(image_set_for_template(templates[0]))

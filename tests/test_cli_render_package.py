@@ -23,6 +23,8 @@ def test_render_package_parser_registers_command():
             "top",
             "--top-uids",
             "P003,P001",
+            "--product-card-template-id",
+            "muban-xiaobo-1",
             "--output",
             "out.json",
         ]
@@ -36,6 +38,7 @@ def test_render_package_parser_registers_command():
     assert args.stale_product_image_policy == "reuse"
     assert args.mode == "top"
     assert args.top_uids == "P003,P001"
+    assert args.product_card_template_id == "muban-xiaobo-1"
     assert args.output == "out.json"
 
 
@@ -50,6 +53,8 @@ def test_product_images_parser_registers_command():
             "missing",
             "--product-uid",
             "P001",
+            "--product-card-template-id",
+            "muban-xiaobo-1",
         ]
     )
 
@@ -58,6 +63,7 @@ def test_product_images_parser_registers_command():
     assert args.account == "xiaobo"
     assert args.mode == "missing"
     assert args.product_uid == "P001"
+    assert args.product_card_template_id == "muban-xiaobo-1"
 
 
 def test_template_calibrate_parser_registers_command():
@@ -104,6 +110,8 @@ def test_render_final_video_parser_registers_command():
             "top",
             "--top-uids",
             "P003,P001",
+            "--product-card-template-id",
+            "muban-xiaobo-1",
             "--package-output",
             "package.json",
             "--output",
@@ -119,6 +127,7 @@ def test_render_final_video_parser_registers_command():
     assert args.stale_product_image_policy == "reuse"
     assert args.mode == "top"
     assert args.top_uids == "P003,P001"
+    assert args.product_card_template_id == "muban-xiaobo-1"
     assert args.package_output == "package.json"
     assert args.output == "out.mp4"
 
@@ -127,13 +136,14 @@ def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):
     calls: list[dict[str, object]] = []
 
     class FakeWorkflow:
-        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid):
+        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):
             calls.append(
                 {
                     "project_id": project_id,
                     "account_label": account_label,
                     "mode": mode,
                     "product_uid": product_uid,
+                    "product_card_template_id": product_card_template_id,
                 }
             )
             return {
@@ -147,7 +157,15 @@ def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):
 
     monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
 
-    cli.cmd_product_images(Namespace(project_id=3, account="xiaobo", mode="stale", product_uid="P001"))
+    cli.cmd_product_images(
+        Namespace(
+            project_id=3,
+            account="xiaobo",
+            mode="stale",
+            product_uid="P001",
+            product_card_template_id="muban-xiaobo-1",
+        )
+    )
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
@@ -158,6 +176,7 @@ def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):
             "account_label": "xiaobo",
             "mode": "stale",
             "product_uid": "P001",
+            "product_card_template_id": "muban-xiaobo-1",
         }
     ]
 
@@ -238,6 +257,7 @@ def test_cmd_render_package_writes_success_json_and_package(
             stale_product_image_policy,
             mode,
             top_uids,
+            product_card_template_id,
             package_output_path,
         ):
             calls.append(
@@ -249,6 +269,7 @@ def test_cmd_render_package_writes_success_json_and_package(
                     "stale_product_image_policy": stale_product_image_policy,
                     "mode": mode,
                     "top_uids": top_uids,
+                    "product_card_template_id": product_card_template_id,
                     "package_output_path": package_output_path,
                 }
             )
@@ -278,6 +299,7 @@ def test_cmd_render_package_writes_success_json_and_package(
             stale_product_image_policy="block",
             mode="standard",
             top_uids="",
+            product_card_template_id="muban-xiaobo-1",
             output=str(output),
         )
     )
@@ -303,6 +325,7 @@ def test_cmd_render_package_writes_success_json_and_package(
             "stale_product_image_policy": "block",
             "mode": "standard",
             "top_uids": "",
+            "product_card_template_id": "muban-xiaobo-1",
             "package_output_path": str(output),
         }
     ]
@@ -326,6 +349,7 @@ def test_cmd_render_package_reports_missing_without_writing_package(
             stale_product_image_policy,
             mode,
             top_uids,
+            product_card_template_id,
             package_output_path,
         ):
             return {
@@ -349,6 +373,7 @@ def test_cmd_render_package_reports_missing_without_writing_package(
             product_media_mode="video_preferred",
             mode="standard",
             top_uids="",
+            product_card_template_id="muban-xiaobo-1",
             output=str(output),
         )
     )

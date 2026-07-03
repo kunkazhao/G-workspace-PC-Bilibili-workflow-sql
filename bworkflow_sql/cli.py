@@ -430,6 +430,7 @@ def cmd_render_package(args: argparse.Namespace) -> None:
         stale_product_image_policy=getattr(args, "stale_product_image_policy", "block"),
         mode=args.mode,
         top_uids=args.top_uids,
+        product_card_template_id=args.product_card_template_id,
         package_output_path=args.output or None,
     )
     _json_out(result)
@@ -442,6 +443,7 @@ def cmd_product_images(args: argparse.Namespace) -> None:
         account_label=args.account,
         mode=args.mode,
         product_uid=args.product_uid or "",
+        product_card_template_id=args.product_card_template_id or "",
     )
     _json_out(result)
 
@@ -472,6 +474,7 @@ def cmd_render_final_video(args: argparse.Namespace) -> None:
         stale_product_image_policy=args.stale_product_image_policy,
         mode=args.mode,
         top_uids=args.top_uids,
+        product_card_template_id=args.product_card_template_id or "",
         package_output_path=args.package_output or None,
         output_path=args.output or None,
     )
@@ -579,6 +582,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="segment order mode: standard groups by price range; top puts --top-uids first",
     )
     p.add_argument("--top-uids", default="", help="top mode product UIDs, comma separated")
+    p.add_argument(
+        "--product-card-template-id",
+        default="",
+        help="Remotion-first product-card template id or display name; defaults to the account template",
+    )
     p.add_argument("--output", "-o", help="render-package.json output path")
 
     p = sub.add_parser("render-final-video", help="Generate final MP4 through RenderPackage and CutMe")
@@ -609,6 +617,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="segment order mode: standard groups by price range; top puts --top-uids first",
     )
     p.add_argument("--top-uids", default="", help="top mode product UIDs, comma separated")
+    p.add_argument(
+        "--product-card-template-id",
+        default="",
+        help="Remotion-first product-card template id or display name; defaults to the account template",
+    )
     p.add_argument("--package-output", help="render-package.json output path")
     p.add_argument("--output", "-o", help="final mp4 output path")
 
@@ -622,6 +635,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="stale regenerates changed product cards; missing creates absent account images; all regenerates both ready and missing images",
     )
     p.add_argument("--product-uid", default="", help="只重生成指定商品 UID 的商品图")
+    p.add_argument(
+        "--product-card-template-id",
+        default="",
+        help="Remotion-first product-card template id or display name; defaults to the account template",
+    )
 
     p = sub.add_parser("template-calibrate", help="生成单商品剪映模板位置校准草稿")
     p.add_argument("project_id", type=int)

@@ -6,6 +6,7 @@ from bworkflow_sql.template_config import (
     get_template_slot,
     get_remotion_template_metadata,
     image_set_for_template,
+    resolve_product_card_template,
     user_for_template,
 )
 
@@ -170,3 +171,22 @@ def test_muban_xiaobo_1_video_slot_is_projected_from_remotion_metadata() -> None
         "templateId": "muban-xiaobo-1",
         "templateVersion": "1.0.2",
     }
+
+
+def test_resolve_product_card_template_uses_explicit_template_before_account_default() -> None:
+    by_id = resolve_product_card_template("小博", "muban-xiaobo-1")
+    by_name = resolve_product_card_template("小博", "小博模板1")
+    by_default = resolve_product_card_template("小博")
+
+    assert by_id["templateId"] == "muban-xiaobo-1"
+    assert by_name["templateId"] == "muban-xiaobo-1"
+    assert by_default["templateId"] == "muban-xiaobo-1"
+
+
+def test_resolve_product_card_template_rejects_template_from_other_account() -> None:
+    try:
+        resolve_product_card_template("小燃", "muban-xiaobo-1")
+    except ValueError as exc:
+        assert "does not belong to account" in str(exc)
+    else:
+        raise AssertionError("expected template/account mismatch to fail")

@@ -331,6 +331,7 @@ class WorkflowService:
         stale_product_image_policy: str = "block",
         mode: str = "standard",
         top_uids: str | list[str] | None = None,
+        product_card_template_id: str = "",
         package_output_path: str | Path | None = None,
     ) -> dict[str, Any]:
         output_mode_value = safe_text(output_mode) or "jianying_draft"
@@ -351,6 +352,7 @@ class WorkflowService:
             account_label=account_label,
             output_mode=output_mode_value,
             product_media_mode=media_mode,
+            product_card_template_id=product_card_template_id,
             mode=sequence_mode,
             top_uids=top_uid_list,
         )
@@ -367,6 +369,7 @@ class WorkflowService:
             "account": account_label,
             "output_mode": output_mode_value,
             "product_media_mode": media_mode,
+            "product_card_template_id": safe_text(product_card_template_id) or None,
             "mode": sequence_mode,
             "top_uids": top_uid_list,
             "package_path": str(output_path),
@@ -383,6 +386,7 @@ class WorkflowService:
                     base_payload["stale_product_images"],
                     project_id=project_id,
                     account_label=account_label,
+                    product_card_template_id=product_card_template_id,
                 ),
             }
 
@@ -420,6 +424,7 @@ class WorkflowService:
         account_label: str,
         mode: str = "stale",
         product_uid: str = "",
+        product_card_template_id: str = "",
     ) -> dict[str, Any]:
         return regenerate_product_card_images(
             self.db,
@@ -427,6 +432,7 @@ class WorkflowService:
             account_label=account_label,
             mode=mode,
             product_uid=product_uid,
+            product_card_template_id=product_card_template_id,
         )
 
     def template_calibration_probe(
@@ -2214,15 +2220,25 @@ def render_package_stale_product_image_next_step(
     *,
     project_id: int,
     account_label: str,
+    product_card_template_id: str = "",
 ) -> dict[str, Any]:
     stale_command = (
         f"python -m bworkflow_sql product-images {project_id} "
         f"--account {account_label} --mode stale"
     )
+    template_arg = safe_text(product_card_template_id)
+    if template_arg:
+        stale_command = f"{stale_command} --product-card-template-id {template_arg}"
     if len(stale_product_images) == 1:
         uid = safe_text(stale_product_images[0].get("uid"))
         if uid:
             stale_command = f"{stale_command} --product-uid {uid}"
+    all_command = (
+        f"python -m bworkflow_sql product-images {project_id} "
+        f"--account {account_label} --mode all"
+    )
+    if template_arg:
+        all_command = f"{all_command} --product-card-template-id {template_arg}"
     return {
         "mode": "product_image_stale_review",
         "status": "confirmation_required",
@@ -2242,10 +2258,7 @@ def render_package_stale_product_image_next_step(
             {
                 "id": "regenerate_all",
                 "label": "重生成全部商品图，再重新生成 RenderPackage",
-                "command_hint": (
-                    f"python -m bworkflow_sql product-images {project_id} "
-                    f"--account {account_label} --mode all"
-                ),
+                "command_hint": all_command,
             },
         ],
     }

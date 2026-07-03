@@ -27,6 +27,7 @@ def run_final_video_pipeline(
     stale_product_image_policy: str = "block",
     mode: str = "standard",
     top_uids: str = "",
+    product_card_template_id: str = "",
     package_output_path: str | Path | None = None,
     output_path: str | Path | None = None,
     cutme_root: str | Path = CUTME_ROOT,
@@ -52,6 +53,7 @@ def run_final_video_pipeline(
             account_label=account,
             mode=product_image_mode,
             product_uid="",
+            product_card_template_id=product_card_template_id,
         )
         if product_images.get("ok") is False:
             return {
@@ -68,6 +70,7 @@ def run_final_video_pipeline(
         stale_product_image_policy=stale_product_image_policy,
         mode=mode,
         top_uids=top_uids,
+        product_card_template_id=product_card_template_id,
         package_output_path=str(package_path),
     )
     if package_result.get("ok") is not True:
@@ -120,6 +123,7 @@ def run_final_video_pipeline(
         "account": account,
         "product_media_mode": product_media_mode,
         "product_image_mode": product_image_mode,
+        "product_card_template_id": safe_text(product_card_template_id) or None,
         "package_path": str(package_path),
         "job_package_path": str(job_package_path),
         "output_mp4": str(target_mp4),

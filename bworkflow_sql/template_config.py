@@ -178,6 +178,43 @@ def remotion_template_id_for_user(user_label: str) -> str:
     return ""
 
 
+def resolve_product_card_template(
+    account_label: str,
+    product_card_template_id: str = "",
+) -> dict[str, Any]:
+    """Resolve the Remotion-first product-card template for one generation task.
+
+    The explicit template id/display name wins. If omitted, the account's first
+    Remotion template is the default. Account validation prevents a stale product
+    record or CLI typo from silently selecting another user's visual contract.
+    """
+    account = account_label.strip()
+    requested = product_card_template_id.strip()
+    metadata: dict[str, Any] | None = None
+    if requested:
+        if requested in _remotion_template_metadata():
+            metadata = dict(_remotion_template_metadata()[requested])
+        else:
+            metadata = _remotion_template_by_display_name(requested)
+        if metadata is None:
+            raise ValueError(f"unknown Remotion product-card template: {requested}")
+    else:
+        default_template_id = remotion_template_id_for_user(account)
+        if default_template_id:
+            metadata = get_remotion_template_metadata(default_template_id)
+
+    if metadata is None:
+        return {}
+
+    template_account = str(metadata.get("account") or "").strip()
+    template_id = str(metadata.get("templateId") or "").strip()
+    if account and template_account and template_account != account:
+        raise ValueError(
+            f"Remotion product-card template {template_id} does not belong to account {account}"
+        )
+    return dict(metadata)
+
+
 def _remotion_template_names_for_user(user_label: str) -> list[str]:
     account = user_label.strip()
     names: list[str] = []

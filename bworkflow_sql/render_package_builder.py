@@ -18,6 +18,7 @@ from .template_config import (
     get_remotion_template_metadata,
     get_template_slot,
     remotion_template_id_for_user,
+    resolve_product_card_template,
 )
 from .tts_helpers import DEFAULT_LOUDNORM_I, DEFAULT_LOUDNORM_LRA, DEFAULT_LOUDNORM_TP
 from .utils import safe_text, text_hash
@@ -215,6 +216,7 @@ def build_product_recommendation_package(
     account_label: str,
     output_mode: str = "jianying_draft",
     product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
+    product_card_template_id: str = "",
     mode: str = "standard",
     top_uids: list[str] | None = None,
     product_uids: list[str] | None = None,
@@ -224,6 +226,10 @@ def build_product_recommendation_package(
     media_mode = safe_text(product_media_mode) or DEFAULT_PRODUCT_MEDIA_MODE
     if media_mode not in SUPPORTED_PRODUCT_MEDIA_MODES:
         raise ValueError(f"unsupported product_media_mode: {media_mode}")
+    selected_template = resolve_product_card_template(
+        account_label,
+        product_card_template_id,
+    )
 
     repo = Repository(db)
     project = repo.project(project_id)
@@ -348,6 +354,7 @@ def build_product_recommendation_package(
                 project=project,
                 fallback_image_path=image_path,
                 account_label=account,
+                product_card_template_id=safe_text(selected_template.get("templateId")),
             )
         except ValueError as exc:
             missing.append(
@@ -463,6 +470,9 @@ def build_product_recommendation_package(
             }
         },
     }
+    if selected_template:
+        package["output"]["productCardTemplateId"] = safe_text(selected_template.get("templateId"))
+        package["output"]["productCardTemplateVersion"] = safe_text(selected_template.get("templateVersion"))
     if output_mode == "final_mp4":
         package["output"]["subtitles"] = {
             "enabled": True,
@@ -654,6 +664,7 @@ def _product_card_payload(
     project: dict[str, Any],
     fallback_image_path: Path | None,
     account_label: str = "",
+    product_card_template_id: str = "",
 ) -> dict[str, Any] | None:
     raw = safe_text(product.get("product_card_json"))
     if not raw:
@@ -683,7 +694,8 @@ def _product_card_payload(
         return None
 
     payload_template_id = safe_text(payload.get("templateId")) or "xiaoran1"
-    account_template_id = remotion_template_id_for_user(account_label)
+    selected_template = resolve_product_card_template(account_label, product_card_template_id)
+    account_template_id = safe_text(selected_template.get("templateId")) or remotion_template_id_for_user(account_label)
     template_id = account_template_id or payload_template_id
     template_version = safe_text(payload.get("templateVersion"))
     if account_template_id and account_template_id != payload_template_id:
@@ -697,7 +709,7 @@ def _product_card_payload(
         "sourceHeight": 480,
     }
     try:
-        remotion_metadata = get_remotion_template_metadata(template_id)
+        remotion_metadata = selected_template or get_remotion_template_metadata(template_id)
     except ValueError:
         remotion_metadata = {}
     if remotion_metadata:
@@ -729,12 +741,14 @@ def product_card_payload_for_product(
     project: dict[str, Any],
     fallback_image_path: str | Path | None = None,
     account_label: str = "",
+    product_card_template_id: str = "",
 ) -> dict[str, Any] | None:
     return _product_card_payload(
         product,
         project=project,
         fallback_image_path=Path(fallback_image_path) if fallback_image_path else None,
         account_label=account_label,
+        product_card_template_id=product_card_template_id,
     )
 
 

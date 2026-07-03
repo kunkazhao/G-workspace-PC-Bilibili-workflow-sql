@@ -356,6 +356,7 @@ def test_final_mp4_package_includes_subtitles_from_shared_split_rules(
         project_id=project_id,
         account_label="小博",
         output_mode="final_mp4",
+        product_card_template_id="muban-xiaobo-1",
     )
 
     assert result.package["output"]["subtitles"]["enabled"] is True
@@ -683,6 +684,7 @@ def test_build_package_overrides_legacy_product_card_template_with_account_remot
 
     assert product["productCard"]["templateId"] == "muban-xiaobo-1"
     assert product["productCard"]["templateVersion"] == "1.0.2"
+    assert result.package["output"]["productCardTemplateId"] == "muban-xiaobo-1"
     assert product["productCard"]["coverMediaSlot"]["x"] == 442
     assert product["productCard"]["cardPlacement"] == {
         "x": 0,

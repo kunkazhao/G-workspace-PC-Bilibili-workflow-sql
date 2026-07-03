@@ -220,6 +220,7 @@ def test_regenerate_product_card_images_creates_missing_account_binding(
         project_id=project_id,
         account_label="小博",
         mode="missing",
+        product_card_template_id="muban-xiaobo-1",
         render_product_card_still=fake_render,
     )
 
@@ -242,6 +243,7 @@ def test_regenerate_product_card_images_creates_missing_account_binding(
 
     assert result["ok"] is True
     assert result["mode"] == "missing"
+    assert result["product_card_template_id"] == "muban-xiaobo-1"
     assert result["regenerated"][0]["uid"] == "P001"
     assert result["regenerated"][0]["reason"] == "missing_ready_image_binding"
     assert result["regenerated"][0]["path"] == str(expected_path)
@@ -252,6 +254,7 @@ def test_regenerate_product_card_images_creates_missing_account_binding(
     assert binding["status"] == "ready"
     assert binding["source_kind"] == "remotion"
     assert binding["text_hash"] == expected_fingerprint
+    assert segment["productCard"]["templateId"] == "muban-xiaobo-1"
 
 
 def test_product_card_fingerprint_changes_when_template_version_changes() -> None:

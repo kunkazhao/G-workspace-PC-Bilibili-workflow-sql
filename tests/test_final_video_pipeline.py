@@ -23,8 +23,8 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
     package_path.write_text(json.dumps(package), encoding="utf-8")
 
     class FakeWorkflow:
-        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid):
-            calls.append(("images", project_id, account_label, mode, product_uid))
+        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):
+            calls.append(("images", project_id, account_label, mode, product_uid, product_card_template_id))
             return {"ok": True, "regenerated": [{"uid": "P001"}], "skipped": []}
 
         def prepare_product_recommendation_output(
@@ -37,6 +37,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             stale_product_image_policy,
             mode,
             top_uids,
+            product_card_template_id,
             package_output_path,
         ):
             calls.append(
@@ -49,6 +50,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
                     stale_product_image_policy,
                     mode,
                     top_uids,
+                    product_card_template_id,
                     package_output_path,
                 )
             )
@@ -88,6 +90,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
         stale_product_image_policy="block",
         mode="standard",
         top_uids="",
+        product_card_template_id="muban-xiaobo-1",
         package_output_path=str(package_path),
         output_path=str(output_mp4),
         cutme_root=tmp_path,
@@ -107,7 +110,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
         "later-product",
     ]
     assert calls[:2] == [
-        ("images", 3, "小燃", "missing", ""),
+        ("images", 3, "小燃", "missing", "", "muban-xiaobo-1"),
         (
             "package",
             3,
@@ -117,6 +120,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             "block",
             "standard",
             "",
+            "muban-xiaobo-1",
             str(package_path),
         ),
     ]
@@ -141,7 +145,7 @@ def test_run_final_video_pipeline_passes_absolute_paths_to_cutme(tmp_path: Path,
     commands: list[list[str]] = []
 
     class FakeWorkflow:
-        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid):
+        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):
             return {"ok": True, "regenerated": [], "skipped": []}
 
         def prepare_product_recommendation_output(self, project_id, **kwargs):
