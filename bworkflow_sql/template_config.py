@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 import re
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 # 每个模板的视频展示区域坐标（相对于 1920*1080 画布）
@@ -55,18 +59,109 @@ USER_TEMPLATES: dict[str, list[str]] = {
     "荣荣": ["荣荣-模板1", "荣荣-模板2"],
 }
 
+REMOTION_TEMPLATE_METADATA_PATH = Path(
+    os.environ.get(
+        "CUTME_REMOTION_TEMPLATE_METADATA",
+        str(
+            Path(__file__).resolve().parents[2]
+            / "赵二-工具-CutMe"
+            / "remotion-renderer"
+            / "product-card-templates.json"
+        ),
+    )
+)
+
+
+@lru_cache(maxsize=1)
+def _remotion_template_metadata() -> dict[str, dict[str, Any]]:
+    if not REMOTION_TEMPLATE_METADATA_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(REMOTION_TEMPLATE_METADATA_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    templates = payload.get("templates")
+    if not isinstance(templates, list):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for item in templates:
+        if not isinstance(item, dict):
+            continue
+        template_id = str(item.get("templateId") or "").strip()
+        if template_id:
+            result[template_id] = dict(item)
+    return result
+
+
+def get_remotion_template_metadata(template_id: str) -> dict[str, Any]:
+    """读取 CutMe Remotion-first 商品图模板元数据。"""
+    metadata = _remotion_template_metadata().get(template_id.strip())
+    if metadata is None:
+        raise ValueError(f"未知 Remotion 商品图模板：{template_id}")
+    return dict(metadata)
+
+
+def _remotion_template_by_display_name(template_name: str) -> dict[str, Any] | None:
+    normalized = template_name.strip()
+    if not normalized:
+        return None
+    for metadata in _remotion_template_metadata().values():
+        if str(metadata.get("displayName") or "").strip() == normalized:
+            return dict(metadata)
+    return None
+
+
+def _project_remotion_cover_slot(metadata: dict[str, Any]) -> dict[str, Any]:
+    slot = metadata.get("coverMediaSlot")
+    source = metadata.get("sourceCanvas")
+    placement = metadata.get("cardPlacement")
+    output = metadata.get("outputCanvas")
+    if not all(isinstance(item, dict) for item in (slot, source, placement, output)):
+        raise ValueError("Remotion 模板元数据缺少 coverMediaSlot/sourceCanvas/cardPlacement/outputCanvas")
+
+    source_width = float(source.get("width") or slot.get("sourceWidth") or 0)
+    source_height = float(source.get("height") or slot.get("sourceHeight") or 0)
+    if source_width <= 0 or source_height <= 0:
+        raise ValueError("Remotion 模板 sourceCanvas 不合法")
+
+    scale_x = float(placement.get("width") or 0) / source_width
+    scale_y = float(placement.get("height") or 0) / source_height
+    return {
+        "x": round(float(placement.get("x") or 0) + float(slot.get("x") or 0) * scale_x),
+        "y": round(float(placement.get("y") or 0) + float(slot.get("y") or 0) * scale_y),
+        "width": round(float(slot.get("width") or 0) * scale_x),
+        "height": round(float(slot.get("height") or 0) * scale_y),
+        "sourceWidth": int(output.get("width") or 1920),
+        "sourceHeight": int(output.get("height") or 1080),
+        "coordinate_mode": "canvas_rect",
+        "templateId": str(metadata.get("templateId") or ""),
+        "templateVersion": str(metadata.get("templateVersion") or ""),
+    }
+
+
+def display_video_slot_for_product_card_template_id(template_id: str) -> dict[str, Any]:
+    """根据 Remotion-first templateId 推导剪映商品视频展示槽位。"""
+    metadata = get_remotion_template_metadata(template_id)
+    return _project_remotion_cover_slot(metadata)
+
 
 def get_template_slot(template_name: str) -> dict[str, Any]:
     """根据模板名称查询视频展示区域坐标。"""
     coords = TEMPLATE_COORDS.get(template_name)
-    if coords is None:
-        raise ValueError(f"未知模板：{template_name}")
-    return dict(coords)
+    if coords is not None:
+        return dict(coords)
+    remotion_metadata = _remotion_template_by_display_name(template_name)
+    if remotion_metadata is not None:
+        return _project_remotion_cover_slot(remotion_metadata)
+    raise ValueError(f"未知模板：{template_name}")
 
 
 def display_template_for_product_card_template_id(template_id: str) -> str:
     """把商品图模板 ID 映射到剪映显示模板名。"""
-    normalized = "".join(ch for ch in template_id.strip().casefold() if ch.isalnum())
+    raw = template_id.strip()
+    if raw in _remotion_template_metadata():
+        return str(_remotion_template_metadata()[raw].get("displayName") or "")
+    normalized = "".join(ch for ch in raw.casefold() if ch.isalnum())
     return PRODUCT_CARD_TEMPLATE_IDS.get(normalized, "")
 
 
@@ -81,6 +176,9 @@ def image_set_for_template(template_name: str) -> str:
         return ""
     if "-" in template_name:
         return template_name.split("-", 1)[1]
+    match = re.match(r"^(.+?)(模板\d+)$", template_name)
+    if match:
+        return match.group(2)
     return template_name
 
 
@@ -109,4 +207,7 @@ def user_for_template(template_name: str) -> str:
     for user, templates in USER_TEMPLATES.items():
         if template_name in templates:
             return user
+    remotion_metadata = _remotion_template_by_display_name(template_name)
+    if remotion_metadata is not None:
+        return str(remotion_metadata.get("account") or "")
     return ""

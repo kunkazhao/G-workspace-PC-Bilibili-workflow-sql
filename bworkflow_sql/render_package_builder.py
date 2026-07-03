@@ -13,7 +13,11 @@ from .db import Database
 from .repositories import Repository
 from .settings import INTERNAL_WORKSPACE_ROOT
 from .subtitle_helpers import distribute_subtitle_text, probe_media_duration_seconds
-from .template_config import display_template_from_image_path, get_template_slot
+from .template_config import (
+    display_template_from_image_path,
+    get_remotion_template_metadata,
+    get_template_slot,
+)
 from .tts_helpers import DEFAULT_LOUDNORM_I, DEFAULT_LOUDNORM_LRA, DEFAULT_LOUDNORM_TP
 from .utils import safe_text, text_hash
 
@@ -675,18 +679,32 @@ def _product_card_payload(
     if not any([isinstance(data_map, dict), isinstance(slots, list), cover_asset]):
         return None
 
+    template_id = safe_text(payload.get("templateId")) or "xiaoran1"
+    template_version = safe_text(payload.get("templateVersion"))
+    cover_media_slot: dict[str, Any] = {
+        "x": 24,
+        "y": 140,
+        "width": 507,
+        "height": 318,
+        "sourceWidth": 970,
+        "sourceHeight": 480,
+    }
+    try:
+        remotion_metadata = get_remotion_template_metadata(template_id)
+    except ValueError:
+        remotion_metadata = {}
+    if remotion_metadata:
+        template_version = template_version or safe_text(remotion_metadata.get("templateVersion"))
+        metadata_slot = remotion_metadata.get("coverMediaSlot")
+        if isinstance(metadata_slot, dict):
+            cover_media_slot = dict(metadata_slot)
+
     normalized: dict[str, Any] = {
-        "templateId": safe_text(payload.get("templateId")) or "xiaoran1",
+        "templateId": template_id,
+        "templateVersion": template_version,
         "dataMap": _string_map(data_map),
         "slots": _slot_list(slots),
-        "coverMediaSlot": {
-            "x": 24,
-            "y": 140,
-            "width": 507,
-            "height": 318,
-            "sourceWidth": 970,
-            "sourceHeight": 480,
-        },
+        "coverMediaSlot": cover_media_slot,
     }
     if cover_asset:
         normalized["coverAsset"] = cover_asset
@@ -785,6 +803,7 @@ def product_card_content_fingerprint(product: dict[str, Any], product_card: dict
         "title": safe_text(product.get("title")),
         "price": safe_text(product.get("price_label")),
         "templateId": safe_text(product_card.get("templateId")),
+        "templateVersion": safe_text(product_card.get("templateVersion")),
         "coverAsset": _cover_asset_identity(safe_text(product_card.get("coverAsset"))),
         "dataMap": normalized_data_map,
         "slots": _slot_list(product_card.get("slots")),

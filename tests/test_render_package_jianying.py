@@ -125,6 +125,34 @@ def test_render_package_to_jianying_manifest_infers_template_from_product_card(t
     }
 
 
+def test_render_package_to_jianying_manifest_uses_remotion_template_metadata(tmp_path):
+    package = _package()
+    package["segments"][1]["productCard"] = {"templateId": "muban-xiaobo-1"}
+    output = tmp_path / "package.manifest.json"
+
+    manifest_path = render_package_to_jianying_manifest(
+        package,
+        output,
+        project_id=3,
+        account_label="小博",
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    product_with_video = payload["entries"][1]
+    assert payload["display_template"] == "小博模板1"
+    assert product_with_video["display_video_slot"] == {
+        "x": 859,
+        "y": 140,
+        "width": 982,
+        "height": 558,
+        "sourceWidth": 1920,
+        "sourceHeight": 1080,
+        "coordinate_mode": "canvas_rect",
+        "templateId": "muban-xiaobo-1",
+        "templateVersion": "1.0.0",
+    }
+
+
 def test_render_package_to_jianying_manifest_respects_cover_only_media_mode(tmp_path):
     package = _package()
     package["output"] = {"productMediaMode": "cover_only"}

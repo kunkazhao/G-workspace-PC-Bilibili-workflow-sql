@@ -207,3 +207,21 @@ def test_regenerate_product_card_images_creates_missing_account_binding(
     assert binding["status"] == "ready"
     assert binding["source_kind"] == "remotion"
     assert binding["text_hash"] == expected_fingerprint
+
+
+def test_product_card_fingerprint_changes_when_template_version_changes() -> None:
+    product = {"uid": "P001", "title": "Demo", "price_label": "199"}
+    product_card = {
+        "templateId": "muban-xiaobo-1",
+        "templateVersion": "1.0.0",
+        "dataMap": {"title": "Demo", "price": "199", "remark": "good", "cover": "cover.png"},
+        "slots": [{"label": "重量", "value": "4g"}],
+        "coverAsset": "cover.png",
+    }
+
+    first = product_card_content_fingerprint(product, product_card)
+    changed = dict(product_card)
+    changed["templateVersion"] = "1.0.1"
+    second = product_card_content_fingerprint(product, changed)
+
+    assert first != second

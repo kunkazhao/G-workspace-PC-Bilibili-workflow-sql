@@ -1,7 +1,10 @@
 from bworkflow_sql.template_config import (
     available_templates,
+    display_video_slot_for_product_card_template_id,
     display_template_from_image_path,
+    display_template_for_product_card_template_id,
     get_template_slot,
+    get_remotion_template_metadata,
     image_set_for_template,
     user_for_template,
 )
@@ -115,4 +118,46 @@ def test_xiaowai_template_2_uses_html_cover_stage_slot() -> None:
         "width": 1132,
         "height": 676,
         "display_scale": 0.53,
+    }
+
+
+def test_muban_xiaobo_1_metadata_is_loaded_from_cutme_remotion_contract() -> None:
+    metadata = get_remotion_template_metadata("muban-xiaobo-1")
+
+    assert metadata["displayName"] == "小博模板1"
+    assert metadata["account"] == "小博"
+    assert metadata["templateVersion"] == "1.0.0"
+    assert metadata["sourceCanvas"] == {"width": 970, "height": 480}
+    assert metadata["cardPlacement"] == {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 960,
+        "anchor": "top",
+        "bottomReserve": 120,
+    }
+    assert metadata["coverMediaSlot"] == {
+        "x": 434,
+        "y": 70,
+        "width": 496,
+        "height": 279,
+        "sourceWidth": 970,
+        "sourceHeight": 480,
+        "fitMode": "contain",
+        "anchor": "center",
+    }
+
+
+def test_muban_xiaobo_1_video_slot_is_projected_from_remotion_metadata() -> None:
+    assert display_template_for_product_card_template_id("muban-xiaobo-1") == "小博模板1"
+    assert display_video_slot_for_product_card_template_id("muban-xiaobo-1") == {
+        "x": 859,
+        "y": 140,
+        "width": 982,
+        "height": 558,
+        "sourceWidth": 1920,
+        "sourceHeight": 1080,
+        "coordinate_mode": "canvas_rect",
+        "templateId": "muban-xiaobo-1",
+        "templateVersion": "1.0.0",
     }
