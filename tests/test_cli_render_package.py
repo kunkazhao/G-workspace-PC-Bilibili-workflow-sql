@@ -93,6 +93,27 @@ def test_template_calibrate_parser_registers_command():
     assert args.product_media_mode == "video_preferred"
 
 
+def test_template_doctor_parser_registers_command():
+    args = cli.build_parser().parse_args(
+        [
+            "template-doctor",
+            "3",
+            "--account",
+            "灏忓崥",
+            "--product-card-template-id",
+            "muban-xiaobo-1",
+            "--product-media-mode",
+            "video_preferred",
+        ]
+    )
+
+    assert args.command == "template-doctor"
+    assert args.project_id == 3
+    assert args.account == "灏忓崥"
+    assert args.product_card_template_id == "muban-xiaobo-1"
+    assert args.product_media_mode == "video_preferred"
+
+
 def test_render_final_video_parser_registers_command():
     args = cli.build_parser().parse_args(
         [
@@ -181,6 +202,19 @@ def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):
     ]
 
 
+def test_product_images_help_requires_explicit_product_card_template() -> None:
+    parser = cli.build_parser()
+    product_images = parser._subparsers._group_actions[0].choices["product-images"]
+    action = next(
+        action
+        for action in product_images._actions
+        if "--product-card-template-id" in action.option_strings
+    )
+
+    assert "required for still/product-image generation" in action.help
+    assert "defaults to the account template" not in action.help
+
+
 def test_cmd_template_calibrate_writes_probe_json(capsys, monkeypatch):
     calls: list[dict[str, object]] = []
 
@@ -234,6 +268,57 @@ def test_cmd_template_calibrate_writes_probe_json(capsys, monkeypatch):
             "product_uid": "P001",
             "draft_name": "校准-P001",
             "draft_root": "drafts",
+            "product_media_mode": "video_preferred",
+        }
+    ]
+
+
+def test_cmd_template_doctor_writes_diagnostic_json(capsys, monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class FakeWorkflow:
+        def template_doctor(
+            self,
+            project_id,
+            *,
+            account_label,
+            product_card_template_id,
+            product_media_mode,
+        ):
+            calls.append(
+                {
+                    "project_id": project_id,
+                    "account_label": account_label,
+                    "product_card_template_id": product_card_template_id,
+                    "product_media_mode": product_media_mode,
+                }
+            )
+            return {
+                "ok": False,
+                "status": "issues_found",
+                "issues": [{"code": "wrong_template_binding"}],
+                "next": {"command": "python -m bworkflow_sql product-images 3"},
+            }
+
+    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
+
+    cli.cmd_template_doctor(
+        Namespace(
+            project_id=3,
+            account="灏忓崥",
+            product_card_template_id="muban-xiaobo-1",
+            product_media_mode="video_preferred",
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["issues"] == [{"code": "wrong_template_binding"}]
+    assert calls == [
+        {
+            "project_id": 3,
+            "account_label": "灏忓崥",
+            "product_card_template_id": "muban-xiaobo-1",
             "product_media_mode": "video_preferred",
         }
     ]

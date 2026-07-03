@@ -181,6 +181,8 @@ def remotion_template_id_for_user(user_label: str) -> str:
 def resolve_product_card_template(
     account_label: str,
     product_card_template_id: str = "",
+    *,
+    require_explicit: bool = False,
 ) -> dict[str, Any]:
     """Resolve the Remotion-first product-card template for one generation task.
 
@@ -199,6 +201,12 @@ def resolve_product_card_template(
         if metadata is None:
             raise ValueError(f"unknown Remotion product-card template: {requested}")
     else:
+        if require_explicit and remotion_template_id_for_user(account):
+            options = ", ".join(_remotion_template_names_for_user(account))
+            suffix = f" 可选模板：{options}" if options else ""
+            raise ValueError(
+                f"生成商品图前必须明确选择商品图模板，请传 --product-card-template-id。{suffix}"
+            )
         default_template_id = remotion_template_id_for_user(account)
         if default_template_id:
             metadata = get_remotion_template_metadata(default_template_id)

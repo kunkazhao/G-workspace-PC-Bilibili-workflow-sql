@@ -226,6 +226,7 @@ def build_product_recommendation_package(
     media_mode = safe_text(product_media_mode) or DEFAULT_PRODUCT_MEDIA_MODE
     if media_mode not in SUPPORTED_PRODUCT_MEDIA_MODES:
         raise ValueError(f"unsupported product_media_mode: {media_mode}")
+    explicit_template_requested = bool(safe_text(product_card_template_id))
     selected_template = resolve_product_card_template(
         account_label,
         product_card_template_id,
@@ -471,8 +472,19 @@ def build_product_recommendation_package(
         },
     }
     if selected_template:
-        package["output"]["productCardTemplateId"] = safe_text(selected_template.get("templateId"))
-        package["output"]["productCardTemplateVersion"] = safe_text(selected_template.get("templateVersion"))
+        template_id = safe_text(selected_template.get("templateId"))
+        template_version = safe_text(selected_template.get("templateVersion"))
+        package["output"]["productCardTemplateId"] = template_id
+        package["output"]["productCardTemplateVersion"] = template_version
+        package["output"]["productCardTemplate"] = {
+            "id": template_id,
+            "displayName": safe_text(selected_template.get("displayName")),
+            "version": template_version,
+            "confirmed": explicit_template_requested,
+            "selectionSource": "explicit"
+            if explicit_template_requested
+            else "account_default_compat",
+        }
     if output_mode == "final_mp4":
         package["output"]["subtitles"] = {
             "enabled": True,

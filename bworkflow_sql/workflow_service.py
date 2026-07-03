@@ -117,6 +117,7 @@ from .render_package_builder import (
     build_product_recommendation_package,
 )
 from .product_image_generation import regenerate_product_card_images
+from .template_doctor import diagnose_template_flow
 
 
 INTERNAL_PREFIX = "internal:"
@@ -433,6 +434,22 @@ class WorkflowService:
             mode=mode,
             product_uid=product_uid,
             product_card_template_id=product_card_template_id,
+        )
+
+    def template_doctor(
+        self,
+        project_id: int,
+        *,
+        account_label: str,
+        product_card_template_id: str = "",
+        product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
+    ) -> dict[str, Any]:
+        return diagnose_template_flow(
+            self.db,
+            project_id=project_id,
+            account_label=account_label,
+            product_card_template_id=product_card_template_id,
+            product_media_mode=product_media_mode,
         )
 
     def template_calibration_probe(

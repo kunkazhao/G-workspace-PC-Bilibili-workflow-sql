@@ -9,6 +9,7 @@ from bworkflow_sql.render_package_builder import (
 )
 from bworkflow_sql.repositories import Repository
 from bworkflow_sql.subtitle_rules import split_subtitle_text
+from bworkflow_sql.template_config import get_remotion_template_metadata
 from bworkflow_sql.utils import now_iso, text_hash
 
 
@@ -695,6 +696,59 @@ def test_build_package_overrides_legacy_product_card_template_with_account_remot
         "bottomReserve": 120,
     }
     assert product["productCard"]["outputCanvas"] == {"width": 1920, "height": 1080}
+
+
+def test_build_package_records_explicit_product_card_template_selection(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    account_label = get_remotion_template_metadata("muban-xiaobo-1")["account"]
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label=account_label,
+        output_mode="final_mp4",
+        product_card_template_id="muban-xiaobo-1",
+    )
+
+    assert result.package["output"]["productCardTemplate"] == {
+        "id": "muban-xiaobo-1",
+        "displayName": get_remotion_template_metadata("muban-xiaobo-1")["displayName"],
+        "version": "1.0.2",
+        "confirmed": True,
+        "selectionSource": "explicit",
+    }
+
+
+def test_build_package_marks_account_default_template_as_compatibility_fallback(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    account_label = get_remotion_template_metadata("muban-xiaobo-1")["account"]
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label=account_label,
+        output_mode="final_mp4",
+    )
+
+    assert result.package["output"]["productCardTemplate"] == {
+        "id": "muban-xiaobo-1",
+        "displayName": get_remotion_template_metadata("muban-xiaobo-1")["displayName"],
+        "version": "1.0.2",
+        "confirmed": False,
+        "selectionSource": "account_default_compat",
+    }
 
 
 def test_build_product_recommendation_package_downloads_remote_cover_to_category_cache(

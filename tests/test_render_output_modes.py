@@ -22,7 +22,17 @@ def test_prepare_product_recommendation_output_writes_draft_package(
     calls: list[dict[str, object]] = []
     package = {"schemaVersion": "1.0.0", "segments": [{"type": "product_recommendation"}]}
 
-    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode, mode, top_uids):
+    def fake_build(
+        db,
+        *,
+        project_id,
+        account_label,
+        output_mode,
+        product_media_mode,
+        product_card_template_id,
+        mode,
+        top_uids,
+    ):
         calls.append(
             {
                 "db": db,
@@ -30,6 +40,7 @@ def test_prepare_product_recommendation_output_writes_draft_package(
                 "account_label": account_label,
                 "output_mode": output_mode,
                 "product_media_mode": product_media_mode,
+                "product_card_template_id": product_card_template_id,
                 "mode": mode,
                 "top_uids": top_uids,
             }
@@ -61,6 +72,7 @@ def test_prepare_product_recommendation_output_writes_draft_package(
             "account_label": "灏忓崥",
             "output_mode": "jianying_draft",
             "product_media_mode": "video_preferred",
+            "product_card_template_id": "",
             "mode": "standard",
             "top_uids": [],
         }
@@ -73,7 +85,7 @@ def test_prepare_product_recommendation_output_returns_final_mp4_next_command(
 ):
     package = {"schemaVersion": "1.0.0", "segments": [{"type": "price_transition"}]}
 
-    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode, mode, top_uids):
+    def fake_build(db, **kwargs):
         return SimpleNamespace(package=package, missing=[], stale_product_images=[])
 
     output = tmp_path / "render-package.json"
@@ -126,7 +138,7 @@ def test_prepare_product_recommendation_output_reports_missing_without_package(
 ):
     missing = [{"kind": "product_voice", "uid": "P001"}]
 
-    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode, mode, top_uids):
+    def fake_build(db, **kwargs):
         return SimpleNamespace(package={"segments": []}, missing=missing, stale_product_images=[])
 
     output = tmp_path / "render-package.json"
@@ -151,7 +163,7 @@ def test_prepare_product_recommendation_output_blocks_stale_product_images_by_de
 ):
     stale = [{"kind": "stale_product_image", "uid": "P001"}]
 
-    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode, mode, top_uids):
+    def fake_build(db, **kwargs):
         return SimpleNamespace(package={"segments": []}, missing=[], stale_product_images=stale)
 
     output = tmp_path / "render-package.json"
@@ -161,6 +173,7 @@ def test_prepare_product_recommendation_output_blocks_stale_product_images_by_de
         3,
         account_label="xiaobo",
         output_mode="jianying_draft",
+        product_card_template_id="muban-xiaobo-1",
         package_output_path=output,
     )
 
@@ -169,10 +182,10 @@ def test_prepare_product_recommendation_output_blocks_stale_product_images_by_de
     assert result["next"]["mode"] == "product_image_stale_review"
     assert "检测到商品数据变了" in result["next"]["message"]
     assert result["next"]["options"][1]["command_hint"] == (
-        "python -m bworkflow_sql product-images 3 --account xiaobo --mode stale --product-uid P001"
+        "python -m bworkflow_sql product-images 3 --account xiaobo --mode stale --product-card-template-id muban-xiaobo-1 --product-uid P001"
     )
     assert result["next"]["options"][2]["command_hint"] == (
-        "python -m bworkflow_sql product-images 3 --account xiaobo --mode all"
+        "python -m bworkflow_sql product-images 3 --account xiaobo --mode all --product-card-template-id muban-xiaobo-1"
     )
     assert not output.exists()
 
@@ -184,7 +197,7 @@ def test_prepare_product_recommendation_output_can_reuse_stale_product_images(
     package = {"schemaVersion": "1.0.0", "segments": [{"type": "product_recommendation"}]}
     stale = [{"kind": "stale_product_image", "uid": "P001"}]
 
-    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode, mode, top_uids):
+    def fake_build(db, **kwargs):
         return SimpleNamespace(package=package, missing=[], stale_product_images=stale)
 
     output = tmp_path / "render-package.json"

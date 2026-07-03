@@ -48,7 +48,11 @@ def regenerate_product_card_images(
         raise ValueError(f"project does not exist: {project_id}")
 
     renderer = render_product_card_still or render_product_card_still_via_cutme
-    selected_template = resolve_product_card_template(account_label, product_card_template_id)
+    selected_template = resolve_product_card_template(
+        account_label,
+        product_card_template_id,
+        require_explicit=True,
+    )
     selected_template_id = safe_text(selected_template.get("templateId")) or safe_text(product_card_template_id)
     default_image_set = _default_image_set_for_account(
         account_label,
@@ -109,7 +113,11 @@ def regenerate_product_card_images(
             continue
         fingerprint = product_card_content_fingerprint(product, product_card)
         stored_fingerprint = safe_text(image.get("text_hash")) if image else ""
-        is_stale = bool(stored_fingerprint and stored_fingerprint != fingerprint)
+        is_unknown_legacy_hash = bool(image and image_matches_default_template and not stored_fingerprint)
+        is_stale = bool(
+            (stored_fingerprint and stored_fingerprint != fingerprint)
+            or is_unknown_legacy_hash
+        )
         if mode_value == "stale" and not is_stale:
             skipped.append({"uid": uid, "reason": "not_stale"})
             continue
@@ -126,6 +134,8 @@ def regenerate_product_card_images(
         renderer(package_path, uid, image_path)
         if not image_path.is_file():
             raise RuntimeError(f"product card renderer did not create image: {image_path}")
+        if is_unknown_legacy_hash:
+            regenerate_reason = "unknown_legacy_image_hash"
         _upsert_image_binding_ready(
             db,
             binding_id=binding_id,

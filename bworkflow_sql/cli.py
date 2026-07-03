@@ -461,6 +461,17 @@ def cmd_template_calibrate(args: argparse.Namespace) -> None:
     _json_out(result)
 
 
+def cmd_template_doctor(args: argparse.Namespace) -> None:
+    _, _, _, wf = _init()
+    result = wf.template_doctor(
+        project_id=args.project_id,
+        account_label=args.account,
+        product_card_template_id=args.product_card_template_id or "",
+        product_media_mode=args.product_media_mode,
+    )
+    _json_out(result)
+
+
 def cmd_render_final_video(args: argparse.Namespace) -> None:
     from .final_video_pipeline import run_final_video_pipeline
 
@@ -638,7 +649,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--product-card-template-id",
         default="",
-        help="Remotion-first product-card template id or display name; defaults to the account template",
+        help="Remotion-first product-card template id or display name; required for still/product-image generation",
     )
 
     p = sub.add_parser("template-calibrate", help="生成单商品剪映模板位置校准草稿")
@@ -652,6 +663,21 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["video_preferred"],
         default="video_preferred",
         help="模板校准必须使用商品视频模式",
+    )
+
+    p = sub.add_parser("template-doctor", help="Diagnose product-card template/image/video-slot issues")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--account", required=True)
+    p.add_argument(
+        "--product-card-template-id",
+        default="",
+        help="explicit Remotion-first product-card template id or display name to diagnose",
+    )
+    p.add_argument(
+        "--product-media-mode",
+        choices=["cover_only", "video_preferred"],
+        default="video_preferred",
+        help="media mode to diagnose; video_preferred checks video-slot readiness",
     )
 
     return parser
@@ -673,6 +699,7 @@ DISPATCH = {
     "render-final-video": cmd_render_final_video,
     "product-images": cmd_product_images,
     "template-calibrate": cmd_template_calibrate,
+    "template-doctor": cmd_template_doctor,
 }
 
 

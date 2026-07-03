@@ -75,6 +75,7 @@ def test_regenerate_product_card_images_renders_stale_only_and_updates_binding(
         project_id=project_id,
         account_label="小博",
         mode="stale",
+        product_card_template_id="muban-xiaobo-1",
         render_product_card_still=fake_render,
     )
 
@@ -102,22 +103,54 @@ def test_regenerate_product_card_images_renders_stale_only_and_updates_binding(
     assert not Path(segment["productCard"]["dataMap"]["cover"]).is_absolute()
 
 
-def test_regenerate_product_card_images_reports_noop_when_no_stale_images(tmp_path: Path):
+def test_regenerate_product_card_images_requires_explicit_template_for_still_flow(tmp_path: Path):
     db, project_id, _image_path = _seed_project_with_stale_image(tmp_path)
+
+    try:
+        regenerate_product_card_images(
+            db,
+            project_id=project_id,
+            account_label="小博",
+            mode="stale",
+            render_product_card_still=lambda *_args: (_ for _ in ()).throw(AssertionError("no render")),
+        )
+    except ValueError as exc:
+        assert "必须明确选择商品图模板" in str(exc)
+    else:
+        raise AssertionError("expected missing product-card template to fail")
+
+
+def test_regenerate_product_card_images_treats_empty_hash_as_unknown_legacy_stale(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.product_image_generation as product_images
+
+    db, project_id, image_path = _seed_project_with_stale_image(tmp_path)
     with db.connect() as conn:
         conn.execute("UPDATE asset_bindings SET text_hash='' WHERE asset_type='image'")
+    monkeypatch.setattr(product_images, "PRODUCT_IMAGE_RENDER_JOB_ROOT", tmp_path / "jobs")
+    calls: list[tuple[Path, str, Path]] = []
+
+    def fake_render(package_path: Path, product_uid: str, output_path: Path) -> Path:
+        calls.append((package_path, product_uid, output_path))
+        output_path.write_bytes(b"legacy refreshed")
+        return output_path
 
     result = regenerate_product_card_images(
         db,
         project_id=project_id,
         account_label="小博",
         mode="stale",
-        render_product_card_still=lambda *_args: (_ for _ in ()).throw(AssertionError("no render")),
+        product_card_template_id="muban-xiaobo-1",
+        render_product_card_still=fake_render,
     )
 
     assert result["ok"] is True
-    assert result["regenerated"] == []
-    assert result["skipped"][0]["uid"] == "P001"
+    assert result["regenerated"][0]["uid"] == "P001"
+    assert result["regenerated"][0]["reason"] == "unknown_legacy_image_hash"
+    assert calls == [(calls[0][0], "P001", image_path)]
+    assert image_path.read_bytes() == b"legacy refreshed"
 
 
 def test_regenerate_product_card_images_targets_default_account_template_dir(
@@ -154,6 +187,7 @@ def test_regenerate_product_card_images_targets_default_account_template_dir(
         account_label="小博",
         mode="all",
         product_uid="P001",
+        product_card_template_id="muban-xiaobo-1",
         render_product_card_still=fake_render,
     )
 
@@ -187,6 +221,7 @@ def test_regenerate_product_card_images_can_filter_single_product_uid(
         account_label="小博",
         mode="missing",
         product_uid="P001",
+        product_card_template_id="muban-xiaobo-1",
         render_product_card_still=fake_render,
     )
 

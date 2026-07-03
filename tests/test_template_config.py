@@ -183,6 +183,15 @@ def test_resolve_product_card_template_uses_explicit_template_before_account_def
     assert by_default["templateId"] == "muban-xiaobo-1"
 
 
+def test_resolve_product_card_template_can_require_explicit_still_template() -> None:
+    try:
+        resolve_product_card_template("小博", require_explicit=True)
+    except ValueError as exc:
+        assert "必须明确选择商品图模板" in str(exc)
+    else:
+        raise AssertionError("expected still/product-image flow to require explicit template")
+
+
 def test_resolve_product_card_template_rejects_template_from_other_account() -> None:
     try:
         resolve_product_card_template("小燃", "muban-xiaobo-1")
