@@ -684,6 +684,15 @@ def test_build_package_overrides_legacy_product_card_template_with_account_remot
     assert product["productCard"]["templateId"] == "muban-xiaobo-1"
     assert product["productCard"]["templateVersion"] == "1.0.1"
     assert product["productCard"]["coverMediaSlot"]["x"] == 434
+    assert product["productCard"]["cardPlacement"] == {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 960,
+        "anchor": "top",
+        "bottomReserve": 120,
+    }
+    assert product["productCard"]["outputCanvas"] == {"width": 1920, "height": 1080}
 
 
 def test_build_product_recommendation_package_downloads_remote_cover_to_category_cache(

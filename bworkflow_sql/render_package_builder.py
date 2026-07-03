@@ -713,6 +713,10 @@ def _product_card_payload(
         "slots": _slot_list(slots),
         "coverMediaSlot": cover_media_slot,
     }
+    for metadata_key in ("cardPlacement", "outputCanvas"):
+        metadata_value = remotion_metadata.get(metadata_key)
+        if isinstance(metadata_value, dict):
+            normalized[metadata_key] = dict(metadata_value)
     if cover_asset:
         normalized["coverAsset"] = cover_asset
         normalized["dataMap"]["cover"] = cover_asset
