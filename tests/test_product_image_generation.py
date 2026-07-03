@@ -97,7 +97,7 @@ def test_regenerate_product_card_images_renders_stale_only_and_updates_binding(
     assert binding["source_kind"] == "remotion"
     assert segment["productCardFingerprint"] == expected_fingerprint
     assert segment["productCard"]["templateId"] == "muban-xiaobo-1"
-    assert segment["productCard"]["templateVersion"] == "1.0.1"
+    assert segment["productCard"]["templateVersion"] == "1.0.2"
     assert not Path(segment["productCard"]["coverAsset"]).is_absolute()
     assert not Path(segment["productCard"]["dataMap"]["cover"]).is_absolute()
 

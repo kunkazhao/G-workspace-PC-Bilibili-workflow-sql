@@ -313,7 +313,7 @@ def test_build_product_recommendation_package_from_ready_assets(
     assert products[1]["videoAsset"] is None
     product_card = products[0]["productCard"]
     assert product_card["templateId"] == "muban-xiaobo-1"
-    assert product_card["templateVersion"] == "1.0.1"
+    assert product_card["templateVersion"] == "1.0.2"
     assert product_card["dataMap"]["title"] == "Alpha Keyboard"
     assert product_card["dataMap"]["price"] == "200-300"
     assert product_card["dataMap"]["remark"] == "A compact keyboard with stable wireless connection."
@@ -682,8 +682,8 @@ def test_build_package_overrides_legacy_product_card_template_with_account_remot
     )
 
     assert product["productCard"]["templateId"] == "muban-xiaobo-1"
-    assert product["productCard"]["templateVersion"] == "1.0.1"
-    assert product["productCard"]["coverMediaSlot"]["x"] == 434
+    assert product["productCard"]["templateVersion"] == "1.0.2"
+    assert product["productCard"]["coverMediaSlot"]["x"] == 442
     assert product["productCard"]["cardPlacement"] == {
         "x": 0,
         "y": 0,

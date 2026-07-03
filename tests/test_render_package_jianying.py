@@ -141,15 +141,15 @@ def test_render_package_to_jianying_manifest_uses_remotion_template_metadata(tmp
     product_with_video = payload["entries"][1]
     assert payload["display_template"] == "小博模板1"
     assert product_with_video["display_video_slot"] == {
-        "x": 859,
-        "y": 140,
+        "x": 875,
+        "y": 138,
         "width": 982,
         "height": 558,
         "sourceWidth": 1920,
         "sourceHeight": 1080,
         "coordinate_mode": "canvas_rect",
         "templateId": "muban-xiaobo-1",
-        "templateVersion": "1.0.1",
+        "templateVersion": "1.0.2",
     }
 
 

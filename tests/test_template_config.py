@@ -135,7 +135,7 @@ def test_muban_xiaobo_1_metadata_is_loaded_from_cutme_remotion_contract() -> Non
 
     assert metadata["displayName"] == "小博模板1"
     assert metadata["account"] == "小博"
-    assert metadata["templateVersion"] == "1.0.1"
+    assert metadata["templateVersion"] == "1.0.2"
     assert metadata["sourceCanvas"] == {"width": 970, "height": 480}
     assert metadata["cardPlacement"] == {
         "x": 0,
@@ -146,8 +146,8 @@ def test_muban_xiaobo_1_metadata_is_loaded_from_cutme_remotion_contract() -> Non
         "bottomReserve": 120,
     }
     assert metadata["coverMediaSlot"] == {
-        "x": 434,
-        "y": 70,
+        "x": 442,
+        "y": 69,
         "width": 496,
         "height": 279,
         "sourceWidth": 970,
@@ -160,13 +160,13 @@ def test_muban_xiaobo_1_metadata_is_loaded_from_cutme_remotion_contract() -> Non
 def test_muban_xiaobo_1_video_slot_is_projected_from_remotion_metadata() -> None:
     assert display_template_for_product_card_template_id("muban-xiaobo-1") == "小博模板1"
     assert display_video_slot_for_product_card_template_id("muban-xiaobo-1") == {
-        "x": 859,
-        "y": 140,
+        "x": 875,
+        "y": 138,
         "width": 982,
         "height": 558,
         "sourceWidth": 1920,
         "sourceHeight": 1080,
         "coordinate_mode": "canvas_rect",
         "templateId": "muban-xiaobo-1",
-        "templateVersion": "1.0.1",
+        "templateVersion": "1.0.2",
     }
