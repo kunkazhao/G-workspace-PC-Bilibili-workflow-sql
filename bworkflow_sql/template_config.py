@@ -165,6 +165,19 @@ def display_template_for_product_card_template_id(template_id: str) -> str:
     return PRODUCT_CARD_TEMPLATE_IDS.get(normalized, "")
 
 
+def remotion_template_id_for_user(user_label: str) -> str:
+    account = user_label.strip()
+    if not account:
+        return ""
+    for metadata in _remotion_template_metadata().values():
+        if str(metadata.get("account") or "").strip() != account:
+            continue
+        template_id = str(metadata.get("templateId") or "").strip()
+        if template_id:
+            return template_id
+    return ""
+
+
 def _remotion_template_names_for_user(user_label: str) -> list[str]:
     account = user_label.strip()
     names: list[str] = []

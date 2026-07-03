@@ -17,6 +17,7 @@ from .template_config import (
     display_template_from_image_path,
     get_remotion_template_metadata,
     get_template_slot,
+    remotion_template_id_for_user,
 )
 from .tts_helpers import DEFAULT_LOUDNORM_I, DEFAULT_LOUDNORM_LRA, DEFAULT_LOUDNORM_TP
 from .utils import safe_text, text_hash
@@ -346,6 +347,7 @@ def build_product_recommendation_package(
                 product,
                 project=project,
                 fallback_image_path=image_path,
+                account_label=account,
             )
         except ValueError as exc:
             missing.append(
@@ -651,6 +653,7 @@ def _product_card_payload(
     *,
     project: dict[str, Any],
     fallback_image_path: Path | None,
+    account_label: str = "",
 ) -> dict[str, Any] | None:
     raw = safe_text(product.get("product_card_json"))
     if not raw:
@@ -679,8 +682,12 @@ def _product_card_payload(
     if not any([isinstance(data_map, dict), isinstance(slots, list), cover_asset]):
         return None
 
-    template_id = safe_text(payload.get("templateId")) or "xiaoran1"
+    payload_template_id = safe_text(payload.get("templateId")) or "xiaoran1"
+    account_template_id = remotion_template_id_for_user(account_label)
+    template_id = account_template_id or payload_template_id
     template_version = safe_text(payload.get("templateVersion"))
+    if account_template_id and account_template_id != payload_template_id:
+        template_version = ""
     cover_media_slot: dict[str, Any] = {
         "x": 24,
         "y": 140,
@@ -717,11 +724,13 @@ def product_card_payload_for_product(
     *,
     project: dict[str, Any],
     fallback_image_path: str | Path | None = None,
+    account_label: str = "",
 ) -> dict[str, Any] | None:
     return _product_card_payload(
         product,
         project=project,
         fallback_image_path=Path(fallback_image_path) if fallback_image_path else None,
+        account_label=account_label,
     )
 
 

@@ -60,18 +60,32 @@ def regenerate_product_card_images(
 
     for product in products:
         uid = safe_text(product.get("uid"))
+        default_image_path = _default_image_output_path(
+            project=project,
+            product=product,
+            account_label=account_label,
+        )
+        default_image_set = _default_image_set_for_account(account_label)
         image = _ready_image_asset(assets, uid=uid, account_label=account_label)
+        image_matches_default_template = bool(
+            image
+            and _image_path_uses_template(
+                Path(safe_text(image.get("path"))),
+                account_label=account_label,
+                image_set=default_image_set,
+            )
+        )
         if not image:
             if mode_value not in {"missing", "all"}:
                 skipped.append({"uid": uid, "reason": "missing_ready_image_binding"})
                 continue
-            image_path = _default_image_output_path(
-                project=project,
-                product=product,
-                account_label=account_label,
-            )
+            image_path = default_image_path
             regenerate_reason = "missing_ready_image_binding"
             binding_id = None
+        elif not image_matches_default_template:
+            image_path = default_image_path
+            regenerate_reason = "wrong_template_binding"
+            binding_id = int(image.get("id") or 0)
         else:
             image_path = Path(safe_text(image.get("path")))
             regenerate_reason = "stale_or_forced"
@@ -80,6 +94,7 @@ def regenerate_product_card_images(
             product,
             project=project,
             fallback_image_path=image_path,
+            account_label=account_label,
         )
         if not product_card:
             skipped.append({"uid": uid, "reason": "missing_product_card"})
@@ -90,7 +105,7 @@ def regenerate_product_card_images(
         if mode_value == "stale" and not is_stale:
             skipped.append({"uid": uid, "reason": "not_stale"})
             continue
-        if mode_value == "missing" and image:
+        if mode_value == "missing" and image and image_matches_default_template:
             skipped.append({"uid": uid, "reason": "already_has_ready_image_binding"})
             continue
 
@@ -297,6 +312,16 @@ def _default_image_set_for_account(account_label: str) -> str:
     if templates:
         return _safe_path_component(image_set_for_template(templates[0]))
     return "模板1"
+
+
+def _image_path_uses_template(path: Path, *, account_label: str, image_set: str) -> bool:
+    account = _safe_path_component(account_label)
+    template = _safe_path_component(image_set)
+    parts = [safe_text(part) for part in path.parts]
+    for index, part in enumerate(parts[:-1]):
+        if part == account and parts[index + 1] == template:
+            return True
+    return False
 
 
 def _filename_price_label(value: str) -> str:

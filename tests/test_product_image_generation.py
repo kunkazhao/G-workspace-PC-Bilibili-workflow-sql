@@ -96,6 +96,8 @@ def test_regenerate_product_card_images_renders_stale_only_and_updates_binding(
     assert binding["text_hash"] == expected_fingerprint
     assert binding["source_kind"] == "remotion"
     assert segment["productCardFingerprint"] == expected_fingerprint
+    assert segment["productCard"]["templateId"] == "muban-xiaobo-1"
+    assert segment["productCard"]["templateVersion"] == "1.0.1"
     assert not Path(segment["productCard"]["coverAsset"]).is_absolute()
     assert not Path(segment["productCard"]["dataMap"]["cover"]).is_absolute()
 
@@ -116,6 +118,49 @@ def test_regenerate_product_card_images_reports_noop_when_no_stale_images(tmp_pa
     assert result["ok"] is True
     assert result["regenerated"] == []
     assert result["skipped"][0]["uid"] == "P001"
+
+
+def test_regenerate_product_card_images_targets_default_account_template_dir(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.product_image_generation as product_images
+
+    db, project_id, _image_path = _seed_project_with_stale_image(tmp_path)
+    wrong_template_path = tmp_path / "images" / "keyboard" / "小博" / "模板2" / "P001.png"
+    wrong_template_path.parent.mkdir(parents=True, exist_ok=True)
+    wrong_template_path.write_bytes(b"old template 2 image")
+    with db.connect() as conn:
+        conn.execute(
+            """
+            UPDATE asset_bindings
+            SET path=?, text_hash='old-template-2'
+            WHERE project_id=? AND uid='P001' AND asset_type='image'
+            """,
+            (str(wrong_template_path), project_id),
+        )
+    monkeypatch.setattr(product_images, "PRODUCT_IMAGE_RENDER_JOB_ROOT", tmp_path / "jobs")
+    calls: list[tuple[Path, str, Path]] = []
+
+    def fake_render(package_path: Path, product_uid: str, output_path: Path) -> Path:
+        calls.append((package_path, product_uid, output_path))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"new image")
+        return output_path
+
+    result = regenerate_product_card_images(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        mode="all",
+        product_uid="P001",
+        render_product_card_still=fake_render,
+    )
+
+    expected_path = tmp_path / "images" / "keyboard" / "小博" / "模板1" / "299-P001-Alpha Keyboard.png"
+
+    assert result["regenerated"][0]["path"] == str(expected_path)
+    assert calls == [(calls[0][0], "P001", expected_path)]
 
 
 def test_regenerate_product_card_images_can_filter_single_product_uid(

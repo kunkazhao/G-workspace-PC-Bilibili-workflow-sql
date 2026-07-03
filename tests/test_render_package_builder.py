@@ -312,7 +312,8 @@ def test_build_product_recommendation_package_from_ready_assets(
     assert products[0]["videoAsset"]
     assert products[1]["videoAsset"] is None
     product_card = products[0]["productCard"]
-    assert product_card["templateId"] == "xiaoran1"
+    assert product_card["templateId"] == "muban-xiaobo-1"
+    assert product_card["templateVersion"] == "1.0.1"
     assert product_card["dataMap"]["title"] == "Alpha Keyboard"
     assert product_card["dataMap"]["price"] == "200-300"
     assert product_card["dataMap"]["remark"] == "A compact keyboard with stable wireless connection."
@@ -656,6 +657,33 @@ def test_build_final_mp4_package_uses_product_card_without_legacy_image(
     assert product["assetBindingIds"]["image"] is None
     assert product["productCard"]["coverAsset"].endswith("P001.png")
     assert "fallbackImageAsset" not in product["productCard"]
+
+
+def test_build_package_overrides_legacy_product_card_template_with_account_remotion_template(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+    )
+
+    product = next(
+        segment
+        for segment in result.package["segments"]
+        if segment.get("productUid") == "P001"
+    )
+
+    assert product["productCard"]["templateId"] == "muban-xiaobo-1"
+    assert product["productCard"]["templateVersion"] == "1.0.1"
+    assert product["productCard"]["coverMediaSlot"]["x"] == 434
 
 
 def test_build_product_recommendation_package_downloads_remote_cover_to_category_cache(
