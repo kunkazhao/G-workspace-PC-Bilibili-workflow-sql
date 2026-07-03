@@ -165,9 +165,30 @@ def display_template_for_product_card_template_id(template_id: str) -> str:
     return PRODUCT_CARD_TEMPLATE_IDS.get(normalized, "")
 
 
+def _remotion_template_names_for_user(user_label: str) -> list[str]:
+    account = user_label.strip()
+    names: list[str] = []
+    if not account:
+        return names
+    for metadata in _remotion_template_metadata().values():
+        if str(metadata.get("account") or "").strip() != account:
+            continue
+        display_name = str(metadata.get("displayName") or "").strip()
+        if display_name and display_name not in names:
+            names.append(display_name)
+    return names
+
+
 def available_templates(user_label: str) -> list[str]:
     """获取某个用户可用的模板列表。"""
-    return list(USER_TEMPLATES.get(user_label, []))
+    templates: list[str] = []
+    for template_name in [
+        *_remotion_template_names_for_user(user_label),
+        *USER_TEMPLATES.get(user_label, []),
+    ]:
+        if template_name and template_name not in templates:
+            templates.append(template_name)
+    return templates
 
 
 def image_set_for_template(template_name: str) -> str:

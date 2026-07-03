@@ -74,7 +74,16 @@ def test_xiaobo_template_2_uses_html_cover_frame_slot() -> None:
 
 
 def test_xiaobo_template_3_uses_html_cover_frame_slot() -> None:
-    assert available_templates("小博") == ["小博-模板1", "小博-模板2", "小博-模板3"]
+    remotion_display_name = display_template_for_product_card_template_id("muban-xiaobo-1")
+    templates = available_templates(user_for_template(remotion_display_name))
+
+    assert templates[0] == remotion_display_name
+    assert "小博-模板1" in templates
+    assert "小博-模板2" in templates
+    assert "小博-模板3" in templates
+    assert len(templates) == 4
+    assert user_for_template(remotion_display_name) == "小博"
+    assert image_set_for_template(remotion_display_name) == "模板1"
     assert user_for_template("小博-模板3") == "小博"
     assert image_set_for_template("小博-模板3") == "模板3"
     assert get_template_slot("小博-模板3") == {
@@ -126,7 +135,7 @@ def test_muban_xiaobo_1_metadata_is_loaded_from_cutme_remotion_contract() -> Non
 
     assert metadata["displayName"] == "小博模板1"
     assert metadata["account"] == "小博"
-    assert metadata["templateVersion"] == "1.0.0"
+    assert metadata["templateVersion"] == "1.0.1"
     assert metadata["sourceCanvas"] == {"width": 970, "height": 480}
     assert metadata["cardPlacement"] == {
         "x": 0,
@@ -159,5 +168,5 @@ def test_muban_xiaobo_1_video_slot_is_projected_from_remotion_metadata() -> None
         "sourceHeight": 1080,
         "coordinate_mode": "canvas_rect",
         "templateId": "muban-xiaobo-1",
-        "templateVersion": "1.0.0",
+        "templateVersion": "1.0.1",
     }

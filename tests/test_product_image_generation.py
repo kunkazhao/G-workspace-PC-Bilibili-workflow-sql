@@ -213,7 +213,7 @@ def test_product_card_fingerprint_changes_when_template_version_changes() -> Non
     product = {"uid": "P001", "title": "Demo", "price_label": "199"}
     product_card = {
         "templateId": "muban-xiaobo-1",
-        "templateVersion": "1.0.0",
+        "templateVersion": "1.0.1",
         "dataMap": {"title": "Demo", "price": "199", "remark": "good", "cover": "cover.png"},
         "slots": [{"label": "重量", "value": "4g"}],
         "coverAsset": "cover.png",
@@ -221,7 +221,7 @@ def test_product_card_fingerprint_changes_when_template_version_changes() -> Non
 
     first = product_card_content_fingerprint(product, product_card)
     changed = dict(product_card)
-    changed["templateVersion"] = "1.0.1"
+    changed["templateVersion"] = "1.0.2"
     second = product_card_content_fingerprint(product, changed)
 
     assert first != second

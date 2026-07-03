@@ -149,7 +149,7 @@ def test_render_package_to_jianying_manifest_uses_remotion_template_metadata(tmp
         "sourceHeight": 1080,
         "coordinate_mode": "canvas_rect",
         "templateId": "muban-xiaobo-1",
-        "templateVersion": "1.0.0",
+        "templateVersion": "1.0.1",
     }
 
 
