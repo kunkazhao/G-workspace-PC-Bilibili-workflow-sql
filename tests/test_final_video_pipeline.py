@@ -34,6 +34,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             account_label,
             output_mode,
             product_media_mode,
+            product_order_strategy,
             stale_product_image_policy,
             mode,
             top_uids,
@@ -47,6 +48,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
                     account_label,
                     output_mode,
                     product_media_mode,
+                    product_order_strategy,
                     stale_product_image_policy,
                     mode,
                     top_uids,
@@ -86,6 +88,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
         project_id=3,
         account_label="小燃",
         product_media_mode="video_preferred",
+        product_order_strategy="stable",
         product_image_mode="missing",
         stale_product_image_policy="block",
         mode="standard",
@@ -117,6 +120,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             "小燃",
             "final_mp4",
             "video_preferred",
+            "stable",
             "block",
             "standard",
             "",
@@ -125,6 +129,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
         ),
     ]
     assert result["verification"]["ffprobe"]["duration"] == 10.0
+    assert result["product_order_strategy"] == "stable"
     assert result["verification"]["loudnorm"]["output_i"] == "-11.04"
 
 

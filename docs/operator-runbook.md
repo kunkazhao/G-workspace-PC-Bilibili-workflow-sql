@@ -129,6 +129,33 @@ python -m venv "G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/.v
 "G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/.venv/Scripts/python.exe" -m pip install -r "G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/requirements-jianying.txt"
 ```
 
+### RenderPackage 商品排序策略
+
+`render-package` 和 `render-final-video` 默认使用
+`--product-order-strategy price_segment_shuffle`。B-Workflow 仍然把价格过渡段放在
+对应价格段商品前面，但只随机该价格段内部的商品；生成后的 RenderPackage 会写入
+`output.productOrderStrategy`，所以同一个包生成 MP4 和剪映草稿时顺序一致、可复现。
+
+只有用户明确要求旧顺序或稳定复现时，才加 `--product-order-strategy stable`。如果使用
+`--mode top --top-uids UID1,UID2`，置顶 UID 必须保持用户给定顺序排在最前面；只有剩余商品
+参与段内随机或稳定排序。没有可匹配价格段时保持正常稳定顺序，不打乱整批商品。
+
+### Final MP4 字幕样式
+
+`render-final-video` / `render-package --output-mode final_mp4` 默认写入
+`output.subtitles.enabled=true` 和 `styleScope="global"`，并从 CutMe 的全局
+生产样式池里随机选择一个 concrete `styleId`。当前生产池为：
+`classic_white`、`impact_yellow`、`panel_white`、`warm_cream`、`tech_cyan`、
+`orange_energy`。
+
+B-Workflow 只负责选择并写入 styleId，以及生成 segment-local
+`subtitles[]`；不要在 SQL 项目里复制 CutMe 的 ASS 视觉参数。旧 styleId
+兼容由 CutMe 处理。需要先看效果时，在 CutMe 仓库运行：
+
+```powershell
+python -m cutme --preview-subtitle-styles --output G:\workspace\赵二-工具-CutMe\render_jobs\subtitle-style-preview.png
+```
+
 ### 实际案例：充电宝品类（2026-06-20）
 
 | 项目 | 值 |

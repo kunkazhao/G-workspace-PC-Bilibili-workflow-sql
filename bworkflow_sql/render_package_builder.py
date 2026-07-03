@@ -27,7 +27,16 @@ from .utils import safe_text, text_hash
 SUPPORTED_OUTPUT_MODES = {"jianying_draft", "final_mp4"}
 SUPPORTED_PRODUCT_MEDIA_MODES = {"cover_only", "video_preferred"}
 DEFAULT_PRODUCT_MEDIA_MODE = "video_preferred"
-GLOBAL_SUBTITLE_STYLE_IDS = ("clean_white", "bold_yellow", "cyan_focus")
+SUPPORTED_PRODUCT_ORDER_STRATEGIES = {"price_segment_shuffle", "stable"}
+DEFAULT_PRODUCT_ORDER_STRATEGY = "price_segment_shuffle"
+GLOBAL_SUBTITLE_STYLE_IDS = (
+    "classic_white",
+    "impact_yellow",
+    "panel_white",
+    "warm_cream",
+    "tech_cyan",
+    "orange_energy",
+)
 PRODUCT_COVER_CACHE_ROOT = INTERNAL_WORKSPACE_ROOT / "product-covers"
 PRICE_TRANSITION_KEYWORDS = [
     "品牌完成度",
@@ -216,6 +225,7 @@ def build_product_recommendation_package(
     account_label: str,
     output_mode: str = "jianying_draft",
     product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
+    product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
     product_card_template_id: str = "",
     mode: str = "standard",
     top_uids: list[str] | None = None,
@@ -226,6 +236,9 @@ def build_product_recommendation_package(
     media_mode = safe_text(product_media_mode) or DEFAULT_PRODUCT_MEDIA_MODE
     if media_mode not in SUPPORTED_PRODUCT_MEDIA_MODES:
         raise ValueError(f"unsupported product_media_mode: {media_mode}")
+    order_strategy = safe_text(product_order_strategy) or DEFAULT_PRODUCT_ORDER_STRATEGY
+    if order_strategy not in SUPPORTED_PRODUCT_ORDER_STRATEGIES:
+        raise ValueError(f"unsupported product_order_strategy: {order_strategy}")
     explicit_template_requested = bool(safe_text(product_card_template_id))
     selected_template = resolve_product_card_template(
         account_label,
@@ -437,6 +450,7 @@ def build_product_recommendation_package(
         product_segments=product_segments,
         mode=safe_text(mode) or "standard",
         top_uids=top_uids or [],
+        product_order_strategy=order_strategy,
     )
 
     package = {
@@ -451,6 +465,7 @@ def build_product_recommendation_package(
         "output": {
             "mode": output_mode,
             "productMediaMode": media_mode,
+            "productOrderStrategy": order_strategy,
             "fps": 30,
             "width": 1920,
             "height": 1080,
@@ -515,6 +530,12 @@ def _segment_subtitles(text: str, duration: float) -> list[dict[str, Any]]:
 
 def _choose_subtitle_style_id() -> str:
     return random.SystemRandom().choice(GLOBAL_SUBTITLE_STYLE_IDS)
+
+
+def _shuffle_products(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    shuffled = list(products)
+    random.SystemRandom().shuffle(shuffled)
+    return shuffled
 
 
 def _display_video_slot_for_template(display_template: str) -> dict[str, Any]:
@@ -606,10 +627,10 @@ def _arrange_segments(
     product_segments: dict[str, dict[str, Any]],
     mode: str,
     top_uids: list[str],
+    product_order_strategy: str,
 ) -> list[dict[str, Any]]:
     segments: list[dict[str, Any]] = []
     top_set = {uid.casefold() for uid in top_uids} if mode == "top" else set()
-    used_price_labels: set[str] = set()
 
     for product in products:
         uid = safe_text(product.get("uid"))
@@ -619,22 +640,115 @@ def _arrange_segments(
         if segment:
             segments.append(segment)
 
+    remaining_products = [
+        product
+        for product in products
+        if safe_text(product.get("uid")).casefold() not in top_set
+        and product_segments.get(safe_text(product.get("uid")))
+    ]
+    if product_order_strategy == "price_segment_shuffle" and _has_matching_price_groups(
+        remaining_products,
+        price_blocks,
+    ):
+        segments.extend(
+            _arrange_price_segment_shuffle(
+                remaining_products,
+                price_blocks=price_blocks,
+                price_segments=price_segments,
+                product_segments=product_segments,
+            )
+        )
+        return segments
+
+    used_price_labels: set[str] = set()
+    segments.extend(
+        _arrange_stable_price_segments(
+            remaining_products,
+            price_blocks=price_blocks,
+            price_segments=price_segments,
+            product_segments=product_segments,
+            used_price_labels=used_price_labels,
+        )
+    )
+    return segments
+
+
+def _arrange_stable_price_segments(
+    products: list[dict[str, Any]],
+    *,
+    price_blocks: list[dict[str, Any]],
+    price_segments: dict[str, dict[str, Any]],
+    product_segments: dict[str, dict[str, Any]],
+    used_price_labels: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    labels = used_price_labels if used_price_labels is not None else set()
     for product in products:
         uid = safe_text(product.get("uid"))
-        if uid.casefold() in top_set:
-            continue
         segment = product_segments.get(uid)
         if not segment:
             continue
         price_label = _matching_price_label(product, price_blocks)
-        if price_label and price_label not in used_price_labels:
+        if price_label and price_label not in labels:
             price_segment = price_segments.get(price_label)
             if price_segment:
                 segments.append(price_segment)
-                used_price_labels.add(price_label)
+                labels.add(price_label)
         segments.append(segment)
-
     return segments
+
+
+def _arrange_price_segment_shuffle(
+    products: list[dict[str, Any]],
+    *,
+    price_blocks: list[dict[str, Any]],
+    price_segments: dict[str, dict[str, Any]],
+    product_segments: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    ordered_labels: list[str] = []
+    unmatched: list[dict[str, Any]] = []
+    for product in products:
+        price_label = _matching_price_label(product, price_blocks)
+        if price_label:
+            if price_label not in grouped:
+                ordered_labels.append(price_label)
+            grouped.setdefault(price_label, []).append(product)
+        else:
+            unmatched.append(product)
+
+    used_price_labels: set[str] = set()
+    for label in ordered_labels:
+        group = grouped.get(label, [])
+        if not group:
+            continue
+        price_segment = price_segments.get(label)
+        if price_segment:
+            segments.append(price_segment)
+            used_price_labels.add(label)
+        for product in _shuffle_products(group):
+            segment = product_segments.get(safe_text(product.get("uid")))
+            if segment:
+                segments.append(segment)
+
+    if unmatched:
+        segments.extend(
+            _arrange_stable_price_segments(
+                unmatched,
+                price_blocks=price_blocks,
+                price_segments=price_segments,
+                product_segments=product_segments,
+                used_price_labels=used_price_labels,
+            )
+        )
+    return segments
+
+
+def _has_matching_price_groups(products: list[dict[str, Any]], price_blocks: list[dict[str, Any]]) -> bool:
+    if not price_blocks:
+        return False
+    return any(_matching_price_label(product, price_blocks) for product in products)
 
 
 def _matching_price_label(product: dict[str, Any], price_blocks: list[dict[str, Any]]) -> str:

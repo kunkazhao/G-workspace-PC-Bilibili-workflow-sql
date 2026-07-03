@@ -112,7 +112,9 @@ from .draft_helpers import (  # noqa: F401 – re-exported
 
 from .render_package_builder import (
     DEFAULT_PRODUCT_MEDIA_MODE,
+    DEFAULT_PRODUCT_ORDER_STRATEGY,
     SUPPORTED_PRODUCT_MEDIA_MODES,
+    SUPPORTED_PRODUCT_ORDER_STRATEGIES,
     SUPPORTED_OUTPUT_MODES,
     build_product_recommendation_package,
 )
@@ -329,6 +331,7 @@ class WorkflowService:
         account_label: str,
         output_mode: str,
         product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
+        product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
         stale_product_image_policy: str = "block",
         mode: str = "standard",
         top_uids: str | list[str] | None = None,
@@ -341,6 +344,9 @@ class WorkflowService:
         media_mode = safe_text(product_media_mode) or DEFAULT_PRODUCT_MEDIA_MODE
         if media_mode not in SUPPORTED_PRODUCT_MEDIA_MODES:
             raise ValueError(f"unsupported product_media_mode: {media_mode}")
+        order_strategy = safe_text(product_order_strategy) or DEFAULT_PRODUCT_ORDER_STRATEGY
+        if order_strategy not in SUPPORTED_PRODUCT_ORDER_STRATEGIES:
+            raise ValueError(f"unsupported product_order_strategy: {order_strategy}")
         stale_policy = safe_text(stale_product_image_policy) or "block"
         if stale_policy not in {"block", "reuse"}:
             raise ValueError(f"unsupported stale_product_image_policy: {stale_policy}")
@@ -353,6 +359,7 @@ class WorkflowService:
             account_label=account_label,
             output_mode=output_mode_value,
             product_media_mode=media_mode,
+            product_order_strategy=order_strategy,
             product_card_template_id=product_card_template_id,
             mode=sequence_mode,
             top_uids=top_uid_list,
@@ -370,6 +377,7 @@ class WorkflowService:
             "account": account_label,
             "output_mode": output_mode_value,
             "product_media_mode": media_mode,
+            "product_order_strategy": order_strategy,
             "product_card_template_id": safe_text(product_card_template_id) or None,
             "mode": sequence_mode,
             "top_uids": top_uid_list,

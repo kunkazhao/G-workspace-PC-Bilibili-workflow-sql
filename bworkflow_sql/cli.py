@@ -427,6 +427,7 @@ def cmd_render_package(args: argparse.Namespace) -> None:
         account_label=args.account,
         output_mode=args.output_mode,
         product_media_mode=args.product_media_mode,
+        product_order_strategy=args.product_order_strategy,
         stale_product_image_policy=getattr(args, "stale_product_image_policy", "block"),
         mode=args.mode,
         top_uids=args.top_uids,
@@ -481,6 +482,7 @@ def cmd_render_final_video(args: argparse.Namespace) -> None:
         project_id=args.project_id,
         account_label=args.account,
         product_media_mode=args.product_media_mode,
+        product_order_strategy=args.product_order_strategy,
         product_image_mode=args.product_image_mode,
         stale_product_image_policy=args.stale_product_image_policy,
         mode=args.mode,
@@ -581,6 +583,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="product display media: cover_only uses only the cover image; video_preferred uses product video when available",
     )
     p.add_argument(
+        "--product-order-strategy",
+        choices=["price_segment_shuffle", "stable"],
+        default="price_segment_shuffle",
+        help="product order strategy: price_segment_shuffle shuffles products within each price segment; stable keeps the synced order",
+    )
+    p.add_argument(
         "--stale-product-image-policy",
         choices=["block", "reuse"],
         default="block",
@@ -608,6 +616,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["cover_only", "video_preferred"],
         default="video_preferred",
         help="cover_only uses only the cover image; video_preferred uses product video when available",
+    )
+    p.add_argument(
+        "--product-order-strategy",
+        choices=["price_segment_shuffle", "stable"],
+        default="price_segment_shuffle",
+        help="price_segment_shuffle shuffles products within each price segment; stable keeps the synced order",
     )
     p.add_argument(
         "--product-image-mode",

@@ -295,8 +295,19 @@ def test_prepare_product_recommendation_output_writes_jianying_manifest(
     tmp_path,
     monkeypatch,
 ):
-    def fake_build(db, *, project_id, account_label, output_mode, product_media_mode, mode, top_uids):
-        return SimpleNamespace(package=_package(), missing=[])
+    def fake_build(
+        db,
+        *,
+        project_id,
+        account_label,
+        output_mode,
+        product_media_mode,
+        product_order_strategy,
+        product_card_template_id,
+        mode,
+        top_uids,
+    ):
+        return SimpleNamespace(package=_package(), missing=[], stale_product_images=[])
 
     output = tmp_path / "render-package.json"
     monkeypatch.setattr(workflow_service, "build_product_recommendation_package", fake_build)

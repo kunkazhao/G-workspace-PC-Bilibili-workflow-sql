@@ -350,7 +350,7 @@ def test_final_mp4_package_includes_subtitles_from_shared_split_rules(
             (text_hash(text), block_id),
         )
     monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 6.0)
-    monkeypatch.setattr(builder, "_choose_subtitle_style_id", lambda: "bold_yellow")
+    monkeypatch.setattr(builder, "_choose_subtitle_style_id", lambda: "impact_yellow")
 
     result = build_product_recommendation_package(
         db,
@@ -361,7 +361,7 @@ def test_final_mp4_package_includes_subtitles_from_shared_split_rules(
     )
 
     assert result.package["output"]["subtitles"]["enabled"] is True
-    assert result.package["output"]["subtitles"]["styleId"] == "bold_yellow"
+    assert result.package["output"]["subtitles"]["styleId"] == "impact_yellow"
     assert result.package["output"]["subtitles"]["styleScope"] == "global"
     product = next(
         segment
@@ -373,6 +373,19 @@ def test_final_mp4_package_includes_subtitles_from_shared_split_rules(
     assert product["subtitles"][0]["start"] == 0.0
     assert product["subtitles"][-1]["end"] == 6.0
     assert all(item["end"] > item["start"] for item in product["subtitles"])
+
+
+def test_final_mp4_subtitle_random_pool_has_six_styles():
+    import bworkflow_sql.render_package_builder as builder
+
+    assert builder.GLOBAL_SUBTITLE_STYLE_IDS == (
+        "classic_white",
+        "impact_yellow",
+        "panel_white",
+        "warm_cream",
+        "tech_cyan",
+        "orange_energy",
+    )
 
 
 def test_price_transition_card_uses_fill_slots_with_voice_timing(
@@ -621,6 +634,130 @@ def test_build_product_recommendation_package_orders_price_groups_after_top_prod
         ("product_recommendation", "P002"),
         ("price_transition", "400元以上"),
         ("product_recommendation", "P004"),
+    ]
+
+
+def test_build_product_recommendation_package_shuffles_within_price_groups_by_default(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_price_group_package_data(tmp_path)
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    monkeypatch.setattr(builder, "_shuffle_products", lambda products: list(reversed(products)))
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小燃",
+        output_mode="final_mp4",
+    )
+
+    assert [
+        segment.get("productUid") or segment.get("priceRangeLabel")
+        for segment in result.package["segments"]
+    ] == [
+        "200元以下",
+        "P002",
+        "P001",
+        "200-400元",
+        "P003",
+        "400元以上",
+        "P004",
+    ]
+    assert result.package["output"]["productOrderStrategy"] == "price_segment_shuffle"
+
+
+def test_build_product_recommendation_package_can_keep_stable_price_group_order(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_price_group_package_data(tmp_path)
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    monkeypatch.setattr(builder, "_shuffle_products", lambda products: list(reversed(products)))
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小燃",
+        output_mode="final_mp4",
+        product_order_strategy="stable",
+    )
+
+    assert [
+        segment.get("productUid") or segment.get("priceRangeLabel")
+        for segment in result.package["segments"]
+    ] == [
+        "200元以下",
+        "P001",
+        "P002",
+        "200-400元",
+        "P003",
+        "400元以上",
+        "P004",
+    ]
+    assert result.package["output"]["productOrderStrategy"] == "stable"
+
+
+def test_build_product_recommendation_package_keeps_top_products_order_before_shuffle(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_price_group_package_data(tmp_path)
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    monkeypatch.setattr(builder, "_shuffle_products", lambda products: list(reversed(products)))
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小燃",
+        output_mode="final_mp4",
+        mode="top",
+        top_uids=["P003", "P001"],
+    )
+
+    assert [
+        segment.get("productUid") or segment.get("priceRangeLabel")
+        for segment in result.package["segments"]
+    ] == [
+        "P003",
+        "P001",
+        "200元以下",
+        "P002",
+        "400元以上",
+        "P004",
+    ]
+
+
+def test_build_product_recommendation_package_does_not_shuffle_when_no_price_groups(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_price_group_package_data(tmp_path)
+    with db.connect() as conn:
+        conn.execute("UPDATE script_blocks SET active=0 WHERE script_type='price_transition'")
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    monkeypatch.setattr(builder, "_shuffle_products", lambda products: list(reversed(products)))
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小燃",
+        output_mode="final_mp4",
+    )
+
+    assert [segment["productUid"] for segment in result.package["segments"]] == [
+        "P001",
+        "P002",
+        "P003",
+        "P004",
     ]
 
 

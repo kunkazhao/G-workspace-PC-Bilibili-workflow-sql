@@ -17,6 +17,8 @@ def test_render_package_parser_registers_command():
             "final_mp4",
             "--product-media-mode",
             "cover_only",
+            "--product-order-strategy",
+            "stable",
             "--stale-product-image-policy",
             "reuse",
             "--mode",
@@ -35,6 +37,7 @@ def test_render_package_parser_registers_command():
     assert args.account == "xiaobo"
     assert args.output_mode == "final_mp4"
     assert args.product_media_mode == "cover_only"
+    assert args.product_order_strategy == "stable"
     assert args.stale_product_image_policy == "reuse"
     assert args.mode == "top"
     assert args.top_uids == "P003,P001"
@@ -123,6 +126,8 @@ def test_render_final_video_parser_registers_command():
             "小燃",
             "--product-media-mode",
             "cover_only",
+            "--product-order-strategy",
+            "stable",
             "--product-image-mode",
             "missing",
             "--stale-product-image-policy",
@@ -144,6 +149,7 @@ def test_render_final_video_parser_registers_command():
     assert args.project_id == 3
     assert args.account == "小燃"
     assert args.product_media_mode == "cover_only"
+    assert args.product_order_strategy == "stable"
     assert args.product_image_mode == "missing"
     assert args.stale_product_image_policy == "reuse"
     assert args.mode == "top"
@@ -339,6 +345,7 @@ def test_cmd_render_package_writes_success_json_and_package(
             account_label,
             output_mode,
             product_media_mode,
+            product_order_strategy,
             stale_product_image_policy,
             mode,
             top_uids,
@@ -351,6 +358,7 @@ def test_cmd_render_package_writes_success_json_and_package(
                     "account_label": account_label,
                     "output_mode": output_mode,
                     "product_media_mode": product_media_mode,
+                    "product_order_strategy": product_order_strategy,
                     "stale_product_image_policy": stale_product_image_policy,
                     "mode": mode,
                     "top_uids": top_uids,
@@ -381,6 +389,7 @@ def test_cmd_render_package_writes_success_json_and_package(
             account="xiaobo",
             output_mode="jianying_draft",
             product_media_mode="video_preferred",
+            product_order_strategy="price_segment_shuffle",
             stale_product_image_policy="block",
             mode="standard",
             top_uids="",
@@ -407,6 +416,7 @@ def test_cmd_render_package_writes_success_json_and_package(
             "account_label": "xiaobo",
             "output_mode": "jianying_draft",
             "product_media_mode": "video_preferred",
+            "product_order_strategy": "price_segment_shuffle",
             "stale_product_image_policy": "block",
             "mode": "standard",
             "top_uids": "",
@@ -431,6 +441,7 @@ def test_cmd_render_package_reports_missing_without_writing_package(
             account_label,
             output_mode,
             product_media_mode,
+            product_order_strategy,
             stale_product_image_policy,
             mode,
             top_uids,
@@ -456,6 +467,8 @@ def test_cmd_render_package_reports_missing_without_writing_package(
             account="xiaobo",
             output_mode="jianying_draft",
             product_media_mode="video_preferred",
+            product_order_strategy="price_segment_shuffle",
+            stale_product_image_policy="block",
             mode="standard",
             top_uids="",
             product_card_template_id="muban-xiaobo-1",
