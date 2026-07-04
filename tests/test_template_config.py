@@ -64,6 +64,44 @@ def test_xiaowai_template_1_uses_jianying_panel_coordinates() -> None:
     }
 
 
+def test_xiaowai_remotion_template_1_is_available_ahead_of_legacy_template() -> None:
+    templates = available_templates("小歪")
+
+    assert templates[0] == "小歪模板1"
+    assert "小歪-模板1" in templates
+    assert user_for_template("小歪模板1") == "小歪"
+    assert image_set_for_template("小歪模板1") == "模板1"
+    assert display_template_for_product_card_template_id("muban-xiaowai-1") == "小歪模板1"
+
+
+def test_xiaowai_remotion_template_1_video_slot_is_projected_from_metadata() -> None:
+    metadata = get_remotion_template_metadata("muban-xiaowai-1")
+
+    assert metadata["displayName"] == "小歪模板1"
+    assert metadata["account"] == "小歪"
+    assert metadata["coverMediaSlot"] == {
+        "x": 22,
+        "y": 168,
+        "width": 496,
+        "height": 279,
+        "sourceWidth": 970,
+        "sourceHeight": 480,
+        "fitMode": "contain",
+        "anchor": "center",
+    }
+    assert display_video_slot_for_product_card_template_id("muban-xiaowai-1") == {
+        "x": 44,
+        "y": 336,
+        "width": 982,
+        "height": 558,
+        "sourceWidth": 1920,
+        "sourceHeight": 1080,
+        "coordinate_mode": "canvas_rect",
+        "templateId": "muban-xiaowai-1",
+        "templateVersion": "1.0.0",
+    }
+
+
 def test_xiaobo_template_2_uses_html_cover_frame_slot() -> None:
     assert get_template_slot("小博-模板2") == {
         "x": 1015,
