@@ -148,7 +148,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     _, repo, _, wf = _init()
     project = repo.project(args.project_id)
     if not project:
-        _json_err(f"项目不存在: {args.project_id}")
+        _json_err(f"project does not exist: {args.project_id}")
 
     products = repo.products(args.project_id, include_removed=False)
     blocks = repo.script_blocks(args.project_id)
@@ -355,6 +355,26 @@ def cmd_outline(args: argparse.Namespace) -> None:
 
 
 # ── scaffold ──────────────────────────────────────────────────────────
+def cmd_research_pack(args: argparse.Namespace) -> None:
+    from .research_pack_service import ResearchPackService
+
+    db, repo, _, _ = _init()
+    project = repo.project(args.project_id)
+    if not project:
+        _json_err(f"project does not exist: {args.project_id}")
+
+    service = ResearchPackService(db)
+    result = service.init_or_update_pack(args.project_id, target_path=args.output or None)
+    _json_out(
+        {
+            "ok": True,
+            "target_path": result["target_path"],
+            "added": len(result["added"]),
+            "preserved": len(result["preserved"]),
+            "total": result["total"],
+        }
+    )
+
 
 def cmd_intro_plan(args: argparse.Namespace) -> None:
     from .intro_plan_writer import write_intro_plan_for_project
@@ -716,6 +736,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("project_id", type=int)
     p.add_argument("--output", "-o", help="MD 输出路径（默认按品类名生成）")
 
+    p = sub.add_parser("research-pack", help="Create/update the category+scheme research evidence pack skeleton")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--output", "-o", help="research pack output path; defaults to WriteSpace 0.资料采集包")
+
     # intro-plan
     p = sub.add_parser("intro-plan", help="用 CutMe 引言模板槽位生成文案和 intro_plan")
     p.add_argument("project_id", type=int)
@@ -928,6 +952,7 @@ DISPATCH = {
     "assemble-plan": cmd_assemble_plan,
     "jianying": cmd_jianying,
     "outline": cmd_outline,
+    "research-pack": cmd_research_pack,
     "intro-plan": cmd_intro_plan,
     "scaffold": cmd_scaffold,
     "assets-check": cmd_assets_check,

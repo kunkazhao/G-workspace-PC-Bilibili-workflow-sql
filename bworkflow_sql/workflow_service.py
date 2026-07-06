@@ -969,8 +969,8 @@ class WorkflowService:
         mode: str = "standard",
         account_label: str = "",
         intro_index: int = 1,
-        top_uids: list[str] | None = None,
-        product_uids: list[str] | None = None,
+        top_uids: str | list[str] | None = None,
+        product_uids: str | list[str] | None = None,
         product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
         output_markdown_path: str | Path | None = None,
         display_template: str = "",
@@ -980,11 +980,13 @@ class WorkflowService:
         output_markdown = self._spoken_markdown_path(project, output_markdown_path)
         manifest_path = self.spoken_manifest_path(project_id, output_markdown)
         order_strategy = self._validate_product_order_strategy(product_order_strategy)
+        top_uid_list = split_csv(top_uids) if isinstance(top_uids, str) else list(top_uids or [])
+        product_uid_list = split_csv(product_uids) if isinstance(product_uids, str) else list(product_uids or [])
         products = self._ordered_products(
             project_id,
             mode=mode,
-            top_uids=top_uids or [],
-            product_uids=product_uids or [],
+            top_uids=top_uid_list,
+            product_uids=product_uid_list,
             product_order_strategy=order_strategy,
         )
         blocks = self.repo.script_blocks(project_id)
@@ -1043,7 +1045,7 @@ class WorkflowService:
             )
             order += 1
 
-        top_set = {item.casefold() for item in top_uids or []}
+        top_set = {item.casefold() for item in top_uid_list}
         used_price_labels: set[str] = set()
         for product in products:
             is_top_product = product["uid"].casefold() in top_set
@@ -1111,7 +1113,7 @@ class WorkflowService:
 
         if order == 1:
             md_path = safe_text(project.get("md_path"))
-            selected_text = "、".join(product_uids or top_uids or [])
+            selected_text = "、".join(product_uid_list or top_uid_list)
             raise ValueError(
                 "没有找到可写入正文的引言、商品文案或价格过渡文案，已停止生成，避免只输出结尾文案。\n"
                 f"当前筛选：{selected_text or '全部商品'}\n"
@@ -1160,19 +1162,21 @@ class WorkflowService:
         mode: str = "standard",
         account_label: str = "",
         intro_index: int = 1,
-        top_uids: list[str] | None = None,
-        product_uids: list[str] | None = None,
+        top_uids: str | list[str] | None = None,
+        product_uids: str | list[str] | None = None,
         product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
     ) -> dict[str, Any]:
         project = self._required_project(project_id)
         account = self._resolve_account(account_label)
         account_label = safe_text(account.get("label") or account_label)
         order_strategy = self._validate_product_order_strategy(product_order_strategy)
+        top_uid_list = split_csv(top_uids) if isinstance(top_uids, str) else list(top_uids or [])
+        product_uid_list = split_csv(product_uids) if isinstance(product_uids, str) else list(product_uids or [])
         products = self._ordered_products(
             project_id,
             mode=mode,
-            top_uids=top_uids or [],
-            product_uids=product_uids or [],
+            top_uids=top_uid_list,
+            product_uids=product_uid_list,
             product_order_strategy=order_strategy,
         )
         blocks = self.repo.script_blocks(project_id)
@@ -1206,7 +1210,7 @@ class WorkflowService:
         else:
             issues.append({"level": "warning", "code": "missing_intro_block", "message": "no synced intro block"})
 
-        top_set = {item.casefold() for item in top_uids or []}
+        top_set = {item.casefold() for item in top_uid_list}
         used_price_labels: set[str] = set()
         for product in products:
             uid = safe_text(product.get("uid"))
@@ -1274,7 +1278,7 @@ class WorkflowService:
             account_label=account_label,
             intro_index=intro_index,
             mode=mode,
-            top_uids=top_uids or [],
+            top_uids=top_uid_list,
             product_order_strategy=order_strategy,
         )
         return {

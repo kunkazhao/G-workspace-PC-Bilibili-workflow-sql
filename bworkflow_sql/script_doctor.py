@@ -6,6 +6,7 @@ from typing import Any
 from .cutme_intro import find_intro_plan_for_text
 from .db import Database
 from .md_parser import ParsedMarkdown, ScriptVariant, parse_markdown_file
+from .research_pack_service import ResearchPackService
 from .repositories import Repository
 from .settings import DEFAULT_MARKDOWN_ROOT
 from .utils import safe_text, text_hash
@@ -136,7 +137,8 @@ def diagnose_script_flow(
         )
 
     price_transitions = parsed.price_transitions if parsed else []
-    if parsed and not price_transitions:
+    price_transition_ready = sum(len(item.scripts) for item in price_transitions)
+    if parsed and not price_transition_ready:
         issues.append(
             {
                 "level": "info",
@@ -169,7 +171,8 @@ def diagnose_script_flow(
             "intro_ready": len(intro_scripts),
             "product_copy_ready": product_copy_ready,
             "product_copy_library_ready": product_copy_library_ready,
-            "price_transition_ready": sum(len(item.scripts) for item in price_transitions),
+            "price_transition_sections": len(price_transitions),
+            "price_transition_ready": price_transition_ready,
             "script_blocks_synced": markdown_sync["synced_count"],
         },
         "selected_intro": {
@@ -177,7 +180,7 @@ def diagnose_script_flow(
             "source_intro_plan_path": source_intro_plan_path,
         },
         "issues": issues,
-        "next": _next_hint(project_id, issues, markdown_sync["synced"]),
+        "next": _next_hint(db, project_id, issues, markdown_sync["synced"]),
     }
 
 
@@ -275,8 +278,9 @@ def _status(issues: list[dict[str, Any]], synced: bool) -> str:
     return "ready_for_downstream"
 
 
-def _next_hint(project_id: int, issues: list[dict[str, Any]], synced: bool) -> dict[str, Any]:
+def _next_hint(db: Database, project_id: int, issues: list[dict[str, Any]], synced: bool) -> dict[str, Any]:
     codes = {safe_text(issue.get("code")) for issue in issues}
+    research_pack_path = str(ResearchPackService(db).default_pack_path(project_id))
     if "episode_markdown_needs_materialization" in codes and "missing_product_copy" not in codes:
         materialize_issue = next(
             (issue for issue in issues if safe_text(issue.get("code")) == "episode_markdown_needs_materialization"),
@@ -284,35 +288,64 @@ def _next_hint(project_id: int, issues: list[dict[str, Any]], synced: bool) -> d
         )
         return {
             "action": "materialize_episode_markdown",
+            "task": "把已写好的单品文案放入口播草稿",
             "command": f"python -m bworkflow_sql materialize-episode {project_id}",
             "source_path": safe_text(materialize_issue.get("source_path")),
+            "requires_user_final_approval": True,
         }
     if "intro_version_not_selected" in codes:
         return {
             "action": "select_intro_version",
+            "task": "选择引言版本",
             "command": f"python -m bworkflow_sql script-doctor {project_id} --intro-label 引言1",
+            "requires_user_final_approval": False,
+        }
+    if "missing_matching_intro_plan" in codes:
+        intro_issue = next(
+            (issue for issue in issues if safe_text(issue.get("code")) == "missing_matching_intro_plan"),
+            {},
+        )
+        command = safe_text(intro_issue.get("command")) or (
+            f"python -m bworkflow_sql intro-plan {project_id} --slots <slots.json> --label 引言1 --sync"
+        )
+        return {
+            "action": "create_intro_plan",
+            "task": "补引言剪辑计划",
+            "command": command,
+            "requires_user_final_approval": True,
+            "note": "引言文案必须匹配 source-intro-plan JSON；从 slots JSON 生成计划后再同步入库、配音和组装。",
         }
     if codes.intersection(
         {
             "missing_episode_markdown",
             "missing_intro_content",
             "intro_version_not_found",
-            "missing_matching_intro_plan",
             "missing_product_copy",
         }
     ):
         return {
             "action": "fill_content_units",
-            "command": f"python -m bworkflow_sql outline {project_id}",
+            "task": "写文案草稿",
+            "command": f"python -m bworkflow_sql research-pack {project_id}",
+            "outline_command": f"python -m bworkflow_sql outline {project_id}",
+            "research_pack_path": research_pack_path,
+            "requires_user_final_approval": True,
+            "note": "先建/补资料采集包并联网填证据，再写单品文案草稿；用户定稿前不入库、不配音、不组口播稿。",
         }
     if "markdown_not_synced" in codes or not synced:
         return {
             "action": "sync_markdown",
+            "task": "定稿后同步入库",
             "command": f"python -m bworkflow_sql sync {project_id} --step markdown",
+            "requires_user_final_approval": True,
+            "note": "只有用户明确确认定稿后才执行；同步后文案 hash 固定，后续配音按当前 hash 匹配。",
         }
     return {
         "action": "continue_downstream",
+        "task": "进入配音检查",
         "command": f"python -m bworkflow_sql voice-counts {project_id} --account <account>",
+        "requires_user_final_approval": False,
+        "note": "文案已入库后先检查配音，不直接组口播稿。",
     }
 
 

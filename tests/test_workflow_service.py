@@ -278,6 +278,52 @@ def test_assemble_plan_previews_sequence_without_writing_spoken_files(tmp_path: 
     assert not spoken_path.exists()
 
 
+def test_assemble_plan_top_uids_string_is_not_split_into_characters(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    repo = Repository(db)
+    service = WorkflowService(db)
+    ts = now_iso()
+    repo.upsert_products_from_master(
+        project_id,
+        [
+            {"uid": "YXEJ002", "title": "竹林鸟夜莺E1", "price_label": "59元"},
+            {"uid": "YXEJ006", "title": "Top two", "price_label": "199元"},
+            {"uid": "YXEJ007", "title": "Top three", "price_label": "399元"},
+        ],
+    )
+    with db.connect() as conn:
+        for uid, body in [
+            ("YXEJ006", "TOP TWO BODY."),
+            ("YXEJ007", "TOP THREE BODY."),
+        ]:
+            conn.execute(
+                """
+                INSERT INTO script_blocks
+                    (project_id, script_type, owner_uid, price_range_label, block_label, body, text_hash, source, source_anchor, created_at, updated_at)
+                VALUES (?, 'product', ?, '', '正文', ?, ?, 'test', '', ?, ?)
+                """,
+                (project_id, uid, body, text_hash(body), ts, ts),
+            )
+    seed_ready_voice_assets(db, project_id, tmp_path)
+
+    plan = service.assemble_spoken_script_plan(
+        project_id,
+        account_label="小燃",
+        mode="top",
+        top_uids="YXEJ006,YXEJ002",
+        product_order_strategy="price_segment_shuffle",
+    )
+
+    product_uids = [
+        entry["product_uid"]
+        for entry in plan["sequence"]
+        if entry.get("section") == "product"
+    ]
+    assert product_uids[:2] == ["YXEJ006", "YXEJ002"]
+    assert "--top-uids Y,X,E,J" not in plan["next"]["command"]
+    assert "--top-uids YXEJ006,YXEJ002" in plan["next"]["command"]
+
+
 def test_assemble_plan_blocks_product_voice_when_text_hash_changed(tmp_path: Path):
     db, project_id = seed_project(tmp_path)
     repo = Repository(db)

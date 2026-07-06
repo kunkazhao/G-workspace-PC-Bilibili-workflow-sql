@@ -72,7 +72,55 @@ Alpha 的单品文案。
     assert result["summary"]["product_copy_ready"] == 1
     assert "missing_product_copy" in issue_codes
     assert "missing_intro_content" in issue_codes
+    assert result["summary"]["price_transition_sections"] == 0
+    assert result["summary"]["price_transition_ready"] == 0
     assert result["next"]["action"] == "fill_content_units"
+    assert result["next"]["task"] == "写文案草稿"
+    assert result["next"]["command"] == f"python -m bworkflow_sql research-pack {project_id}"
+    assert result["next"]["outline_command"] == f"python -m bworkflow_sql outline {project_id}"
+    assert result["next"]["research_pack_path"].endswith("数码-键盘\\主方案.md")
+    assert result["next"]["requires_user_final_approval"] is True
+
+
+def test_script_doctor_reports_empty_price_transition_body(tmp_path: Path):
+    db, project_id, md_path = _seed_project(tmp_path)
+    intro_text = "先看清预算，再看桌面空间。"
+    md_path.write_text(
+        f"""
+## 引言文案
+
+### 引言1
+
+{intro_text}
+
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha 的单品文案。
+
+### 399元-P002-Beta Keyboard
+
+#### 正文
+
+Beta 的单品文案。
+
+## 价格过渡文案
+
+### 300-500元
+
+#### 正文1
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = diagnose_script_flow(db, project_id=project_id, intro_label="引言1")
+
+    assert result["summary"]["price_transition_sections"] == 1
+    assert result["summary"]["price_transition_ready"] == 0
+    assert any(issue["code"] == "missing_price_transition_copy" for issue in result["issues"])
 
 
 def test_script_doctor_reports_reusable_library_copy_when_episode_is_missing(tmp_path: Path, monkeypatch):
@@ -200,10 +248,59 @@ Beta 的单品文案。
     assert result["summary"]["price_transition_ready"] == 1
     assert result["selected_intro"]["label"] == "引言1"
     assert result["selected_intro"]["source_intro_plan_path"].endswith("source-intro-plan-引言1.json")
-    assert result["next"] == {
-        "action": "sync_markdown",
-        "command": f"python -m bworkflow_sql sync {project_id} --step markdown",
-    }
+    assert result["next"]["action"] == "sync_markdown"
+    assert result["next"]["command"] == f"python -m bworkflow_sql sync {project_id} --step markdown"
+    assert result["next"]["task"] == "定稿后同步入库"
+    assert result["next"]["requires_user_final_approval"] is True
+
+
+def test_script_doctor_prioritizes_missing_intro_plan_next_hint(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.cutme_intro as cutme_intro_module
+
+    monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    db, project_id, md_path = _seed_project(tmp_path)
+    intro_text = "最近想买键盘吗？先别急着看参数。"
+    md_path.write_text(
+        f"""
+## 引言文案
+
+### 引言1
+
+{intro_text}
+
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha 的单品文案。
+
+### 399元-P002-Beta Keyboard
+
+#### 正文
+
+Beta 的单品文案。
+
+## 价格过渡文案
+
+### 300-500元
+
+#### 正文
+
+这个价位开始更适合看连接和手感稳定性。
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = diagnose_script_flow(db, project_id=project_id, intro_label="引言1")
+
+    assert result["status"] == "content_incomplete"
+    assert any(issue["code"] == "missing_matching_intro_plan" for issue in result["issues"])
+    assert result["next"]["action"] == "create_intro_plan"
+    assert result["next"]["task"] == "补引言剪辑计划"
+    assert result["next"]["command"] == f"python -m bworkflow_sql intro-plan {project_id} --slots <slots.json> --label 引言1 --sync"
+    assert result["next"]["requires_user_final_approval"] is True
 
 
 def test_script_doctor_reports_ready_after_markdown_sync(tmp_path: Path, monkeypatch):
@@ -253,6 +350,7 @@ Beta 的单品文案。
     assert result["status"] == "ready_for_downstream"
     assert result["summary"]["script_blocks_synced"] == 4
     assert result["next"]["action"] == "continue_downstream"
+    assert result["next"]["task"] == "进入配音检查"
 
 
 def test_script_doctor_requires_selected_intro_when_multiple_versions(tmp_path: Path, monkeypatch):

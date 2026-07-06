@@ -41,6 +41,7 @@ DEFAULT_MASTER_API_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_MASTER_SERVICE_ROOT = Path(r"G:\workspace\bilibili-newTools-next-master")
 
 DEFAULT_MARKDOWN_ROOT = Path(r"G:\WriteSpace\B站-文案脚本\10_b站文案\3.商品文案")
+DEFAULT_RESEARCH_PACK_ROOT = Path(r"G:\WriteSpace\B站-文案脚本\10_b站文案\0.资料采集包")
 DEFAULT_IMAGE_ROOT = Path(r"G:\2026项目-b站\素材-商品ppt图片")
 DEFAULT_VIDEO_ROOT = Path(r"G:\2026项目-b站\素材-剪辑\roll-b素材")
 DEFAULT_INTRO_ASSET_ROOT = Path(r"G:\2026项目-b站\素材-自动剪辑")

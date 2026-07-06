@@ -303,8 +303,7 @@ def parse_price_transitions(lines: list[str]) -> list[PriceTransitionDoc]:
         if not current_label:
             return
         scripts = parse_script_variants(current_lines, fallback_label="正文")
-        if scripts:
-            result.append(PriceTransitionDoc(label=current_label, scripts=scripts))
+        result.append(PriceTransitionDoc(label=current_label, scripts=scripts))
 
     for raw in lines:
         match = H3_RE.match(raw.strip())
