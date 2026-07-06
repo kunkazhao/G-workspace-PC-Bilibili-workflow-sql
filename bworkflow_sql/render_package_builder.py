@@ -17,6 +17,7 @@ from .template_config import (
     display_template_from_image_path,
     get_remotion_template_metadata,
     get_template_slot,
+    image_set_for_template,
     remotion_template_id_for_user,
     resolve_product_card_template,
 )
@@ -244,6 +245,9 @@ def build_product_recommendation_package(
         account_label,
         product_card_template_id,
     )
+    selected_image_set = image_set_for_template(
+        safe_text(selected_template.get("displayName"))
+    )
 
     repo = Repository(db)
     project = repo.project(project_id)
@@ -333,6 +337,7 @@ def build_product_recommendation_package(
             uid=uid,
             account_label=account,
             allow_unscoped_account=True,
+            preferred_image_set=selected_image_set,
         )
         voice = _ready_asset(
             assets,
@@ -558,7 +563,9 @@ def _ready_asset(
     script_block_id: int | None = None,
     text_hash: str = "",
     allow_unscoped_account: bool = False,
+    preferred_image_set: str = "",
 ) -> dict[str, Any] | None:
+    preferred_set = safe_text(preferred_image_set)
     candidates: list[dict[str, Any]] = []
     for asset in assets:
         if safe_text(asset.get("asset_type")) != asset_type:
@@ -584,10 +591,25 @@ def _ready_asset(
     return sorted(
         candidates,
         key=lambda item: (
+            (
+                not _image_path_uses_template_set(
+                    Path(safe_text(item.get("path"))),
+                    image_set=preferred_set,
+                )
+                if asset_type == "image" and preferred_set
+                else False
+            ),
             safe_text(item.get("account_label")) != account_label,
             safe_text(item.get("path")),
         ),
     )[0]
+
+
+def _image_path_uses_template_set(path: Path | None, *, image_set: str) -> bool:
+    if path is None:
+        return False
+    template = safe_text(image_set)
+    return any(safe_text(part) == template for part in path.parts)
 
 
 def _absolute_file_path(value: Any) -> Path:
@@ -834,6 +856,7 @@ def _product_card_payload(
         "sourceWidth": 970,
         "sourceHeight": 480,
     }
+    video_overlay_slot: Any = None
     try:
         remotion_metadata = selected_template or get_remotion_template_metadata(template_id)
     except ValueError:
@@ -843,6 +866,7 @@ def _product_card_payload(
         metadata_slot = remotion_metadata.get("coverMediaSlot")
         if isinstance(metadata_slot, dict):
             cover_media_slot = dict(metadata_slot)
+        video_overlay_slot = remotion_metadata.get("videoOverlaySlot")
 
     normalized: dict[str, Any] = {
         "templateId": template_id,
@@ -851,6 +875,8 @@ def _product_card_payload(
         "slots": _slot_list(slots),
         "coverMediaSlot": cover_media_slot,
     }
+    if isinstance(video_overlay_slot, dict):
+        normalized["videoOverlaySlot"] = dict(video_overlay_slot)
     for metadata_key in ("cardPlacement", "outputCanvas"):
         metadata_value = remotion_metadata.get(metadata_key)
         if isinstance(metadata_value, dict):

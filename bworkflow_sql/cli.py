@@ -28,6 +28,11 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from .template_calibration_runner import (
+    load_template_calibration_targets,
+    run_template_calibration_targets,
+)
+
 def _json_out(data: Any) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
 
@@ -68,11 +73,73 @@ def cmd_projects(_args: argparse.Namespace) -> None:
                 "category": p.get("category", ""),
                 "workspace_id": p.get("workspace_id", ""),
                 "scheme_id": p.get("scheme_id", ""),
+                "scheme_name": p.get("scheme_name", ""),
                 "updated_at": p.get("updated_at", ""),
             }
             for p in projects
         ],
     })
+
+
+# ── create-project ───────────────────────────────────────────────────
+
+def cmd_create_project(args: argparse.Namespace) -> None:
+    from .settings import (
+        DEFAULT_IMAGE_ROOT,
+        DEFAULT_SPOKEN_MD_ROOT,
+        DEFAULT_VIDEO_ROOT,
+        DEFAULT_VOICE_ROOT,
+        INTERNAL_WORKSPACE_ROOT,
+    )
+    from .utils import now_iso
+
+    db, repo, sync, _ = _init()
+    existing = db.fetchone(
+        "SELECT id FROM projects WHERE workspace_id=? AND category_id=? AND scheme_id=? ORDER BY id DESC LIMIT 1",
+        (args.workspace_id, args.category_id, args.scheme_id),
+    )
+    md_path = Path(args.md_path) if args.md_path else DEFAULT_SPOKEN_MD_ROOT / args.name / "6月-小博.md"
+    project_id = db.upsert_project(
+        {
+            "id": int(existing["id"]) if existing else 0,
+            "name": args.name,
+            "workspace_id": args.workspace_id,
+            "workspace_name": args.workspace_name,
+            "category_parent_id": args.category_parent_id or "",
+            "category_parent_name": args.category_parent_name or "",
+            "category_id": args.category_id,
+            "category_name": args.category_name,
+            "scheme_id": args.scheme_id,
+            "scheme_name": args.scheme_name,
+            "md_path": str(md_path),
+            "spoken_md_path": str(md_path),
+            "image_root": str(DEFAULT_IMAGE_ROOT),
+            "video_root": str(DEFAULT_VIDEO_ROOT),
+            "voice_root": str(DEFAULT_VOICE_ROOT),
+            "output_root": str(INTERNAL_WORKSPACE_ROOT),
+            "status": "active",
+        }
+    )
+    master = sync.sync_master_scheme(project_id, apply_changes=True) if args.sync_master else None
+    project = repo.project(project_id)
+    products = repo.products(project_id, include_removed=False)
+    _json_out(
+        {
+            "ok": True,
+            "created": existing is None,
+            "project_id": project_id,
+            "project": project,
+            "scheme_product_count": len(products),
+            "master": {
+                "added": len(master.get("added", [])),
+                "updated": len(master.get("updated", [])),
+                "removed": len(master.get("removed", [])),
+            }
+            if master
+            else None,
+            "updated_at": now_iso(),
+        }
+    )
 
 
 # ── status ────────────────────────────────────────────────────────────
@@ -104,6 +171,8 @@ def cmd_status(args: argparse.Namespace) -> None:
             "category": project.get("category", ""),
             "workspace_id": project.get("workspace_id", ""),
             "scheme_id": project.get("scheme_id", ""),
+            "scheme_name": project.get("scheme_name", ""),
+            "scheme_product_count": len(products),
         },
         "counts": {
             "products": len(products),
@@ -224,6 +293,16 @@ def cmd_assemble(args: argparse.Namespace) -> None:
 
 
 # ── jianying ──────────────────────────────────────────────────────────
+
+def cmd_assemble_plan(args: argparse.Namespace) -> None:
+    _, _, _, wf = _init()
+    result = wf.assemble_spoken_script_plan(
+        args.project_id,
+        account_label=args.account or "",
+        intro_index=args.intro_index,
+    )
+    _json_out(result)
+
 
 def cmd_jianying(args: argparse.Namespace) -> None:
     from .settings import DEFAULT_JIANYING_DRAFT_ROOT
@@ -458,6 +537,27 @@ def cmd_template_calibrate(args: argparse.Namespace) -> None:
         draft_name=args.draft_name or "",
         draft_root=args.draft_root or None,
         product_media_mode=args.product_media_mode,
+        product_card_template_id=args.product_card_template_id or "",
+    )
+    _json_out(result)
+
+
+def cmd_template_calibrate_runner(args: argparse.Namespace) -> None:
+    _, _, _, wf = _init()
+    load_kwargs = {
+        "target_id": args.target or "",
+        "include_inactive": args.include_inactive,
+    }
+    if args.config:
+        targets = load_template_calibration_targets(args.config, **load_kwargs)
+    else:
+        targets = load_template_calibration_targets(**load_kwargs)
+    result = run_template_calibration_targets(
+        wf,
+        targets=targets,
+        regenerate_images=args.regenerate_images,
+        dry_run=args.dry_run,
+        draft_suffix=args.draft_suffix or "",
     )
     _json_out(result)
 
@@ -469,6 +569,25 @@ def cmd_template_doctor(args: argparse.Namespace) -> None:
         account_label=args.account,
         product_card_template_id=args.product_card_template_id or "",
         product_media_mode=args.product_media_mode,
+    )
+    _json_out(result)
+
+
+def cmd_script_doctor(args: argparse.Namespace) -> None:
+    _, _, _, wf = _init()
+    result = wf.script_doctor(
+        project_id=args.project_id,
+        intro_label=args.intro_label or "",
+    )
+    _json_out(result)
+
+
+def cmd_materialize_episode(args: argparse.Namespace) -> None:
+    _, _, _, wf = _init()
+    result = wf.materialize_episode_markdown(
+        project_id=args.project_id,
+        library_path=args.library_path or None,
+        episode_path=args.episode_path or None,
     )
     _json_out(result)
 
@@ -505,6 +624,20 @@ def build_parser() -> argparse.ArgumentParser:
     # projects
     sub.add_parser("projects", help="列出所有项目")
 
+    # create-project
+    p = sub.add_parser("create-project", help="按 Master workspace/category/scheme 创建或更新本地项目")
+    p.add_argument("--name", required=True, help="本地项目名，如 数码-桌面音响")
+    p.add_argument("--workspace-id", required=True)
+    p.add_argument("--workspace-name", default="赵二")
+    p.add_argument("--category-parent-id", default="")
+    p.add_argument("--category-parent-name", default="")
+    p.add_argument("--category-id", required=True)
+    p.add_argument("--category-name", required=True)
+    p.add_argument("--scheme-id", required=True)
+    p.add_argument("--scheme-name", required=True)
+    p.add_argument("--md-path", default="", help="绑定的口播 Markdown 路径")
+    p.add_argument("--sync-master", action="store_true", help="创建后立即同步 Master 方案商品")
+
     # status
     p = sub.add_parser("status", help="项目状态概览")
     p.add_argument("project_id", type=int)
@@ -533,6 +666,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--intro-index", type=int, default=1, help="引言版本号（1-based）")
     p.add_argument("--output", "-o", help="口播稿输出路径")
     p.add_argument("--display-template", default="")
+
+    p = sub.add_parser("assemble-plan", help="Preview spoken-script assembly without writing files")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--account", help="配音账户标签")
+    p.add_argument("--intro-index", type=int, default=1, help="intro version index, 1-based")
 
     # jianying
     p = sub.add_parser("jianying", help="生成剪映草稿")
@@ -673,11 +811,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--draft-name", default="", help="校准草稿名称")
     p.add_argument("--draft-root", default="", help="剪映草稿根目录")
     p.add_argument(
+        "--product-card-template-id",
+        required=True,
+        help="Remotion-first product-card template id or display name to calibrate",
+    )
+    p.add_argument(
         "--product-media-mode",
         choices=["video_preferred"],
         default="video_preferred",
         help="模板校准必须使用商品视频模式",
     )
+
+    p = sub.add_parser("template-calibrate-runner", help="Run standard checklist-based template calibration")
+    p.add_argument(
+        "--target",
+        default="",
+        help="Target id from config/template-calibration-targets.json; omit to run all active targets",
+    )
+    p.add_argument("--config", default="", help="Override calibration target config path")
+    p.add_argument("--draft-suffix", default="", help="Append suffix to generated draft names, for example v3")
+    p.add_argument("--dry-run", action="store_true", help="Run doctor checks without generating Jianying drafts")
+    p.add_argument("--include-inactive", action="store_true", help="Allow inactive targets from the checklist")
+    p.add_argument(
+        "--no-regenerate-images",
+        dest="regenerate_images",
+        action="store_false",
+        help="Do not run product-images automatically when doctor reports image issues",
+    )
+    p.set_defaults(regenerate_images=True)
 
     p = sub.add_parser("template-doctor", help="Diagnose product-card template/image/video-slot issues")
     p.add_argument("project_id", type=int)
@@ -694,16 +855,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="media mode to diagnose; video_preferred checks video-slot readiness",
     )
 
+    p = sub.add_parser("script-doctor", help="Diagnose phase-3 copy units, intro plan matching, and script_blocks sync")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--intro-label", default="", help="selected intro version label, for example 引言1")
+
+    p = sub.add_parser("materialize-episode", help="Materialize reusable product copy into the current episode Markdown")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--library-path", default="", help="override reusable product-copy library Markdown path")
+    p.add_argument("--episode-path", default="", help="override target episode Markdown path")
+
     return parser
 
 
 DISPATCH = {
     "projects": cmd_projects,
+    "create-project": cmd_create_project,
     "status": cmd_status,
     "sync": cmd_sync,
     "voice": cmd_voice,
     "voice-counts": cmd_voice_counts,
     "assemble": cmd_assemble,
+    "assemble-plan": cmd_assemble_plan,
     "jianying": cmd_jianying,
     "outline": cmd_outline,
     "intro-plan": cmd_intro_plan,
@@ -713,7 +885,10 @@ DISPATCH = {
     "render-final-video": cmd_render_final_video,
     "product-images": cmd_product_images,
     "template-calibrate": cmd_template_calibrate,
+    "template-calibrate-runner": cmd_template_calibrate_runner,
     "template-doctor": cmd_template_doctor,
+    "script-doctor": cmd_script_doctor,
+    "materialize-episode": cmd_materialize_episode,
 }
 
 

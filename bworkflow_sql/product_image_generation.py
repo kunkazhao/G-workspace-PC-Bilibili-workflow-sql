@@ -77,7 +77,12 @@ def regenerate_product_card_images(
             account_label=account_label,
             image_set=default_image_set,
         )
-        image = _ready_image_asset(assets, uid=uid, account_label=account_label)
+        image = _ready_image_asset(
+            assets,
+            uid=uid,
+            account_label=account_label,
+            preferred_image_set=default_image_set,
+        )
         image_matches_default_template = bool(
             image
             and _image_path_uses_template(
@@ -117,6 +122,7 @@ def regenerate_product_card_images(
         is_stale = bool(
             (stored_fingerprint and stored_fingerprint != fingerprint)
             or is_unknown_legacy_hash
+            or (image and not image_matches_default_template)
         )
         if mode_value == "stale" and not is_stale:
             skipped.append({"uid": uid, "reason": "not_stale"})
@@ -216,8 +222,10 @@ def _ready_image_asset(
     *,
     uid: str,
     account_label: str,
+    preferred_image_set: str = "",
 ) -> dict[str, Any] | None:
     account = safe_text(account_label)
+    image_set = safe_text(preferred_image_set)
     candidates: list[dict[str, Any]] = []
     for asset in assets:
         if safe_text(asset.get("asset_type")) != "image":
@@ -238,6 +246,15 @@ def _ready_image_asset(
     return sorted(
         candidates,
         key=lambda item: (
+            (
+                not _image_path_uses_template(
+                    Path(safe_text(item.get("path"))),
+                    account_label=account,
+                    image_set=image_set,
+                )
+                if image_set
+                else False
+            ),
             safe_text(item.get("account_label")) != account,
             safe_text(item.get("path")),
         ),

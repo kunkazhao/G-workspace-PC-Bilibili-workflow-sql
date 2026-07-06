@@ -1,0 +1,77 @@
+{
+  "schemaVersion": "1.0.0",
+  "targets": [
+    {
+      "id": "xiaobo-template2",
+      "project_id": 12,
+      "account": "小博",
+      "template_id": "muban-xiaobo-2",
+      "display_template": "小博模板2",
+      "image_set": "模板2",
+      "product_uid": "EJRE014",
+      "draft_name": "模板校准-小博模板2-EJRE014",
+      "active": true,
+      "notes": "Product Design template2 accepted UI and MP4 probe; use this representative product for Jianying slot checks."
+    },
+    {
+      "id": "xiaoran-template2",
+      "project_id": 12,
+      "account": "小燃",
+      "template_id": "muban-xiaoran-2",
+      "display_template": "小燃模板2",
+      "image_set": "模板2",
+      "product_uid": "EJRE006",
+      "draft_name": "模板校准-小燃模板2-EJRE006",
+      "active": true,
+      "notes": "Reference-image style template2 accepted UI and MP4 probe; use this representative product for Jianying slot checks."
+    },
+    {
+      "id": "rongrong-template1",
+      "project_id": 2,
+      "account": "荣荣",
+      "template_id": "muban-rongrong-1",
+      "display_template": "荣荣模板1",
+      "image_set": "模板1",
+      "product_uid": "PMGD001",
+      "draft_name": "模板校准-荣荣模板1-PMGD001",
+      "active": false,
+      "notes": "Deferred by user; keep as an explicit target and run with --include-inactive when ready."
+    },
+    {
+      "id": "xiaowai-template2",
+      "project_id": 12,
+      "account": "小歪",
+      "template_id": "muban-xiaowai-2",
+      "display_template": "小歪模板2",
+      "image_set": "模板2",
+      "product_uid": "EJRE014",
+      "draft_name": "模板校准-小歪模板2-EJRE014",
+      "active": true,
+      "notes": "Xiaowai template2 accepted UI; user confirmed v1 Jianying placement is OK on 2026-07-05. Keep it in the standard calibration runner for repeatable checks."
+    },
+    {
+      "id": "rongrong-template2",
+      "project_id": 2,
+      "account": "荣荣",
+      "template_id": "muban-rongrong-2",
+      "display_template": "荣荣模板2",
+      "image_set": "模板2",
+      "product_uid": "PMGD001",
+      "draft_name": "模板校准-荣荣模板2-PMGD001",
+      "active": true,
+      "notes": "Light blue spec-table template2 accepted UI. Uses videoOverlaySlot 412x260 as special video-height compensation over the 412x232 visual cover frame; use PMGD001 for Jianying slot checks."
+    },
+    {
+      "id": "rongrong-template3",
+      "project_id": 2,
+      "account": "荣荣",
+      "template_id": "muban-rongrong-3",
+      "display_template": "荣荣模板3",
+      "image_set": "模板3",
+      "product_uid": "PMGD001",
+      "draft_name": "模板校准-荣荣模板3-PMGD001",
+      "active": true,
+      "notes": "Rongrong template3 accepted UI; template-doctor, one-product Jianying calibration draft, and short MP4 probe were confirmed by user on 2026-07-06. Use PMGD001 for repeatable slot checks."
+    }
+  ]
+}

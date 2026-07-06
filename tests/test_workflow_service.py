@@ -201,6 +201,31 @@ def test_voice_jobs_treat_mixed_uids_and_script_ids_as_union(tmp_path: Path):
     assert {job.block["script_id"] for job in jobs} == {"product:YXEJ002:V001", intro_id, price_id}
 
 
+def test_assemble_plan_previews_sequence_without_writing_spoken_files(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    repo = Repository(db)
+    service = WorkflowService(db)
+    spoken_path = Path(repo.project(project_id)["spoken_md_path"])
+    if spoken_path.exists():
+        spoken_path.unlink()
+
+    plan = service.assemble_spoken_script_plan(project_id, account_label="小燃")
+
+    assert plan["ok"] is True
+    assert plan["status"] == "ready_to_assemble"
+    assert plan["summary"]["intro_blocks"] == 1
+    assert plan["summary"]["product_blocks"] == 1
+    assert plan["summary"]["price_transition_blocks"] == 1
+    assert [entry["section"] for entry in plan["sequence"]] == [
+        "intro",
+        "price_transition",
+        "product",
+        "closing",
+    ]
+    assert plan["next"]["action"] == "assemble"
+    assert not spoken_path.exists()
+
+
 def test_voice_filename_uses_price_uid_title_and_duplicate_suffix(tmp_path: Path):
     db, project_id = seed_project(tmp_path)
     service = WorkflowService(db)

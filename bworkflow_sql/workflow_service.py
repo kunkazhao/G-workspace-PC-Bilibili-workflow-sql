@@ -32,11 +32,12 @@ from .settings import (
     JIANYING_ENGINE_DIR,
     LEGACY_B_WORKFLOW_SKILL_SCRIPTS,
 )
-from .utils import file_metadata, now_iso, safe_text
+from .utils import file_metadata, now_iso, safe_text, text_hash
 from .template_config import (
     display_template_from_image_path,
     display_template_for_product_card_template_id,
     image_set_for_template,
+    resolve_product_card_template,
     user_for_template,
 )
 from .tts_helpers import (  # noqa: F401 – re-exported
@@ -117,9 +118,12 @@ from .render_package_builder import (
     SUPPORTED_PRODUCT_ORDER_STRATEGIES,
     SUPPORTED_OUTPUT_MODES,
     build_product_recommendation_package,
+    product_card_payload_for_product,
 )
 from .product_image_generation import regenerate_product_card_images
 from .template_doctor import diagnose_template_flow
+from .script_doctor import diagnose_script_flow
+from .episode_materializer import materialize_episode_markdown
 
 
 INTERNAL_PREFIX = "internal:"
@@ -335,6 +339,7 @@ class WorkflowService:
         stale_product_image_policy: str = "block",
         mode: str = "standard",
         top_uids: str | list[str] | None = None,
+        product_uids: str | list[str] | None = None,
         product_card_template_id: str = "",
         package_output_path: str | Path | None = None,
     ) -> dict[str, Any]:
@@ -352,6 +357,9 @@ class WorkflowService:
             raise ValueError(f"unsupported stale_product_image_policy: {stale_policy}")
         sequence_mode = safe_text(mode) or "standard"
         top_uid_list = split_csv(top_uids) if isinstance(top_uids, str) else list(top_uids or [])
+        product_uid_list = (
+            split_csv(product_uids) if isinstance(product_uids, str) else list(product_uids or [])
+        )
 
         result = build_product_recommendation_package(
             self.db,
@@ -363,6 +371,7 @@ class WorkflowService:
             product_card_template_id=product_card_template_id,
             mode=sequence_mode,
             top_uids=top_uid_list,
+            product_uids=product_uid_list,
         )
         output_path = (
             Path(package_output_path)
@@ -381,6 +390,7 @@ class WorkflowService:
             "product_card_template_id": safe_text(product_card_template_id) or None,
             "mode": sequence_mode,
             "top_uids": top_uid_list,
+            "product_uids": product_uid_list,
             "package_path": str(output_path),
             "missing": result.missing,
             "stale_product_images": getattr(result, "stale_product_images", []),
@@ -460,6 +470,32 @@ class WorkflowService:
             product_media_mode=product_media_mode,
         )
 
+    def script_doctor(
+        self,
+        project_id: int,
+        *,
+        intro_label: str = "",
+    ) -> dict[str, Any]:
+        return diagnose_script_flow(
+            self.db,
+            project_id=project_id,
+            intro_label=intro_label,
+        )
+
+    def materialize_episode_markdown(
+        self,
+        project_id: int,
+        *,
+        library_path: str | Path | None = None,
+        episode_path: str | Path | None = None,
+    ) -> dict[str, Any]:
+        return materialize_episode_markdown(
+            self.db,
+            project_id=project_id,
+            library_path=library_path,
+            episode_path=episode_path,
+        )
+
     def template_calibration_probe(
         self,
         project_id: int,
@@ -469,49 +505,37 @@ class WorkflowService:
         draft_name: str = "",
         draft_root: str | Path | None = None,
         product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
+        product_card_template_id: str = "",
         stale_product_image_policy: str = "reuse",
     ) -> dict[str, Any]:
         account = safe_text(account_label)
         uid = safe_text(product_uid)
         if not account:
-            raise ValueError("模板校准需要指定账号。")
+            raise ValueError("template calibration requires account_label")
         if not uid:
-            raise ValueError("模板校准需要指定商品 UID。")
+            raise ValueError("template calibration requires product_uid")
 
+        selected_template = resolve_product_card_template(
+            account,
+            product_card_template_id,
+            require_explicit=True,
+        )
+        selected_template_id = safe_text(selected_template.get("templateId")) or safe_text(product_card_template_id)
         output_dir = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "template-calibration"
         output_dir.mkdir(parents=True, exist_ok=True)
         stem = f"template-calibrate-{safe_path_component(account)}-{safe_path_component(uid)}"
-        package_path = output_dir / f"{stem}.render-package.json"
-        package_result = self.prepare_product_recommendation_output(
-            project_id=project_id,
+        placeholder_audio = output_dir / "template-calibration-placeholder.wav"
+        ensure_template_calibration_placeholder_audio(placeholder_audio)
+        project = self._required_project(project_id)
+        probe_payload = build_template_calibration_probe_manifest_from_assets(
+            project=project,
+            products=self.repo.products(project_id, include_removed=False),
+            assets=self.repo.asset_bindings(project_id),
             account_label=account,
-            output_mode="jianying_draft",
-            product_media_mode=product_media_mode,
-            stale_product_image_policy=stale_product_image_policy,
-            package_output_path=package_path,
-        )
-        if not package_result.get("ok"):
-            return {
-                "ok": False,
-                "project_id": project_id,
-                "account": account,
-                "product_uid": uid,
-                "package": package_result,
-                "next": package_result.get("next"),
-            }
-
-        next_hint = package_result.get("next") if isinstance(package_result.get("next"), dict) else {}
-        source_manifest = Path(safe_text(next_hint.get("manifest_path")))
-        if not source_manifest.exists():
-            raise ValueError(f"模板校准缺少剪映 manifest：{source_manifest}")
-
-        payload = json.loads(source_manifest.read_text(encoding="utf-8-sig"))
-        if not isinstance(payload, dict):
-            raise ValueError(f"剪映 manifest 格式异常：{source_manifest}")
-        probe_payload = build_template_calibration_probe_manifest(
-            payload,
             product_uid=uid,
-            created_from=str(source_manifest),
+            product_media_mode=product_media_mode,
+            product_card_template_id=selected_template_id,
+            placeholder_audio_path=placeholder_audio,
         )
         probe_manifest = output_dir / f"{stem}.manifest.json"
         probe_manifest.write_text(
@@ -521,7 +545,7 @@ class WorkflowService:
         draft = self.generate_jianying_draft(
             project_id,
             manifest_path=probe_manifest,
-            draft_name=safe_path_component(draft_name or f"模板校准-{account}-{uid}"),
+            draft_name=safe_path_component(draft_name or f"template-calibration-{account}-{uid}"),
             draft_root=draft_root or DEFAULT_JIANYING_DRAFT_ROOT,
         )
         entry = probe_payload["entries"][0]
@@ -530,17 +554,17 @@ class WorkflowService:
             "project_id": project_id,
             "account": account,
             "product_uid": uid,
+            "product_card_template_id": selected_template_id,
             "display_template": safe_text(probe_payload.get("display_template")),
             "display_video_slot": entry.get("display_video_slot"),
-            "source_manifest_path": str(source_manifest),
             "probe_manifest_path": str(probe_manifest),
+            "placeholder_audio_path": str(placeholder_audio),
             "draft": {
                 "returncode": draft.returncode,
                 "stdout": draft.stdout,
                 "stderr": draft.stderr,
             },
         }
-
     def run_command(self, cmd: list[str]) -> WorkflowRunResult:
         if cmd and cmd[0].startswith(INTERNAL_PREFIX):
             return self._run_internal(cmd)
@@ -950,6 +974,105 @@ class WorkflowService:
             [f"{INTERNAL_PREFIX}assembly"],
             stdout=f"口播稿已生成：{output_markdown}\nManifest 已写入内部目录：{manifest_path}\n条目：{len(entries)}\n",
         )
+
+    def assemble_spoken_script_plan(
+        self,
+        project_id: int,
+        *,
+        mode: str = "standard",
+        account_label: str = "",
+        intro_index: int = 1,
+        top_uids: list[str] | None = None,
+        product_uids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        project = self._required_project(project_id)
+        account = self._resolve_account(account_label)
+        account_label = safe_text(account.get("label") or account_label)
+        products = self._ordered_products(project_id, mode=mode, top_uids=top_uids or [], product_uids=product_uids or [])
+        blocks = self.repo.script_blocks(project_id)
+        assets = self.repo.asset_bindings(project_id)
+        product_blocks: dict[str, list[dict[str, Any]]] = {}
+        intro_blocks: list[dict[str, Any]] = []
+        price_blocks: list[dict[str, Any]] = []
+        for block in blocks:
+            if block["script_type"] == "product":
+                product_blocks.setdefault(block["owner_uid"], []).append(block)
+            elif block["script_type"] == "intro":
+                intro_blocks.append(block)
+            elif block["script_type"] == "price_transition":
+                price_blocks.append(block)
+
+        sequence: list[dict[str, Any]] = []
+        issues: list[dict[str, Any]] = []
+        order = 1
+        if intro_blocks:
+            intro_block = intro_blocks[min(max(1, intro_index), len(intro_blocks)) - 1]
+            sequence.append(_assembly_plan_entry(order, "intro", intro_block))
+            order += 1
+        else:
+            issues.append({"level": "warning", "code": "missing_intro_block", "message": "no synced intro block"})
+
+        top_set = {item.casefold() for item in top_uids or []}
+        used_price_labels: set[str] = set()
+        for product in products:
+            uid = safe_text(product.get("uid"))
+            is_top_product = uid.casefold() in top_set
+            if not is_top_product:
+                price_block = self._matching_price_block_for_assets(product, price_blocks, assets, account_label=account_label)
+                if price_block:
+                    price_key = safe_text(price_block.get("price_range_label")) or str(price_block["id"])
+                    if price_key not in used_price_labels:
+                        used_price_labels.add(price_key)
+                        sequence.append(_assembly_plan_entry(order, "price_transition", price_block))
+                        order += 1
+            versions = product_blocks.get(uid, [])
+            if not versions:
+                issues.append(
+                    {
+                        "level": "warning",
+                        "code": "missing_product_block",
+                        "uid": uid,
+                        "title": safe_text(product.get("title")),
+                    }
+                )
+                continue
+            block = self._choose_voice_ready_block(versions, assets, uid=uid, account_label=account_label) or versions[0]
+            sequence.append(_assembly_plan_entry(order, "product", block, product=product))
+            order += 1
+
+        sequence.append(
+            {
+                "order": order,
+                "section": "closing",
+                "script_type": "closing",
+                "script_id": "closing",
+                "text_hash": text_hash(DEFAULT_CLOSING_TEXT),
+            }
+        )
+        status = "ready_to_assemble" if not any(issue["code"] == "missing_product_block" for issue in issues) else "content_incomplete"
+        return {
+            "ok": status == "ready_to_assemble",
+            "status": status,
+            "project": {
+                "id": int(project_id),
+                "name": safe_text(project.get("name")),
+                "scheme_id": safe_text(project.get("scheme_id")),
+                "scheme_name": safe_text(project.get("scheme_name")),
+            },
+            "summary": {
+                "products_total": len(products),
+                "intro_blocks": len(intro_blocks),
+                "product_blocks": sum(len(value) for value in product_blocks.values()),
+                "price_transition_blocks": len(price_blocks),
+                "sequence_entries": len(sequence),
+            },
+            "sequence": sequence,
+            "issues": issues,
+            "next": {
+                "action": "assemble" if status == "ready_to_assemble" else "sync_or_fill_content",
+                "command": f"python -m bworkflow_sql assemble {project_id} --account {account_label}" if status == "ready_to_assemble" else f"python -m bworkflow_sql script-doctor {project_id}",
+            },
+        }
 
     def generate_jianying_draft(
         self,
@@ -2205,6 +2328,29 @@ def render_segment_counts(segments: object) -> dict[str, int]:
     return counts
 
 
+def _assembly_plan_entry(
+    order: int,
+    section: str,
+    block: dict[str, Any],
+    *,
+    product: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    product = product or {}
+    return {
+        "order": order,
+        "section": section,
+        "script_type": safe_text(block.get("script_type")),
+        "script_block_id": int(block.get("id") or 0),
+        "script_id": safe_text(block.get("script_id")),
+        "owner_uid": safe_text(block.get("owner_uid")),
+        "product_uid": safe_text(product.get("uid")),
+        "product_name": safe_text(product.get("title")),
+        "price_range_label": safe_text(block.get("price_range_label")),
+        "block_label": safe_text(block.get("block_label")),
+        "text_hash": safe_text(block.get("text_hash")),
+    }
+
+
 def render_package_next_step(
     *,
     project_id: int,
@@ -2387,6 +2533,186 @@ def render_package_to_jianying_manifest(
     }
     output.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return output
+
+
+def ensure_template_calibration_placeholder_audio(
+    path: str | Path,
+    *,
+    duration_seconds: float = 8.0,
+) -> Path:
+    target = Path(path)
+    if target.exists():
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    sample_rate = 48000
+    frame_count = max(1, int(sample_rate * duration_seconds))
+    with wave.open(str(target), "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(sample_rate)
+        writer.writeframes(b"\x00\x00" * frame_count)
+    return target
+
+
+def build_template_calibration_probe_manifest_from_assets(
+    *,
+    project: dict[str, Any],
+    products: list[dict[str, Any]],
+    assets: list[dict[str, Any]],
+    account_label: str,
+    product_uid: str,
+    product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
+    product_card_template_id: str = "",
+    placeholder_audio_path: str | Path,
+) -> dict[str, Any]:
+    account = safe_text(account_label)
+    uid = safe_text(product_uid)
+    if not uid:
+        raise ValueError("calibration product_uid cannot be empty")
+    if safe_text(product_media_mode) != "video_preferred":
+        raise ValueError("template calibration requires product_media_mode=video_preferred")
+    selected_template = resolve_product_card_template(
+        account,
+        product_card_template_id,
+        require_explicit=True,
+    )
+    template_id = safe_text(selected_template.get("templateId")) or safe_text(product_card_template_id)
+    display_template = (
+        safe_text(selected_template.get("displayName"))
+        or display_template_for_product_card_template_id(template_id)
+    )
+    selected_image_set = image_set_for_template(display_template)
+    product = _calibration_product(products, uid)
+    image = _calibration_ready_asset(
+        assets,
+        asset_type="image",
+        uid=uid,
+        account_label=account,
+        preferred_image_set=selected_image_set,
+    )
+    if not image:
+        raise ValueError(f"calibration product {uid} has no ready product image for {account}/{selected_image_set}")
+    video = _calibration_ready_asset(assets, asset_type="video", uid=uid, allow_unscoped_account=True)
+    if not video:
+        raise ValueError(f"calibration product {uid} has no ready display_video_path")
+
+    image_path = _calibration_existing_path(image.get("path"), label=f"{uid} image")
+    video_path = _calibration_existing_path(video.get("path"), label=f"{uid} video")
+    product_card = product_card_payload_for_product(
+        product,
+        project=project,
+        fallback_image_path=image_path,
+        account_label=account,
+        product_card_template_id=template_id,
+    )
+    slot = render_package_display_video_slot(display_template)
+    if product_card:
+        slot["templateId"] = safe_text(product_card.get("templateId")) or template_id
+        slot["templateVersion"] = safe_text(product_card.get("templateVersion")) or safe_text(slot.get("templateVersion"))
+    entry = {
+        "type": "product",
+        "order_index": 1,
+        "section": "product",
+        "section_order": 1,
+        "product_uid": uid,
+        "product_name": safe_text(product.get("title")),
+        "price_label": safe_text(product.get("price_label")),
+        "price_range_label": safe_text(product.get("price_label")),
+        "source_label": safe_text(product.get("title")),
+        "text": "Template calibration placeholder audio.",
+        "audio_path": str(Path(placeholder_audio_path)),
+        "image_path": str(image_path),
+        "video_path": str(video_path),
+        "display_video_path": str(video_path),
+        "display_video_slot": slot,
+        "binding_id": f"template-calibration:{uid}",
+        "script_id": "template-calibration",
+        "account_id": "",
+        "account_label": account,
+        "text_hash": "",
+    }
+    if product_card:
+        entry["product_card"] = product_card
+    return {
+        "source": "template_calibration_assets",
+        "mode": "template_calibration_probe",
+        "project_id": int(project.get("id") or project.get("project_id") or 0),
+        "project": {
+            "category": safe_text(project.get("category_name") or project.get("name")),
+            "account": account,
+            "bworkflowProjectId": int(project.get("id") or project.get("project_id") or 0),
+        },
+        "account_label": account,
+        "display_template": display_template,
+        "created_at": now_iso(),
+        "probe_note": "Single-product display-video template calibration probe.",
+        "entries": [entry],
+    }
+
+
+def _calibration_product(products: list[dict[str, Any]], uid: str) -> dict[str, Any]:
+    matches = [
+        product
+        for product in products
+        if safe_text(product.get("uid")).casefold() == safe_text(uid).casefold()
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"expected 1 calibration product {uid}, got {len(matches)}")
+    return matches[0]
+
+
+def _calibration_ready_asset(
+    assets: list[dict[str, Any]],
+    *,
+    asset_type: str,
+    uid: str,
+    account_label: str = "",
+    preferred_image_set: str = "",
+    allow_unscoped_account: bool = False,
+) -> dict[str, Any] | None:
+    preferred = safe_text(preferred_image_set)
+    candidates: list[dict[str, Any]] = []
+    for asset in assets:
+        if safe_text(asset.get("asset_type")) != asset_type:
+            continue
+        if safe_text(asset.get("status")) != "ready":
+            continue
+        if safe_text(asset.get("uid")).casefold() != safe_text(uid).casefold():
+            continue
+        asset_account = safe_text(asset.get("account_label"))
+        if account_label and asset_account != account_label:
+            if not (allow_unscoped_account and not asset_account):
+                continue
+        path_text = safe_text(asset.get("path"))
+        if not path_text or not Path(path_text).is_file():
+            continue
+        candidates.append(asset)
+    if not candidates:
+        return None
+    return sorted(
+        candidates,
+        key=lambda item: (
+            not _calibration_path_has_part(Path(safe_text(item.get("path"))), preferred)
+            if asset_type == "image" and preferred
+            else False,
+            safe_text(item.get("account_label")) != account_label,
+            safe_text(item.get("path")),
+        ),
+    )[0]
+
+
+def _calibration_existing_path(value: Any, *, label: str) -> Path:
+    path = Path(safe_text(value))
+    if not path.is_absolute():
+        path = path.resolve()
+    if not path.is_file():
+        raise ValueError(f"calibration {label} path does not exist: {path}")
+    return path
+
+
+def _calibration_path_has_part(path: Path, part: str) -> bool:
+    needle = safe_text(part)
+    return not needle or any(safe_text(value) == needle for value in path.parts)
 
 
 def build_template_calibration_probe_manifest(

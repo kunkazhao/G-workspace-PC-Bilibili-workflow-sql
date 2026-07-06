@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 import bworkflow_sql.workflow_service as workflow_service
 from bworkflow_sql.workflow_service import (
     WorkflowService,
     build_template_calibration_probe_manifest,
+    build_template_calibration_probe_manifest_from_assets,
     render_package_to_jianying_manifest,
 )
 
@@ -60,6 +63,18 @@ def _service(db: object = "db") -> WorkflowService:
     service = WorkflowService.__new__(WorkflowService)
     service.db = db
     return service
+
+
+def _product_card_json(template_id: str = "muban-xiaoran-1") -> str:
+    return json.dumps(
+        {
+            "templateId": template_id,
+            "dataMap": {"title": "Alpha Earbuds", "price": "299", "remark": "Stable."},
+            "slots": [{"label": "续航", "value": "8小时"}],
+            "coverAsset": "cover.jpg",
+        },
+        ensure_ascii=False,
+    )
 
 
 def test_render_package_to_jianying_manifest_maps_separate_assets(tmp_path):
@@ -150,6 +165,7 @@ def test_render_package_to_jianying_manifest_uses_remotion_template_metadata(tmp
         "coordinate_mode": "canvas_rect",
         "templateId": "muban-xiaobo-1",
         "templateVersion": "1.0.2",
+        "display_scale": 0.52,
     }
 
 
@@ -223,6 +239,97 @@ def test_template_calibration_probe_manifest_keeps_one_product_and_slot():
     assert probe["entries"][0]["display_video_slot"]["coordinate_mode"] == "clip_transform_pixels"
 
 
+def test_template_calibration_probe_manifest_from_assets_ignores_voice_dependencies(tmp_path):
+    image_path = tmp_path / "images" / "小燃" / "模板1" / "P001.png"
+    video_path = tmp_path / "videos" / "P001.mp4"
+    image_path.parent.mkdir(parents=True)
+    video_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"image")
+    video_path.write_bytes(b"video")
+    project = {"id": 3, "name": "Earbuds", "category_name": "数码-入耳蓝牙耳机"}
+    products = [
+        {
+            "uid": "P001",
+            "title": "Alpha Earbuds",
+            "price_label": "200-300",
+            "product_card_json": _product_card_json("muban-xiaoran-1"),
+        }
+    ]
+    assets = [
+        {
+            "id": 10,
+            "asset_type": "image",
+            "uid": "P001",
+            "account_label": "小燃",
+            "status": "ready",
+            "path": str(image_path),
+        },
+        {
+            "id": 11,
+            "asset_type": "video",
+            "uid": "P001",
+            "account_label": "",
+            "status": "ready",
+            "path": str(video_path),
+        },
+    ]
+
+    probe = build_template_calibration_probe_manifest_from_assets(
+        project=project,
+        products=products,
+        assets=assets,
+        account_label="小燃",
+        product_uid="P001",
+        product_media_mode="video_preferred",
+        product_card_template_id="muban-xiaoran-1",
+        placeholder_audio_path=tmp_path / "calibration.wav",
+    )
+
+    assert probe["mode"] == "template_calibration_probe"
+    assert probe["display_template"] == "小燃模板1"
+    assert len(probe["entries"]) == 1
+    entry = probe["entries"][0]
+    assert entry["product_uid"] == "P001"
+    assert entry["audio_path"] == str(tmp_path / "calibration.wav")
+    assert entry["image_path"] == str(image_path)
+    assert entry["display_video_path"] == str(video_path)
+    assert entry["display_video_slot"]["templateId"] == "muban-xiaoran-1"
+
+
+def test_template_calibration_probe_manifest_from_assets_requires_ready_video(tmp_path):
+    image_path = tmp_path / "images" / "小燃" / "模板1" / "P001.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"image")
+
+    with pytest.raises(ValueError, match="display_video_path|视频"):
+        build_template_calibration_probe_manifest_from_assets(
+            project={"id": 3, "name": "Earbuds"},
+            products=[
+                {
+                    "uid": "P001",
+                    "title": "Alpha Earbuds",
+                    "price_label": "200-300",
+                    "product_card_json": _product_card_json("muban-xiaoran-1"),
+                }
+            ],
+            assets=[
+                {
+                    "id": 10,
+                    "asset_type": "image",
+                    "uid": "P001",
+                    "account_label": "小燃",
+                    "status": "ready",
+                    "path": str(image_path),
+                }
+            ],
+            account_label="小燃",
+            product_uid="P001",
+            product_media_mode="video_preferred",
+            product_card_template_id="muban-xiaoran-1",
+            placeholder_audio_path=tmp_path / "calibration.wav",
+        )
+
+
 def test_template_calibration_writes_probe_and_generates_single_item_draft(tmp_path, monkeypatch):
     full_manifest = {
         "source": "render_package",
@@ -249,15 +356,59 @@ def test_template_calibration_writes_probe_and_generates_single_item_draft(tmp_p
     }
     full_manifest_path = tmp_path / "full.jianying.manifest.json"
     full_manifest_path.write_text(json.dumps(full_manifest, ensure_ascii=False), encoding="utf-8")
+    image_path = tmp_path / "images" / "小燃" / "模板1" / "P001.png"
+    video_path = tmp_path / "videos" / "P001.mp4"
+    image_path.parent.mkdir(parents=True)
+    video_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"image")
+    video_path.write_bytes(b"video")
     captured: dict[str, object] = {}
     service = _service()
 
+    class FakeRepo:
+        def project(self, project_id):
+            return {"id": project_id, "name": "Earbuds", "category_name": "数码-入耳蓝牙耳机"}
+
+        def products(self, project_id, *, include_removed=True):
+            return [
+                {
+                    "uid": "P001",
+                    "title": "Alpha Earbuds",
+                    "price_label": "200-300",
+                    "product_card_json": _product_card_json("muban-xiaoran-1"),
+                },
+                {
+                    "uid": "P002",
+                    "title": "Beta Earbuds",
+                    "price_label": "300-400",
+                    "product_card_json": _product_card_json("muban-xiaoran-1"),
+                },
+            ]
+
+        def asset_bindings(self, project_id):
+            return [
+                {
+                    "id": 10,
+                    "asset_type": "image",
+                    "uid": "P001",
+                    "account_label": "小燃",
+                    "status": "ready",
+                    "path": str(image_path),
+                },
+                {
+                    "id": 11,
+                    "asset_type": "video",
+                    "uid": "P001",
+                    "account_label": "",
+                    "status": "ready",
+                    "path": str(video_path),
+                },
+            ]
+
+    service.repo = FakeRepo()
+
     def fake_prepare(**kwargs):
-        captured["prepare"] = kwargs
-        return {
-            "ok": True,
-            "next": {"manifest_path": str(full_manifest_path)},
-        }
+        raise AssertionError("template calibration should not build a full render package")
 
     def fake_generate(project_id, *, manifest_path, draft_name, draft_root, **_kwargs):
         captured["draft"] = {
@@ -276,6 +427,7 @@ def test_template_calibration_writes_probe_and_generates_single_item_draft(tmp_p
         3,
         account_label="小燃",
         product_uid="P001",
+        product_card_template_id="muban-xiaoran-1",
         draft_name="校准-P001",
         draft_root=tmp_path / "drafts",
     )
@@ -287,7 +439,10 @@ def test_template_calibration_writes_probe_and_generates_single_item_draft(tmp_p
     assert result["draft"]["returncode"] == 0
     assert len(probe["entries"]) == 1
     assert probe["entries"][0]["product_uid"] == "P001"
-    assert captured["prepare"]["stale_product_image_policy"] == "reuse"
+    assert probe["entries"][0]["audio_path"] == result["placeholder_audio_path"]
+    assert probe["entries"][0]["image_path"] == str(image_path)
+    assert probe["entries"][0]["display_video_path"] == str(video_path)
+    assert probe["entries"][0]["display_video_slot"]["templateId"] == "muban-xiaoran-1"
     assert captured["draft"]["manifest_path"] == probe_path
 
 
@@ -306,7 +461,9 @@ def test_prepare_product_recommendation_output_writes_jianying_manifest(
         product_card_template_id,
         mode,
         top_uids,
+        product_uids,
     ):
+        assert product_uids == ["P001"]
         return SimpleNamespace(package=_package(), missing=[], stale_product_images=[])
 
     output = tmp_path / "render-package.json"
@@ -316,6 +473,7 @@ def test_prepare_product_recommendation_output_writes_jianying_manifest(
         3,
         account_label="xiaobo",
         output_mode="jianying_draft",
+        product_uids=["P001"],
         package_output_path=output,
     )
 

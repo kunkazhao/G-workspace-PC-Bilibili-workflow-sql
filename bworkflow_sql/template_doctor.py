@@ -105,7 +105,12 @@ def diagnose_template_flow(
     for product in products:
         product_count += 1
         uid = safe_text(product.get("uid"))
-        image = _ready_image_asset(assets, uid=uid, account_label=account)
+        image = _ready_image_asset(
+            assets,
+            uid=uid,
+            account_label=account,
+            preferred_image_set=expected_image_set,
+        )
         image_path = Path(safe_text(image.get("path"))) if image else None
         if image is None:
             issues.append(
@@ -294,8 +299,10 @@ def _ready_image_asset(
     *,
     uid: str,
     account_label: str,
+    preferred_image_set: str = "",
 ) -> dict[str, Any] | None:
     account = safe_text(account_label)
+    image_set = safe_text(preferred_image_set)
     candidates: list[dict[str, Any]] = []
     for asset in assets:
         if safe_text(asset.get("asset_type")) != "image":
@@ -316,6 +323,15 @@ def _ready_image_asset(
     return sorted(
         candidates,
         key=lambda item: (
+            (
+                not _image_path_uses_template(
+                    Path(safe_text(item.get("path"))),
+                    account_label=account,
+                    image_set=image_set,
+                )
+                if image_set
+                else False
+            ),
             safe_text(item.get("account_label")) != account,
             safe_text(item.get("path")),
         ),

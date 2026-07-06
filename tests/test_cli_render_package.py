@@ -82,6 +82,8 @@ def test_template_calibrate_parser_registers_command():
             "校准-P001",
             "--draft-root",
             "drafts",
+            "--product-card-template-id",
+            "muban-xiaoran-2",
             "--product-media-mode",
             "video_preferred",
         ]
@@ -93,6 +95,7 @@ def test_template_calibrate_parser_registers_command():
     assert args.product_uid == "P001"
     assert args.draft_name == "校准-P001"
     assert args.draft_root == "drafts"
+    assert args.product_card_template_id == "muban-xiaoran-2"
     assert args.product_media_mode == "video_preferred"
 
 
@@ -115,6 +118,82 @@ def test_template_doctor_parser_registers_command():
     assert args.account == "灏忓崥"
     assert args.product_card_template_id == "muban-xiaobo-1"
     assert args.product_media_mode == "video_preferred"
+
+
+def test_script_doctor_parser_registers_command():
+    args = cli.build_parser().parse_args(
+        [
+            "script-doctor",
+            "3",
+            "--intro-label",
+            "引言1",
+        ]
+    )
+
+    assert args.command == "script-doctor"
+    assert args.project_id == 3
+    assert args.intro_label == "引言1"
+
+
+def test_materialize_episode_parser_registers_command():
+    args = cli.build_parser().parse_args(
+        [
+            "materialize-episode",
+            "3",
+            "--library-path",
+            "library.md",
+            "--episode-path",
+            "episode.md",
+        ]
+    )
+
+    assert args.command == "materialize-episode"
+    assert args.project_id == 3
+    assert args.library_path == "library.md"
+    assert args.episode_path == "episode.md"
+
+
+def test_assemble_plan_parser_registers_command():
+    args = cli.build_parser().parse_args(
+        [
+            "assemble-plan",
+            "3",
+            "--account",
+            "小博",
+            "--intro-index",
+            "2",
+        ]
+    )
+
+    assert args.command == "assemble-plan"
+    assert args.project_id == 3
+    assert args.account == "小博"
+    assert args.intro_index == 2
+
+
+def test_template_calibrate_runner_parser_registers_command():
+    args = cli.build_parser().parse_args(
+        [
+            "template-calibrate-runner",
+            "--target",
+            "xiaobo-template2",
+            "--config",
+            "targets.json",
+            "--draft-suffix",
+            "v3",
+            "--dry-run",
+            "--include-inactive",
+            "--no-regenerate-images",
+        ]
+    )
+
+    assert args.command == "template-calibrate-runner"
+    assert args.target == "xiaobo-template2"
+    assert args.config == "targets.json"
+    assert args.draft_suffix == "v3"
+    assert args.dry_run is True
+    assert args.include_inactive is True
+    assert args.regenerate_images is False
 
 
 def test_render_final_video_parser_registers_command():
@@ -234,6 +313,7 @@ def test_cmd_template_calibrate_writes_probe_json(capsys, monkeypatch):
             draft_name,
             draft_root,
             product_media_mode,
+            product_card_template_id,
         ):
             calls.append(
                 {
@@ -243,6 +323,7 @@ def test_cmd_template_calibrate_writes_probe_json(capsys, monkeypatch):
                     "draft_name": draft_name,
                     "draft_root": draft_root,
                     "product_media_mode": product_media_mode,
+                    "product_card_template_id": product_card_template_id,
                 }
             )
             return {
@@ -261,6 +342,7 @@ def test_cmd_template_calibrate_writes_probe_json(capsys, monkeypatch):
             draft_name="校准-P001",
             draft_root="drafts",
             product_media_mode="video_preferred",
+            product_card_template_id="muban-xiaoran-2",
         )
     )
 
@@ -275,6 +357,7 @@ def test_cmd_template_calibrate_writes_probe_json(capsys, monkeypatch):
             "draft_name": "校准-P001",
             "draft_root": "drafts",
             "product_media_mode": "video_preferred",
+            "product_card_template_id": "muban-xiaoran-2",
         }
     ]
 
@@ -326,6 +409,219 @@ def test_cmd_template_doctor_writes_diagnostic_json(capsys, monkeypatch):
             "account_label": "灏忓崥",
             "product_card_template_id": "muban-xiaobo-1",
             "product_media_mode": "video_preferred",
+        }
+    ]
+
+
+def test_cmd_script_doctor_writes_diagnostic_json(capsys, monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class FakeWorkflow:
+        def script_doctor(self, project_id, *, intro_label):
+            calls.append(
+                {
+                    "project_id": project_id,
+                    "intro_label": intro_label,
+                }
+            )
+            return {
+                "ok": False,
+                "status": "needs_sync",
+                "next": {"command": "python -m bworkflow_sql sync 3 --step markdown"},
+            }
+
+    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
+
+    cli.cmd_script_doctor(
+        Namespace(
+            project_id=3,
+            intro_label="引言1",
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["status"] == "needs_sync"
+    assert calls == [{"project_id": 3, "intro_label": "引言1"}]
+
+
+def test_cmd_materialize_episode_writes_result_json(capsys, monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class FakeWorkflow:
+        def materialize_episode_markdown(self, project_id, *, library_path, episode_path):
+            calls.append(
+                {
+                    "project_id": project_id,
+                    "library_path": library_path,
+                    "episode_path": episode_path,
+                }
+            )
+            return {
+                "ok": True,
+                "project_id": project_id,
+                "materialized": 2,
+                "target_path": "episode.md",
+            }
+
+    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
+
+    cli.cmd_materialize_episode(
+        Namespace(
+            project_id=3,
+            library_path="library.md",
+            episode_path="episode.md",
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["materialized"] == 2
+    assert calls == [
+        {
+            "project_id": 3,
+            "library_path": "library.md",
+            "episode_path": "episode.md",
+        }
+    ]
+
+
+def test_cmd_assemble_plan_writes_preview_json(capsys, monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class FakeWorkflow:
+        def assemble_spoken_script_plan(self, project_id, *, account_label, intro_index):
+            calls.append(
+                {
+                    "project_id": project_id,
+                    "account_label": account_label,
+                    "intro_index": intro_index,
+                }
+            )
+            return {
+                "ok": True,
+                "status": "ready_to_assemble",
+                "next": {"command": "python -m bworkflow_sql assemble 3 --account 小博"},
+            }
+
+    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
+
+    cli.cmd_assemble_plan(
+        Namespace(
+            project_id=3,
+            account="小博",
+            intro_index=2,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["status"] == "ready_to_assemble"
+    assert calls == [{"project_id": 3, "account_label": "小博", "intro_index": 2}]
+
+
+def test_cmd_template_calibrate_runner_writes_report_json(capsys, monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class FakeWorkflow:
+        pass
+
+    def fake_load(config_path, *, target_id, include_inactive):
+        calls.append(
+            {
+                "step": "load",
+                "config_path": config_path,
+                "target_id": target_id,
+                "include_inactive": include_inactive,
+            }
+        )
+        return [{"id": "xiaobo-template2"}]
+
+    def fake_run(workflow, *, targets, regenerate_images, dry_run, draft_suffix):
+        calls.append(
+            {
+                "step": "run",
+                "workflow": workflow,
+                "targets": targets,
+                "regenerate_images": regenerate_images,
+                "dry_run": dry_run,
+                "draft_suffix": draft_suffix,
+            }
+        )
+        return {"ok": True, "summary": {"total": 1, "succeeded": 1, "failed": 0}}
+
+    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
+    monkeypatch.setattr(cli, "load_template_calibration_targets", fake_load)
+    monkeypatch.setattr(cli, "run_template_calibration_targets", fake_run)
+
+    cli.cmd_template_calibrate_runner(
+        Namespace(
+            target="xiaobo-template2",
+            config="targets.json",
+            include_inactive=True,
+            regenerate_images=False,
+            dry_run=True,
+            draft_suffix="v3",
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert calls[0] == {
+        "step": "load",
+        "config_path": "targets.json",
+        "target_id": "xiaobo-template2",
+        "include_inactive": True,
+    }
+    assert calls[1]["targets"] == [{"id": "xiaobo-template2"}]
+    assert calls[1]["regenerate_images"] is False
+    assert calls[1]["dry_run"] is True
+    assert calls[1]["draft_suffix"] == "v3"
+
+
+def test_cmd_template_calibrate_runner_uses_default_config_when_omitted(capsys, monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class FakeWorkflow:
+        pass
+
+    def fake_load(config_path="DEFAULT", *, target_id, include_inactive):
+        calls.append(
+            {
+                "step": "load",
+                "config_path": config_path,
+                "target_id": target_id,
+                "include_inactive": include_inactive,
+            }
+        )
+        return [{"id": "xiaobo-template2"}]
+
+    def fake_run(workflow, *, targets, regenerate_images, dry_run, draft_suffix):
+        return {"ok": True, "summary": {"total": 1, "succeeded": 1, "failed": 0}}
+
+    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
+    monkeypatch.setattr(cli, "load_template_calibration_targets", fake_load)
+    monkeypatch.setattr(cli, "run_template_calibration_targets", fake_run)
+
+    cli.cmd_template_calibrate_runner(
+        Namespace(
+            target="xiaobo-template2",
+            config="",
+            include_inactive=False,
+            regenerate_images=True,
+            dry_run=True,
+            draft_suffix="",
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert calls == [
+        {
+            "step": "load",
+            "config_path": "DEFAULT",
+            "target_id": "xiaobo-template2",
+            "include_inactive": False,
         }
     ]
 

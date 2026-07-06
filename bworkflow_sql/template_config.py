@@ -112,7 +112,7 @@ def _remotion_template_by_display_name(template_name: str) -> dict[str, Any] | N
 
 
 def _project_remotion_cover_slot(metadata: dict[str, Any]) -> dict[str, Any]:
-    slot = metadata.get("coverMediaSlot")
+    slot = metadata.get("videoOverlaySlot") or metadata.get("coverMediaSlot")
     source = metadata.get("sourceCanvas")
     placement = metadata.get("cardPlacement")
     output = metadata.get("outputCanvas")
@@ -126,7 +126,7 @@ def _project_remotion_cover_slot(metadata: dict[str, Any]) -> dict[str, Any]:
 
     scale_x = float(placement.get("width") or 0) / source_width
     scale_y = float(placement.get("height") or 0) / source_height
-    return {
+    projected = {
         "x": round(float(placement.get("x") or 0) + float(slot.get("x") or 0) * scale_x),
         "y": round(float(placement.get("y") or 0) + float(slot.get("y") or 0) * scale_y),
         "width": round(float(slot.get("width") or 0) * scale_x),
@@ -137,6 +137,10 @@ def _project_remotion_cover_slot(metadata: dict[str, Any]) -> dict[str, Any]:
         "templateId": str(metadata.get("templateId") or ""),
         "templateVersion": str(metadata.get("templateVersion") or ""),
     }
+    display_scale = metadata.get("displayScale")
+    if display_scale is not None:
+        projected["display_scale"] = float(display_scale)
+    return projected
 
 
 def display_video_slot_for_product_card_template_id(template_id: str) -> dict[str, Any]:

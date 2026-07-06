@@ -139,3 +139,38 @@ def test_template_doctor_reports_wrong_binding_and_unknown_legacy_hash(tmp_path:
     assert issues[("unknown_legacy_image_hash", "P002")]["level"] == "warning"
     assert "product-images" in result["next"]["command"]
     assert "--product-card-template-id muban-xiaobo-1" in result["next"]["command"]
+
+
+def test_template_doctor_prefers_ready_binding_for_selected_template(tmp_path: Path):
+    db, project_id = _seed_template_doctor_project(tmp_path)
+    diagnose_template_flow = _diagnose_template_flow()
+    account_label = get_remotion_template_metadata("muban-xiaobo-2")["account"]
+    wrong_template = tmp_path / "images" / "keyboard" / account_label / "模板1" / "P001.png"
+    selected_template = tmp_path / "images" / "keyboard" / account_label / "模板2" / "P001.png"
+    _insert_ready_image(
+        db,
+        project_id,
+        uid="P001",
+        account_label=account_label,
+        path=wrong_template,
+        text_hash="old-template-1",
+    )
+    _insert_ready_image(
+        db,
+        project_id,
+        uid="P001",
+        account_label=account_label,
+        path=selected_template,
+        text_hash="old-template-2",
+    )
+
+    result = diagnose_template_flow(
+        db,
+        project_id=project_id,
+        account_label=account_label,
+        product_card_template_id="muban-xiaobo-2",
+    )
+    p001_issues = [item for item in result["issues"] if item.get("uid") == "P001"]
+
+    assert not any(item["code"] == "wrong_template_binding" for item in p001_issues)
+    assert any(item["code"] == "stale_product_image" for item in p001_issues)

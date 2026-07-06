@@ -1,0 +1,297 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from bworkflow_sql.db import Database
+from bworkflow_sql.repositories import Repository
+from bworkflow_sql.script_doctor import diagnose_script_flow
+from bworkflow_sql.sync_service import SyncService
+from bworkflow_sql.episode_materializer import materialize_episode_markdown
+
+
+def _seed_project(tmp_path: Path) -> tuple[Database, int, Path]:
+    db = Database(tmp_path / "script-doctor.db")
+    repo = Repository(db)
+    md_path = tmp_path / "episode.md"
+    project_id = db.upsert_project(
+        {
+            "name": "数码-键盘",
+            "scheme_id": "scheme-1",
+            "scheme_name": "主方案",
+            "md_path": str(md_path),
+        }
+    )
+    repo.upsert_products_from_master(
+        project_id,
+        [
+            {"uid": "P001", "title": "Alpha Keyboard", "price_label": "299元"},
+            {"uid": "P002", "title": "Beta Keyboard", "price_label": "399元"},
+        ],
+    )
+    return db, project_id, md_path
+
+
+def _write_matching_intro_plan(tmp_path: Path, project_id: int, intro_text: str) -> None:
+    workspace = tmp_path / "workspace" / f"project-{project_id}" / "intro"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "source-intro-plan-引言1.json").write_text(
+        json.dumps(
+            {
+                "template_id": "pain_avoidance_priority_v1",
+                "full_script": intro_text,
+                "visual_events": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_script_doctor_reports_missing_content_units(tmp_path: Path):
+    db, project_id, md_path = _seed_project(tmp_path)
+    md_path.write_text(
+        """
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha 的单品文案。
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = diagnose_script_flow(db, project_id=project_id)
+    issue_codes = {issue["code"] for issue in result["issues"]}
+
+    assert result["ok"] is False
+    assert result["status"] == "content_incomplete"
+    assert result["summary"]["products_total"] == 2
+    assert result["summary"]["product_copy_ready"] == 1
+    assert "missing_product_copy" in issue_codes
+    assert "missing_intro_content" in issue_codes
+    assert result["next"]["action"] == "fill_content_units"
+
+
+def test_script_doctor_reports_reusable_library_copy_when_episode_is_missing(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.script_doctor as script_doctor_module
+
+    db, project_id, _md_path = _seed_project(tmp_path)
+    library_root = tmp_path / "copy-library"
+    library_path = library_root / "数码-键盘.md"
+    library_path.parent.mkdir(parents=True)
+    library_path.write_text(
+        """
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha 已经写好的复用文案。
+
+### 399元-P002-Beta Keyboard
+
+#### 正文
+
+Beta 已经写好的复用文案。
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(script_doctor_module, "DEFAULT_MARKDOWN_ROOT", library_root)
+
+    result = diagnose_script_flow(db, project_id=project_id)
+
+    assert result["ok"] is False
+    assert result["status"] == "content_incomplete"
+    assert result["summary"]["product_copy_ready"] == 0
+    assert result["summary"]["product_copy_library_ready"] == 2
+    assert result["next"]["action"] == "materialize_episode_markdown"
+    assert result["next"]["command"] == f"python -m bworkflow_sql materialize-episode {project_id}"
+    assert result["next"]["source_path"] == str(library_path)
+    assert not any(issue["code"] == "missing_product_copy" for issue in result["issues"])
+    assert any(issue["code"] == "episode_markdown_needs_materialization" for issue in result["issues"])
+
+
+def test_materialize_episode_markdown_copies_reusable_product_copy(tmp_path: Path):
+    db, project_id, md_path = _seed_project(tmp_path)
+    library_path = tmp_path / "library.md"
+    library_path.write_text(
+        """
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha 复用文案。
+
+### 399元-P002-Beta Keyboard
+
+#### 正文
+
+Beta 复用文案。
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = materialize_episode_markdown(db, project_id=project_id, library_path=library_path)
+
+    text = md_path.read_text(encoding="utf-8")
+    assert result["ok"] is True
+    assert result["materialized"] == 2
+    assert result["missing_library_copy"] == []
+    assert "Alpha 复用文案。" in text
+    assert "Beta 复用文案。" in text
+    assert "## 引言文案" in text
+    assert "## 商品文案" in text
+    assert "## 价格过渡文案" in text
+    assert db.fetchall("SELECT * FROM script_blocks WHERE project_id=?", (project_id,)) == []
+
+
+def test_script_doctor_reports_ready_to_sync_when_copy_units_exist(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.cutme_intro as cutme_intro_module
+
+    monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    db, project_id, md_path = _seed_project(tmp_path)
+    intro_text = "最近想买键盘吗？先别急着看参数。"
+    _write_matching_intro_plan(tmp_path, project_id, intro_text)
+    md_path.write_text(
+        f"""
+## 引言文案
+
+### 引言1
+
+{intro_text}
+
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha 的单品文案。
+
+### 399元-P002-Beta Keyboard
+
+#### 正文
+
+Beta 的单品文案。
+
+## 价格过渡文案
+
+### 300-500元
+
+#### 正文
+
+这个价位开始更适合看连接和手感稳定性。
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = diagnose_script_flow(db, project_id=project_id, intro_label="引言1")
+
+    assert result["ok"] is False
+    assert result["status"] == "needs_sync"
+    assert result["summary"]["intro_ready"] == 1
+    assert result["summary"]["product_copy_ready"] == 2
+    assert result["summary"]["price_transition_ready"] == 1
+    assert result["selected_intro"]["label"] == "引言1"
+    assert result["selected_intro"]["source_intro_plan_path"].endswith("source-intro-plan-引言1.json")
+    assert result["next"] == {
+        "action": "sync_markdown",
+        "command": f"python -m bworkflow_sql sync {project_id} --step markdown",
+    }
+
+
+def test_script_doctor_reports_ready_after_markdown_sync(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.cutme_intro as cutme_intro_module
+
+    monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    db, project_id, md_path = _seed_project(tmp_path)
+    intro_text = "最近想买键盘吗？先别急着看参数。"
+    _write_matching_intro_plan(tmp_path, project_id, intro_text)
+    md_path.write_text(
+        f"""
+## 引言文案
+
+### 引言1
+
+{intro_text}
+
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha 的单品文案。
+
+### 399元-P002-Beta Keyboard
+
+#### 正文
+
+Beta 的单品文案。
+
+## 价格过渡文案
+
+### 300-500元
+
+#### 正文
+
+这个价位开始更适合看连接和手感稳定性。
+""".strip(),
+        encoding="utf-8",
+    )
+    SyncService(db).sync_markdown(project_id)
+
+    result = diagnose_script_flow(db, project_id=project_id, intro_label="引言1")
+
+    assert result["ok"] is True
+    assert result["status"] == "ready_for_downstream"
+    assert result["summary"]["script_blocks_synced"] == 4
+    assert result["next"]["action"] == "continue_downstream"
+
+
+def test_script_doctor_requires_selected_intro_when_multiple_versions(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.cutme_intro as cutme_intro_module
+
+    monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    db, project_id, md_path = _seed_project(tmp_path)
+    md_path.write_text(
+        """
+## 引言文案
+
+### 引言1
+
+第一版引言。
+
+### 引言2
+
+第二版引言。
+
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha 的单品文案。
+
+### 399元-P002-Beta Keyboard
+
+#### 正文
+
+Beta 的单品文案。
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = diagnose_script_flow(db, project_id=project_id)
+
+    assert result["ok"] is False
+    assert result["status"] == "content_incomplete"
+    assert any(issue["code"] == "intro_version_not_selected" for issue in result["issues"])
+    assert result["next"]["action"] == "select_intro_version"

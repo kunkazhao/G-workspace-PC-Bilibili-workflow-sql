@@ -290,6 +290,7 @@ def test_build_product_recommendation_package_from_ready_assets(
         project_id=project_id,
         account_label="小博",
         output_mode="jianying_draft",
+        product_order_strategy="stable",
     )
 
     assert result.missing == []
@@ -531,6 +532,43 @@ def test_build_product_recommendation_package_reports_stale_product_image(
         product["productCard"],
     )
     assert product["productCardFingerprint"] == stale[0]["expected_fingerprint"]
+
+
+def test_build_product_recommendation_package_prefers_selected_template_image_binding(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    account_label = get_remotion_template_metadata("muban-xiaobo-2")["account"]
+    selected_image = tmp_path / "assets" / account_label / "模板2" / "P001.png"
+    _insert_asset(
+        db,
+        project_id,
+        uid="P001",
+        asset_type="image",
+        path=selected_image,
+        account_label=account_label,
+    )
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label=account_label,
+        output_mode="jianying_draft",
+        product_card_template_id="muban-xiaobo-2",
+    )
+
+    product = next(
+        segment
+        for segment in result.package["segments"]
+        if segment.get("productUid") == "P001"
+    )
+
+    assert product["imageCardAsset"] == str(selected_image)
+    assert product["productCard"]["templateId"] == "muban-xiaobo-2"
 
 
 def test_build_product_recommendation_package_can_force_cover_only_media(
@@ -833,6 +871,27 @@ def test_build_package_overrides_legacy_product_card_template_with_account_remot
         "bottomReserve": 120,
     }
     assert product["productCard"]["outputCanvas"] == {"width": 1920, "height": 1080}
+
+
+def test_build_package_passes_rongrong_2_video_overlay_slot_to_cutme():
+    import bworkflow_sql.render_package_builder as builder
+
+    product_card = builder.product_card_payload_for_product(
+        {
+            "uid": "P001",
+            "title": "Alpha",
+            "price_label": "199",
+            "product_card_json": '{"dataMap":{"title":"Alpha","price":"199","remark":"good"},"slots":[]}',
+        },
+        project={"category_name": "keyboard"},
+        account_label=get_remotion_template_metadata("muban-rongrong-2")["account"],
+        product_card_template_id="muban-rongrong-2",
+    )
+
+    assert product_card is not None
+    assert product_card["templateId"] == "muban-rongrong-2"
+    assert product_card["coverMediaSlot"]["height"] == 232
+    assert product_card["videoOverlaySlot"]["height"] == 260
 
 
 def test_build_package_records_explicit_product_card_template_selection(

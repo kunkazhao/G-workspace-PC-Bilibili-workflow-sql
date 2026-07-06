@@ -7,6 +7,7 @@ from bworkflow_sql.db import Database
 from bworkflow_sql.product_image_generation import regenerate_product_card_images
 from bworkflow_sql.render_package_builder import product_card_content_fingerprint
 from bworkflow_sql.repositories import Repository
+from bworkflow_sql.template_config import get_remotion_template_metadata
 from bworkflow_sql.utils import now_iso
 
 
@@ -195,6 +196,100 @@ def test_regenerate_product_card_images_targets_default_account_template_dir(
 
     assert result["regenerated"][0]["path"] == str(expected_path)
     assert calls == [(calls[0][0], "P001", expected_path)]
+
+
+def test_regenerate_product_card_images_stale_regenerates_wrong_template_binding(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.product_image_generation as product_images
+
+    db, project_id, _image_path = _seed_project_with_stale_image(tmp_path)
+    account_label = get_remotion_template_metadata("muban-xiaobo-2")["account"]
+    wrong_path = tmp_path / "images" / "keyboard" / account_label / "模板1" / "P001.png"
+    wrong_path.parent.mkdir(parents=True, exist_ok=True)
+    wrong_path.write_bytes(b"old template 1 image")
+    ts = now_iso()
+    with db.connect() as conn:
+        conn.execute("DELETE FROM asset_bindings WHERE asset_type='image'")
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, asset_type, account_label, path, status, source_kind, text_hash, created_at, updated_at)
+            VALUES (?, 'P001', 'image', ?, ?, 'ready', 'scan', '', ?, ?)
+            """,
+            (project_id, account_label, str(wrong_path), ts, ts),
+        )
+    monkeypatch.setattr(product_images, "PRODUCT_IMAGE_RENDER_JOB_ROOT", tmp_path / "jobs")
+    calls: list[tuple[Path, str, Path]] = []
+
+    def fake_render(package_path: Path, product_uid: str, output_path: Path) -> Path:
+        calls.append((package_path, product_uid, output_path))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"new template 2 image")
+        return output_path
+
+    result = regenerate_product_card_images(
+        db,
+        project_id=project_id,
+        account_label=account_label,
+        mode="stale",
+        product_uid="P001",
+        product_card_template_id="muban-xiaobo-2",
+        render_product_card_still=fake_render,
+    )
+
+    expected_path = tmp_path / "images" / "keyboard" / account_label / "模板2" / "299-P001-Alpha Keyboard.png"
+
+    assert result["regenerated"][0]["path"] == str(expected_path)
+    assert result["regenerated"][0]["reason"] == "wrong_template_binding"
+    assert calls == [(calls[0][0], "P001", expected_path)]
+
+
+def test_regenerate_product_card_images_prefers_ready_binding_for_selected_template(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.product_image_generation as product_images
+
+    db, project_id, _image_path = _seed_project_with_stale_image(tmp_path)
+    account_label = get_remotion_template_metadata("muban-xiaobo-2")["account"]
+    selected_path = tmp_path / "images" / "keyboard" / account_label / "模板2" / "P001.png"
+    selected_path.parent.mkdir(parents=True, exist_ok=True)
+    selected_path.write_bytes(b"old template 2 image")
+    ts = now_iso()
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, asset_type, account_label, path, status, source_kind, text_hash, created_at, updated_at)
+            VALUES (?, 'P001', 'image', ?, ?, 'ready', 'scan', 'old-template-2', ?, ?)
+            """,
+            (project_id, account_label, str(selected_path), ts, ts),
+        )
+    monkeypatch.setattr(product_images, "PRODUCT_IMAGE_RENDER_JOB_ROOT", tmp_path / "jobs")
+    calls: list[tuple[Path, str, Path]] = []
+
+    def fake_render(package_path: Path, product_uid: str, output_path: Path) -> Path:
+        calls.append((package_path, product_uid, output_path))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"new template 2 image")
+        return output_path
+
+    result = regenerate_product_card_images(
+        db,
+        project_id=project_id,
+        account_label=account_label,
+        mode="stale",
+        product_uid="P001",
+        product_card_template_id="muban-xiaobo-2",
+        render_product_card_still=fake_render,
+    )
+
+    assert result["regenerated"][0]["path"] == str(selected_path)
+    assert result["regenerated"][0]["reason"] == "stale_or_forced"
+    assert calls == [(calls[0][0], "P001", selected_path)]
+    assert selected_path.read_bytes() == b"new template 2 image"
 
 
 def test_regenerate_product_card_images_can_filter_single_product_uid(

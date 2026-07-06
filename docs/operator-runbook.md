@@ -1,5 +1,28 @@
 # B-Workflow SQL 运维手册
 
+## 模板校准标准入口
+
+模板位置校准不要临时猜商品、账号或模板。标准目标清单在
+`config/template-calibration-targets.json`，每个目标固定 `project_id`、
+`account`、`template_id`、代表商品 `product_uid` 和草稿名。后续新增模板
+UI 被认可后，如果需要剪映校准，先把它加到这个清单，再跑标准 runner。
+
+常用命令：
+
+```powershell
+cd G:\workspace\PC-Bilibili-workflow-sql
+python -m bworkflow_sql template-calibrate-runner --target xiaobo-template2 --dry-run
+python -m bworkflow_sql template-calibrate-runner --target xiaobo-template2 --draft-suffix v3
+```
+
+runner 的固定顺序是：先跑只读 `template-doctor`；如果发现缺图、旧 hash、
+错误模板目录等图片绑定问题，自动跑
+`product-images --mode stale --product-card-template-id ...`；然后重跑
+`template-doctor`；通过后再跑单商品 `template-calibrate`；最后校验 probe
+manifest 里的三件事必须一致：顶层 `display_template`、商品 `image_path`
+所在模板目录、`display_video_slot.templateId`。如果只是想看是否已准备好，
+用 `--dry-run`，它不会生成新的剪映草稿。
+
 ## 常用操作速查
 
 | 操作 | 入口 | 关键规则 | 验证 |
