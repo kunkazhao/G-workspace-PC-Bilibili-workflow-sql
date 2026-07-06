@@ -78,6 +78,57 @@ def seed_project(tmp_path: Path):
     return db, project_id
 
 
+def seed_ready_voice_assets(
+    db: Database,
+    project_id: int,
+    tmp_path: Path,
+    *,
+    account_label: str = "小燃",
+    include_intro: bool = True,
+    include_products: bool = True,
+    include_price: bool = True,
+) -> None:
+    repo = Repository(db)
+    account = next(account for account in repo.accounts() if account["label"] == account_label)
+    project = repo.project(project_id)
+    voice_root = Path(project["voice_root"]) / project["name"] / account_label
+    voice_root.mkdir(parents=True, exist_ok=True)
+    blocks = repo.script_blocks(project_id)
+    rows: list[tuple[str, dict[str, object], str]] = []
+    for block in blocks:
+        script_type = block["script_type"]
+        if script_type == "intro" and include_intro:
+            rows.append(("INTRO", block, block["block_label"]))
+        elif script_type == "product" and include_products:
+            rows.append((block["owner_uid"], block, block["block_label"]))
+        elif script_type == "price_transition" and include_price:
+            rows.append(("PRICE_TRANSITION", block, block["price_range_label"]))
+    with db.connect() as conn:
+        for uid, block, block_label in rows:
+            path = voice_root / f"{uid}-{block['id']}.wav"
+            path.write_bytes(b"voice")
+            conn.execute(
+                """
+                INSERT INTO asset_bindings
+                    (project_id, uid, script_block_id, asset_type, account_label, account_id, block_label, script_id, text_hash, path, status, source_kind, created_at, updated_at)
+                VALUES (?, ?, ?, 'voice', ?, ?, ?, ?, ?, ?, 'ready', 'test', ?, ?)
+                """,
+                (
+                    project_id,
+                    uid,
+                    block["id"],
+                    account_label,
+                    account["account_id"],
+                    block_label,
+                    block["script_id"],
+                    block["text_hash"],
+                    str(path),
+                    now_iso(),
+                    now_iso(),
+                ),
+            )
+
+
 def test_load_minimax_api_key_prefers_new_skill_env(monkeypatch, tmp_path: Path):
     new_skill_env = tmp_path / "zhaoer-tools-minimax-tts.env"
     legacy_skill_env = tmp_path / "minimax-tts.env"
@@ -205,6 +256,7 @@ def test_assemble_plan_previews_sequence_without_writing_spoken_files(tmp_path: 
     db, project_id = seed_project(tmp_path)
     repo = Repository(db)
     service = WorkflowService(db)
+    seed_ready_voice_assets(db, project_id, tmp_path)
     spoken_path = Path(repo.project(project_id)["spoken_md_path"])
     if spoken_path.exists():
         spoken_path.unlink()
@@ -224,6 +276,301 @@ def test_assemble_plan_previews_sequence_without_writing_spoken_files(tmp_path: 
     ]
     assert plan["next"]["action"] == "assemble"
     assert not spoken_path.exists()
+
+
+def test_assemble_plan_blocks_product_voice_when_text_hash_changed(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    repo = Repository(db)
+    service = WorkflowService(db)
+    project = repo.project(project_id)
+    voice_path = Path(project["voice_root"]) / project["name"] / "灏忕噧" / "old-YXEJ002.wav"
+    voice_path.parent.mkdir(parents=True)
+    voice_path.write_bytes(b"old voice")
+    product_block = next(block for block in repo.script_blocks(project_id) if block["script_type"] == "product")
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, asset_type, account_label, account_id, block_label, text_hash, path, status, source_kind, created_at, updated_at)
+            VALUES (?, 'YXEJ002', 'voice', '灏忕噧', 'xiaoran', ?, 'old-hash', ?, 'ready', 'legacy_import', 'now', 'now')
+            """,
+            (project_id, product_block["block_label"], str(voice_path)),
+        )
+
+    plan = service.assemble_spoken_script_plan(project_id, account_label="灏忕噧")
+
+    assert plan["ok"] is False
+    assert plan["status"] == "voice_incomplete"
+    missing_voice = [issue for issue in plan["issues"] if issue["code"] == "missing_voice_asset"]
+    product_issue = next(issue for issue in missing_voice if issue["uid"] == "YXEJ002")
+    assert product_issue["text_hash"] == product_block["text_hash"]
+    assert plan["next"]["action"] == "generate_voice"
+    assert "voice-counts" in plan["next"]["command"]
+
+
+def test_workflow_doctor_blocks_on_script_before_voice_or_template(tmp_path: Path, monkeypatch):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    calls: list[str] = []
+
+    def fake_script_doctor(project_id_arg: int, *, intro_label: str = "") -> dict[str, object]:
+        calls.append(f"script:{intro_label}")
+        return {
+            "ok": False,
+            "status": "needs_sync",
+            "issues": [{"code": "markdown_not_synced"}],
+            "next": {"action": "sync_markdown", "command": f"python -m bworkflow_sql sync {project_id_arg} --step markdown"},
+        }
+
+    def fail_assemble_plan(*_args, **_kwargs):
+        raise AssertionError("workflow-doctor should not check assembly before script passes")
+
+    def fail_template_doctor(*_args, **_kwargs):
+        raise AssertionError("workflow-doctor should not check template before script passes")
+
+    monkeypatch.setattr(service, "script_doctor", fake_script_doctor)
+    monkeypatch.setattr(service, "assemble_spoken_script_plan", fail_assemble_plan)
+    monkeypatch.setattr(service, "template_doctor", fail_template_doctor)
+
+    result = service.workflow_doctor(
+        project_id,
+        account_label="灏忕噧",
+        intro_label="寮曡█1",
+        product_card_template_id="muban-xiaoran-1",
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "blocked"
+    assert result["blocked_by"] == "script"
+    assert result["checks"]["script"]["status"] == "needs_sync"
+    assert result["checks"]["voice_and_assembly"] is None
+    assert result["checks"]["template"] is None
+    assert result["issues"] == [{"source": "script-doctor", "code": "markdown_not_synced"}]
+    assert result["next"]["action"] == "sync_markdown"
+    assert calls == ["script:寮曡█1"]
+
+
+def test_workflow_doctor_blocks_on_missing_voice_after_script_ready(tmp_path: Path, monkeypatch):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    monkeypatch.setattr(
+        service,
+        "script_doctor",
+        lambda project_id_arg, *, intro_label="": {
+            "ok": True,
+            "status": "ready_for_downstream",
+            "issues": [],
+            "next": {"action": "continue_downstream"},
+        },
+    )
+
+    result = service.workflow_doctor(
+        project_id,
+        account_label="灏忕噧",
+        intro_label="寮曡█1",
+        intro_index=1,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "blocked"
+    assert result["blocked_by"] == "voice_and_assembly"
+    assert result["checks"]["script"]["status"] == "ready_for_downstream"
+    assert result["checks"]["voice_and_assembly"]["status"] == "voice_incomplete"
+    assert result["checks"]["template"] is None
+    assert any(issue["source"] == "assemble-plan" and issue["code"] == "missing_voice_asset" for issue in result["issues"])
+    assert result["next"]["action"] == "generate_voice"
+    assert "voice-counts" in result["next"]["command"]
+    assert "voice " in result["next"]["follow_up_command"]
+
+
+def test_workflow_doctor_includes_template_check_after_assembly_ready(tmp_path: Path, monkeypatch):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    seed_ready_voice_assets(db, project_id, tmp_path)
+    template_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service,
+        "script_doctor",
+        lambda project_id_arg, *, intro_label="": {
+            "ok": True,
+            "status": "ready_for_downstream",
+            "issues": [],
+            "next": {"action": "continue_downstream"},
+        },
+    )
+
+    def fake_template_doctor(
+        project_id_arg: int,
+        *,
+        account_label: str,
+        product_card_template_id: str,
+        product_media_mode: str,
+    ) -> dict[str, object]:
+        template_calls.append(
+            {
+                "project_id": project_id_arg,
+                "account_label": account_label,
+                "product_card_template_id": product_card_template_id,
+                "product_media_mode": product_media_mode,
+            }
+        )
+        return {
+            "ok": False,
+            "status": "issues_found",
+            "issues": [{"code": "missing_ready_image_binding", "uid": "YXEJ002"}],
+            "next": {"action": "regenerate_product_images", "command": "python -m bworkflow_sql product-images 1"},
+        }
+
+    monkeypatch.setattr(service, "template_doctor", fake_template_doctor)
+
+    result = service.workflow_doctor(
+        project_id,
+        account_label="灏忕噧",
+        product_card_template_id="muban-xiaoran-1",
+        product_media_mode="video_preferred",
+    )
+
+    assert result["ok"] is False
+    assert result["blocked_by"] == "template"
+    assert result["checks"]["voice_and_assembly"]["status"] == "ready_to_assemble"
+    assert result["checks"]["template"]["status"] == "issues_found"
+    assert result["issues"][-1] == {
+        "source": "template-doctor",
+        "code": "missing_ready_image_binding",
+        "uid": "YXEJ002",
+    }
+    assert result["next"]["action"] == "regenerate_product_images"
+    assert template_calls == [
+        {
+            "project_id": project_id,
+            "account_label": "灏忕噧",
+            "product_card_template_id": "muban-xiaoran-1",
+            "product_media_mode": "video_preferred",
+        }
+    ]
+
+
+def test_workflow_doctor_resolves_unique_project_name(tmp_path: Path, monkeypatch):
+    db, project_id = seed_project(tmp_path)
+    project_name = Repository(db).project(project_id)["name"]
+    service = WorkflowService(db)
+    seed_ready_voice_assets(db, project_id, tmp_path)
+    monkeypatch.setattr(
+        service,
+        "script_doctor",
+        lambda project_id_arg, *, intro_label="": {
+            "ok": True,
+            "status": "ready_for_downstream",
+            "issues": [],
+            "next": {"action": "continue_downstream"},
+        },
+    )
+
+    result = service.workflow_doctor(project_name, account_label="灏忕噧")
+
+    assert result["project"]["id"] == project_id
+    assert result["status"] == "ready"
+
+
+def test_workflow_doctor_resolves_project_name_with_scheme_filter(tmp_path: Path, monkeypatch):
+    db, first_project_id = seed_project(tmp_path)
+    project_name = Repository(db).project(first_project_id)["name"]
+    second_project_id = db.upsert_project(
+        {
+            "name": project_name,
+            "category_name": Repository(db).project(first_project_id)["category_name"],
+            "scheme_id": "scheme-2",
+            "scheme_name": "方案B",
+            "image_root": str(tmp_path / "images-2"),
+            "video_root": str(tmp_path / "videos-2"),
+            "voice_root": str(tmp_path / "voice-2"),
+            "spoken_md_path": str(tmp_path / "episode-2.md"),
+        }
+    )
+    service = WorkflowService(db)
+    seed_ready_voice_assets(db, first_project_id, tmp_path)
+    monkeypatch.setattr(
+        service,
+        "script_doctor",
+        lambda project_id_arg, *, intro_label="": {
+            "ok": True,
+            "status": "ready_for_downstream",
+            "issues": [],
+            "next": {"action": "continue_downstream"},
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "assemble_spoken_script_plan",
+        lambda project_id_arg, **_: {
+            "ok": True,
+            "status": "ready_to_assemble",
+            "issues": [],
+            "next": {"action": "assemble", "command": f"python -m bworkflow_sql assemble {project_id_arg}"},
+        },
+    )
+
+    result = service.workflow_doctor(project_name, scheme_name="方案B", account_label="灏忕噧")
+
+    assert result["project"]["id"] == second_project_id
+    assert result["project"]["scheme_name"] == "方案B"
+
+
+def test_workflow_doctor_reports_ambiguous_project_name(tmp_path: Path):
+    db, first_project_id = seed_project(tmp_path)
+    first_project = Repository(db).project(first_project_id)
+    db.upsert_project(
+        {
+            "name": first_project["name"],
+            "category_name": first_project["category_name"],
+            "scheme_id": "scheme-2",
+            "scheme_name": "方案B",
+            "spoken_md_path": str(tmp_path / "episode-2.md"),
+        }
+    )
+    service = WorkflowService(db)
+
+    try:
+        service.workflow_doctor(first_project["name"], account_label="灏忕噧")
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("ambiguous project name should be rejected")
+
+    assert "ambiguous project reference" in message
+    assert "--scheme-name" in message
+    assert "方案B" in message
+
+
+def test_assemble_refuses_product_voice_when_only_old_uid_voice_exists(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    repo = Repository(db)
+    service = WorkflowService(db)
+    project = repo.project(project_id)
+    voice_path = Path(project["voice_root"]) / project["name"] / "灏忕噧" / "old-YXEJ002.wav"
+    voice_path.parent.mkdir(parents=True)
+    voice_path.write_bytes(b"old voice")
+    product_block = next(block for block in repo.script_blocks(project_id) if block["script_type"] == "product")
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, asset_type, account_label, account_id, block_label, text_hash, path, status, source_kind, created_at, updated_at)
+            VALUES (?, 'YXEJ002', 'voice', '灏忕噧', 'xiaoran', ?, 'old-hash', ?, 'ready', 'legacy_import', 'now', 'now')
+            """,
+            (project_id, product_block["block_label"], str(voice_path)),
+        )
+
+    try:
+        service.assemble_spoken_script(project_id, account_label="灏忕噧")
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("assemble should reject old uid/account voice fallback")
+
+    assert "missing_voice_asset" in message
+    assert "voice-counts" in message
+    assert "voice" in message
 
 
 def test_voice_filename_uses_price_uid_title_and_duplicate_suffix(tmp_path: Path):
@@ -498,6 +845,7 @@ def test_assembly_generates_spoken_markdown_and_internal_manifest_from_database(
             """,
             (project_id, product_block["id"], product_block["block_label"], product_block["text_hash"], str(voice_path)),
         )
+    seed_ready_voice_assets(db, project_id, tmp_path, include_products=False)
 
     result = service.run_command(
         service.build_assembly_command(project_id, mode="standard", account_label="小燃", intro_index=1)
@@ -536,6 +884,7 @@ def test_assembly_does_not_fallback_to_other_template_images(tmp_path: Path):
             """,
             (project_id, str(template1_image)),
         )
+    seed_ready_voice_assets(db, project_id, tmp_path)
 
     result = service.run_command(
         service.build_assembly_command(
@@ -589,9 +938,10 @@ def test_assembly_prefers_current_category_voice_for_shared_price_transition(tmp
                 INSERT INTO asset_bindings
                     (project_id, uid, script_block_id, asset_type, account_label, account_id, block_label, script_id, text_hash, path, status, source_kind, created_at, updated_at)
                 VALUES (?, 'PRICE_TRANSITION', ?, 'voice', '小燃', 'xiaoran', '300-500元', 'price:300-500:V001', ?, ?, 'ready', 'test', 'now', 'now')
-                """,
-                (project_id, price_block["id"], price_block["text_hash"], str(path)),
-            )
+            """,
+            (project_id, price_block["id"], price_block["text_hash"], str(path)),
+        )
+    seed_ready_voice_assets(db, project_id, tmp_path, include_price=False)
 
     result = service.assemble_spoken_script(project_id, account_label="小燃", product_uids=["JP071"])
 
@@ -644,6 +994,7 @@ def test_assembly_reuses_shared_price_transition_voice_after_script_block_id_cha
             """,
             (project_id, old_block_id, price_block["text_hash"], str(voice_path)),
         )
+    seed_ready_voice_assets(db, project_id, tmp_path, include_price=False)
 
     result = service.assemble_spoken_script(project_id, account_label="小燃", product_uids=["JP071"])
 
@@ -677,6 +1028,7 @@ def test_assembly_writes_reader_friendly_spoken_markdown_without_repeated_price_
             """,
             (project_id, second_body, text_hash(second_body), ts, ts),
         )
+    seed_ready_voice_assets(db, project_id, tmp_path)
 
     result = service.run_command(service.build_assembly_command(project_id, mode="standard", account_label="小燃"))
 
@@ -715,6 +1067,7 @@ def test_assembly_randomly_selects_one_product_and_price_version(tmp_path: Path,
             """,
             (project_id, price_version, text_hash(price_version), ts, ts),
         )
+    seed_ready_voice_assets(db, project_id, tmp_path)
 
     result = service.run_command(service.build_assembly_command(project_id, mode="standard", account_label="小燃"))
 
@@ -748,6 +1101,7 @@ def test_assembly_matches_imported_voice_by_uid_account_and_hash_without_script_
             """,
             (project_id, product_block["block_label"], product_block["text_hash"], str(voice_path)),
         )
+    seed_ready_voice_assets(db, project_id, tmp_path, include_products=False)
 
     result = service.run_command(service.build_assembly_command(project_id, account_label="小燃"))
 
@@ -764,6 +1118,7 @@ def test_jianying_intro_video_filters_intro_manifest_entries(tmp_path: Path):
     repo = Repository(db)
     service = WorkflowService(db)
     project = repo.project(project_id)
+    seed_ready_voice_assets(db, project_id, tmp_path)
 
     result = service.run_command(
         service.build_assembly_command(project_id, mode="standard", account_label="小燃", intro_index=1)
@@ -828,6 +1183,7 @@ def test_jianying_generation_skips_subtitles_by_default(tmp_path: Path, monkeypa
     db, project_id = seed_project(tmp_path)
     service = WorkflowService(db)
     project = Repository(db).project(project_id)
+    seed_ready_voice_assets(db, project_id, tmp_path)
     result = service.run_command(service.build_assembly_command(project_id, account_label="小燃"))
     assert result.returncode == 0
     spoken_path = Path(project["spoken_md_path"])
@@ -856,6 +1212,7 @@ def test_jianying_generation_can_enable_subtitles_with_no_vad(tmp_path: Path, mo
     db, project_id = seed_project(tmp_path)
     service = WorkflowService(db)
     project = Repository(db).project(project_id)
+    seed_ready_voice_assets(db, project_id, tmp_path)
     result = service.run_command(service.build_assembly_command(project_id, account_label="小燃"))
     assert result.returncode == 0
     spoken_path = Path(project["spoken_md_path"])
@@ -886,6 +1243,7 @@ def test_jianying_generation_summarizes_json_stdout_for_users(tmp_path: Path, mo
     db, project_id = seed_project(tmp_path)
     service = WorkflowService(db)
     project = Repository(db).project(project_id)
+    seed_ready_voice_assets(db, project_id, tmp_path)
     result = service.run_command(service.build_assembly_command(project_id, account_label="小燃"))
     assert result.returncode == 0
     spoken_path = Path(project["spoken_md_path"])
@@ -941,6 +1299,7 @@ def test_jianying_generation_summarizes_failed_json_stdout(tmp_path: Path, monke
     db, project_id = seed_project(tmp_path)
     service = WorkflowService(db)
     project = Repository(db).project(project_id)
+    seed_ready_voice_assets(db, project_id, tmp_path)
     result = service.run_command(service.build_assembly_command(project_id, account_label="小燃"))
     assert result.returncode == 0
     spoken_path = Path(project["spoken_md_path"])
@@ -1328,6 +1687,7 @@ def test_top_mode_writes_top_products_before_price_transitions_and_adds_closing(
             """,
             (project_id, text_hash("100-300 TRANSITION."), ts, ts),
         )
+    seed_ready_voice_assets(db, project_id, tmp_path)
 
     result = service.run_command(
         service.build_assembly_command(

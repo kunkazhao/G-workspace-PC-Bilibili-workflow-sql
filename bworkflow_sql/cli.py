@@ -279,6 +279,9 @@ def cmd_assemble(args: argparse.Namespace) -> None:
         args.project_id,
         account_label=args.account or "",
         intro_index=args.intro_index,
+        mode=args.mode,
+        top_uids=args.top_uids,
+        product_order_strategy=args.product_order_strategy,
         output_markdown_path=args.output or None,
         display_template=args.display_template or "",
     )
@@ -300,6 +303,9 @@ def cmd_assemble_plan(args: argparse.Namespace) -> None:
         args.project_id,
         account_label=args.account or "",
         intro_index=args.intro_index,
+        mode=args.mode,
+        top_uids=args.top_uids,
+        product_order_strategy=args.product_order_strategy,
     )
     _json_out(result)
 
@@ -582,6 +588,23 @@ def cmd_script_doctor(args: argparse.Namespace) -> None:
     _json_out(result)
 
 
+def cmd_workflow_doctor(args: argparse.Namespace) -> None:
+    _, _, _, wf = _init()
+    result = wf.workflow_doctor(
+        args.project_ref,
+        account_label=args.account or "",
+        scheme_name=args.scheme_name or "",
+        intro_label=args.intro_label or "",
+        intro_index=args.intro_index,
+        mode=args.mode,
+        top_uids=args.top_uids,
+        product_order_strategy=args.product_order_strategy,
+        product_card_template_id=args.product_card_template_id or "",
+        product_media_mode=args.product_media_mode,
+    )
+    _json_out(result)
+
+
 def cmd_materialize_episode(args: argparse.Namespace) -> None:
     _, _, _, wf = _init()
     result = wf.materialize_episode_markdown(
@@ -666,11 +689,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--intro-index", type=int, default=1, help="引言版本号（1-based）")
     p.add_argument("--output", "-o", help="口播稿输出路径")
     p.add_argument("--display-template", default="")
+    p.add_argument("--mode", choices=["standard", "top"], default="standard")
+    p.add_argument("--top-uids", default="", help="comma-separated product UIDs pinned to the top")
+    p.add_argument("--product-order-strategy", choices=["price_segment_shuffle", "stable"], default="price_segment_shuffle")
 
     p = sub.add_parser("assemble-plan", help="Preview spoken-script assembly without writing files")
     p.add_argument("project_id", type=int)
     p.add_argument("--account", help="配音账户标签")
     p.add_argument("--intro-index", type=int, default=1, help="intro version index, 1-based")
+    p.add_argument("--mode", choices=["standard", "top"], default="standard")
+    p.add_argument("--top-uids", default="", help="comma-separated product UIDs pinned to the top")
+    p.add_argument("--product-order-strategy", choices=["price_segment_shuffle", "stable"], default="price_segment_shuffle")
 
     # jianying
     p = sub.add_parser("jianying", help="生成剪映草稿")
@@ -859,6 +888,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("project_id", type=int)
     p.add_argument("--intro-label", default="", help="selected intro version label, for example 引言1")
 
+    p = sub.add_parser("workflow-doctor", help="Diagnose script, voice assembly, and optional template readiness")
+    p.add_argument("project_ref", help="project id, project/category name, or partial category name")
+    p.add_argument("--account", default="", help="voice/account label for voice and assembly checks")
+    p.add_argument("--scheme-name", default="", help="optional scheme name filter when project/category name matches multiple projects")
+    p.add_argument("--intro-label", default="", help="selected intro version label for script-doctor")
+    p.add_argument("--intro-index", type=int, default=1, help="intro version index for assemble-plan, 1-based")
+    p.add_argument("--mode", choices=["standard", "top"], default="standard")
+    p.add_argument("--top-uids", default="", help="comma-separated product UIDs pinned to the top")
+    p.add_argument("--product-order-strategy", choices=["price_segment_shuffle", "stable"], default="price_segment_shuffle")
+    p.add_argument(
+        "--product-card-template-id",
+        default="",
+        help="optional Remotion-first product-card template id or display name to include template-doctor",
+    )
+    p.add_argument(
+        "--product-media-mode",
+        choices=["cover_only", "video_preferred"],
+        default="video_preferred",
+        help="product media mode for template diagnostics",
+    )
+
     p = sub.add_parser("materialize-episode", help="Materialize reusable product copy into the current episode Markdown")
     p.add_argument("project_id", type=int)
     p.add_argument("--library-path", default="", help="override reusable product-copy library Markdown path")
@@ -888,6 +938,7 @@ DISPATCH = {
     "template-calibrate-runner": cmd_template_calibrate_runner,
     "template-doctor": cmd_template_doctor,
     "script-doctor": cmd_script_doctor,
+    "workflow-doctor": cmd_workflow_doctor,
     "materialize-episode": cmd_materialize_episode,
 }
 

@@ -118,6 +118,8 @@ from .render_package_builder import (
     SUPPORTED_PRODUCT_ORDER_STRATEGIES,
     SUPPORTED_OUTPUT_MODES,
     build_product_recommendation_package,
+    _arrange_price_segment_shuffle,
+    _has_matching_price_groups,
     product_card_payload_for_product,
 )
 from .product_image_generation import regenerate_product_card_images
@@ -268,6 +270,7 @@ class WorkflowService:
         *,
         mode: str = "standard",
         top_uids: list[str] | None = None,
+        product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
         account_label: str = "",
         intro_index: int = 1,
         product_uids: list[str] | None = None,
@@ -284,6 +287,8 @@ class WorkflowService:
             str(project_id),
             "--mode",
             "top" if mode == "top" else "standard",
+            "--product-order-strategy",
+            safe_text(product_order_strategy) or DEFAULT_PRODUCT_ORDER_STRATEGY,
             "--intro-index",
             str(max(1, int(intro_index or 1))),
             "--output-markdown",
@@ -480,6 +485,144 @@ class WorkflowService:
             self.db,
             project_id=project_id,
             intro_label=intro_label,
+        )
+
+    def workflow_doctor(
+        self,
+        project_ref: int | str,
+        *,
+        account_label: str = "",
+        scheme_name: str = "",
+        intro_label: str = "",
+        intro_index: int = 1,
+        mode: str = "standard",
+        top_uids: str | list[str] | None = None,
+        product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
+        product_card_template_id: str = "",
+        product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
+    ) -> dict[str, Any]:
+        project_id = self.resolve_project_ref(project_ref, scheme_name=scheme_name)
+        project = self._required_project(project_id)
+        account = safe_text(account_label)
+        top_uid_list = split_csv(top_uids) if isinstance(top_uids, str) else list(top_uids or [])
+        checks: dict[str, Any] = {
+            "script": None,
+            "voice_and_assembly": None,
+            "template": None,
+        }
+        issues: list[dict[str, Any]] = []
+
+        script = self.script_doctor(project_id, intro_label=intro_label)
+        checks["script"] = script
+        issues.extend(_workflow_doctor_issues("script-doctor", script.get("issues") or []))
+        if safe_text(script.get("status")) != "ready_for_downstream":
+            return _workflow_doctor_payload(
+                project_id=project_id,
+                project=project,
+                account_label=account,
+                ok=False,
+                status="blocked",
+                blocked_by="script",
+                checks=checks,
+                issues=issues,
+                next_hint=script.get("next") or {},
+            )
+
+        assembly = self.assemble_spoken_script_plan(
+            project_id,
+            account_label=account,
+            intro_index=intro_index,
+            mode=mode,
+            top_uids=top_uid_list,
+            product_order_strategy=product_order_strategy,
+        )
+        checks["voice_and_assembly"] = assembly
+        issues.extend(_workflow_doctor_issues("assemble-plan", assembly.get("issues") or []))
+        if safe_text(assembly.get("status")) != "ready_to_assemble":
+            return _workflow_doctor_payload(
+                project_id=project_id,
+                project=project,
+                account_label=account,
+                ok=False,
+                status="blocked",
+                blocked_by="voice_and_assembly",
+                checks=checks,
+                issues=issues,
+                next_hint=assembly.get("next") or {},
+            )
+
+        if account and safe_text(product_card_template_id):
+            template = self.template_doctor(
+                project_id,
+                account_label=account,
+                product_card_template_id=product_card_template_id,
+                product_media_mode=product_media_mode,
+            )
+            checks["template"] = template
+            issues.extend(_workflow_doctor_issues("template-doctor", template.get("issues") or []))
+            if not bool(template.get("ok")):
+                return _workflow_doctor_payload(
+                    project_id=project_id,
+                    project=project,
+                    account_label=account,
+                    ok=False,
+                    status="blocked",
+                    blocked_by="template",
+                    checks=checks,
+                    issues=issues,
+                    next_hint=template.get("next") or {},
+                )
+
+        return _workflow_doctor_payload(
+            project_id=project_id,
+            project=project,
+            account_label=account,
+            ok=True,
+            status="ready",
+            blocked_by="",
+            checks=checks,
+            issues=issues,
+            next_hint=assembly.get("next") or {},
+        )
+
+    def resolve_project_ref(
+        self,
+        project_ref: int | str,
+        *,
+        scheme_name: str = "",
+    ) -> int:
+        if isinstance(project_ref, int):
+            return project_ref
+        ref_text = safe_text(project_ref)
+        if not ref_text:
+            raise ValueError("project reference cannot be empty")
+        if ref_text.isdigit():
+            return int(ref_text)
+        normalized_ref = _normalize_project_lookup_text(ref_text)
+        normalized_scheme = _normalize_project_lookup_text(scheme_name)
+        matches: list[dict[str, Any]] = []
+        for project in self.repo.projects():
+            candidates = [
+                project.get("name"),
+                project.get("category_name"),
+                f"{safe_text(project.get('category_parent_name'))}-{safe_text(project.get('category_name'))}",
+            ]
+            if not any(_project_ref_matches(normalized_ref, candidate) for candidate in candidates):
+                continue
+            if normalized_scheme and not _project_ref_matches(normalized_scheme, project.get("scheme_name")):
+                continue
+            matches.append(project)
+        if len(matches) == 1:
+            return int(matches[0]["id"])
+        if not matches:
+            raise ValueError(f"project reference not found: {ref_text}")
+        summary = "; ".join(
+            f"id={item.get('id')} name={safe_text(item.get('name'))} scheme={safe_text(item.get('scheme_name'))}"
+            for item in matches[:8]
+        )
+        raise ValueError(
+            f"ambiguous project reference: {ref_text}. "
+            f"Pass --scheme-name or use a numeric project_id. Matches: {summary}"
         )
 
     def materialize_episode_markdown(
@@ -828,6 +971,7 @@ class WorkflowService:
         intro_index: int = 1,
         top_uids: list[str] | None = None,
         product_uids: list[str] | None = None,
+        product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
         output_markdown_path: str | Path | None = None,
         display_template: str = "",
     ) -> WorkflowRunResult:
@@ -835,7 +979,14 @@ class WorkflowService:
         account = self._resolve_account(account_label)
         output_markdown = self._spoken_markdown_path(project, output_markdown_path)
         manifest_path = self.spoken_manifest_path(project_id, output_markdown)
-        products = self._ordered_products(project_id, mode=mode, top_uids=top_uids or [], product_uids=product_uids or [])
+        order_strategy = self._validate_product_order_strategy(product_order_strategy)
+        products = self._ordered_products(
+            project_id,
+            mode=mode,
+            top_uids=top_uids or [],
+            product_uids=product_uids or [],
+            product_order_strategy=order_strategy,
+        )
         blocks = self.repo.script_blocks(project_id)
         assets = self.repo.asset_bindings(project_id)
         product_blocks: dict[str, list[dict[str, Any]]] = {}
@@ -866,6 +1017,15 @@ class WorkflowService:
         if intro_blocks:
             intro_block = intro_blocks[min(max(1, intro_index), len(intro_blocks)) - 1]
             self._append_spoken_paragraph(lines, intro_block["body"])
+            self._raise_if_missing_voice(
+                project_id,
+                account_label=account_label,
+                block=intro_block,
+                assets=assets,
+                uid="INTRO",
+                block_label=safe_text(intro_block.get("block_label")),
+                product={},
+            )
             entries.append(
                 self._manifest_entry(
                     order=order,
@@ -888,12 +1048,21 @@ class WorkflowService:
         for product in products:
             is_top_product = product["uid"].casefold() in top_set
             if not is_top_product:
-                price_block = self._matching_price_block_for_assets(product, price_blocks, assets, account_label=account_label)
+                price_block = self._matching_price_block(product, price_blocks)
                 if price_block:
                     price_key = safe_text(price_block.get("price_range_label")) or str(price_block["id"])
                     if price_key not in used_price_labels:
                         used_price_labels.add(price_key)
                         self._append_spoken_paragraph(lines, price_block["body"])
+                        self._raise_if_missing_voice(
+                            project_id,
+                            account_label=account_label,
+                            block=price_block,
+                            assets=assets,
+                            uid="PRICE_TRANSITION",
+                            block_label=safe_text(price_block.get("price_range_label")),
+                            product={},
+                        )
                         entries.append(
                             self._manifest_entry(
                                 order=order,
@@ -913,7 +1082,15 @@ class WorkflowService:
             versions = product_blocks.get(product["uid"], [])
             if not versions:
                 continue
-            block = self._choose_voice_ready_block(versions, assets, uid=product["uid"], account_label=account_label) or random.choice(versions)
+            block = self._choose_voice_ready_block(versions, assets, uid=product["uid"], account_label=account_label) or versions[0]
+            self._raise_if_missing_voice(
+                project_id,
+                account_label=account_label,
+                block=block,
+                assets=assets,
+                uid=product["uid"],
+                product=product,
+            )
             self._append_spoken_paragraph(lines, block["body"])
             entries.append(
                 self._manifest_entry(
@@ -960,6 +1137,7 @@ class WorkflowService:
             "project_name": safe_text(project.get("name")),
             "category": safe_text(project.get("category_name")),
             "mode": mode,
+            "product_order_strategy": order_strategy,
             "account_label": account_label,
             "account_id": account_id,
             "display_template": display_template,
@@ -984,11 +1162,19 @@ class WorkflowService:
         intro_index: int = 1,
         top_uids: list[str] | None = None,
         product_uids: list[str] | None = None,
+        product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
     ) -> dict[str, Any]:
         project = self._required_project(project_id)
         account = self._resolve_account(account_label)
         account_label = safe_text(account.get("label") or account_label)
-        products = self._ordered_products(project_id, mode=mode, top_uids=top_uids or [], product_uids=product_uids or [])
+        order_strategy = self._validate_product_order_strategy(product_order_strategy)
+        products = self._ordered_products(
+            project_id,
+            mode=mode,
+            top_uids=top_uids or [],
+            product_uids=product_uids or [],
+            product_order_strategy=order_strategy,
+        )
         blocks = self.repo.script_blocks(project_id)
         assets = self.repo.asset_bindings(project_id)
         product_blocks: dict[str, list[dict[str, Any]]] = {}
@@ -1008,6 +1194,14 @@ class WorkflowService:
         if intro_blocks:
             intro_block = intro_blocks[min(max(1, intro_index), len(intro_blocks)) - 1]
             sequence.append(_assembly_plan_entry(order, "intro", intro_block))
+            if not self._voice_ready_for_block(
+                assets,
+                uid="INTRO",
+                block=intro_block,
+                account_label=account_label,
+                block_label=safe_text(intro_block.get("block_label")),
+            ):
+                issues.append(self._missing_voice_issue(project_id, account_label=account_label, block=intro_block, uid="INTRO", product={}))
             order += 1
         else:
             issues.append({"level": "warning", "code": "missing_intro_block", "message": "no synced intro block"})
@@ -1018,12 +1212,28 @@ class WorkflowService:
             uid = safe_text(product.get("uid"))
             is_top_product = uid.casefold() in top_set
             if not is_top_product:
-                price_block = self._matching_price_block_for_assets(product, price_blocks, assets, account_label=account_label)
+                price_block = self._matching_price_block(product, price_blocks)
                 if price_block:
                     price_key = safe_text(price_block.get("price_range_label")) or str(price_block["id"])
                     if price_key not in used_price_labels:
                         used_price_labels.add(price_key)
                         sequence.append(_assembly_plan_entry(order, "price_transition", price_block))
+                        if not self._voice_ready_for_block(
+                            assets,
+                            uid="PRICE_TRANSITION",
+                            block=price_block,
+                            account_label=account_label,
+                            block_label=safe_text(price_block.get("price_range_label")),
+                        ):
+                            issues.append(
+                                self._missing_voice_issue(
+                                    project_id,
+                                    account_label=account_label,
+                                    block=price_block,
+                                    uid="PRICE_TRANSITION",
+                                    product={},
+                                )
+                            )
                         order += 1
             versions = product_blocks.get(uid, [])
             if not versions:
@@ -1038,6 +1248,8 @@ class WorkflowService:
                 continue
             block = self._choose_voice_ready_block(versions, assets, uid=uid, account_label=account_label) or versions[0]
             sequence.append(_assembly_plan_entry(order, "product", block, product=product))
+            if not self._voice_ready_for_block(assets, uid=uid, block=block, account_label=account_label):
+                issues.append(self._missing_voice_issue(project_id, account_label=account_label, block=block, uid=uid, product=product))
             order += 1
 
         sequence.append(
@@ -1049,7 +1261,22 @@ class WorkflowService:
                 "text_hash": text_hash(DEFAULT_CLOSING_TEXT),
             }
         )
-        status = "ready_to_assemble" if not any(issue["code"] == "missing_product_block" for issue in issues) else "content_incomplete"
+        content_incomplete = any(issue["code"] == "missing_product_block" for issue in issues)
+        voice_incomplete = any(issue["code"] == "missing_voice_asset" for issue in issues)
+        if content_incomplete:
+            status = "content_incomplete"
+        elif voice_incomplete:
+            status = "voice_incomplete"
+        else:
+            status = "ready_to_assemble"
+        assemble_command = self._assemble_cli_command(
+            project_id,
+            account_label=account_label,
+            intro_index=intro_index,
+            mode=mode,
+            top_uids=top_uids or [],
+            product_order_strategy=order_strategy,
+        )
         return {
             "ok": status == "ready_to_assemble",
             "status": status,
@@ -1069,8 +1296,13 @@ class WorkflowService:
             "sequence": sequence,
             "issues": issues,
             "next": {
-                "action": "assemble" if status == "ready_to_assemble" else "sync_or_fill_content",
-                "command": f"python -m bworkflow_sql assemble {project_id} --account {account_label}" if status == "ready_to_assemble" else f"python -m bworkflow_sql script-doctor {project_id}",
+                "action": "assemble" if status == "ready_to_assemble" else ("generate_voice" if status == "voice_incomplete" else "sync_or_fill_content"),
+                "command": assemble_command if status == "ready_to_assemble" else (
+                    f"python -m bworkflow_sql voice-counts {project_id} --account {account_label}"
+                    if status == "voice_incomplete"
+                    else f"python -m bworkflow_sql script-doctor {project_id}"
+                ),
+                "follow_up_command": f"python -m bworkflow_sql voice {project_id} --account {account_label}" if status == "voice_incomplete" else "",
             },
         }
 
@@ -1168,6 +1400,7 @@ class WorkflowService:
                 account_label=args.get("account-label", ""),
                 intro_index=int(args.get("intro-index") or "1"),
                 top_uids=split_csv(args.get("top-uids", "")),
+                product_order_strategy=args.get("product-order-strategy", DEFAULT_PRODUCT_ORDER_STRATEGY),
                 product_uids=split_csv(args.get("uids", "")),
                 output_markdown_path=args.get("output-markdown", ""),
                 display_template=args.get("display-template", ""),
@@ -2045,15 +2278,95 @@ class WorkflowService:
                     pids.append(pid)
         return list(dict.fromkeys(pids))
 
-    def _ordered_products(self, project_id: int, *, mode: str, top_uids: list[str], product_uids: list[str]) -> list[dict[str, Any]]:
+    def _validate_product_order_strategy(self, product_order_strategy: str) -> str:
+        order_strategy = safe_text(product_order_strategy) or DEFAULT_PRODUCT_ORDER_STRATEGY
+        if order_strategy not in SUPPORTED_PRODUCT_ORDER_STRATEGIES:
+            raise ValueError(f"unsupported product_order_strategy: {order_strategy}")
+        return order_strategy
+
+    def _ordered_products(
+        self,
+        project_id: int,
+        *,
+        mode: str,
+        top_uids: list[str],
+        product_uids: list[str],
+        product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
+    ) -> list[dict[str, Any]]:
         products = self.repo.products(project_id, include_removed=False)
         selected = {uid.casefold() for uid in product_uids}
         if selected:
             products = [product for product in products if product["uid"].casefold() in selected]
+        order_strategy = self._validate_product_order_strategy(product_order_strategy)
+        if order_strategy == "price_segment_shuffle":
+            price_blocks = [block for block in self.repo.script_blocks(project_id) if block["script_type"] == "price_transition"]
+            if _has_matching_price_groups(products, price_blocks):
+                products = self._products_in_price_segment_shuffle_order(products, price_blocks)
         if mode != "top" or not top_uids:
             return products
         rank = {uid.casefold(): index for index, uid in enumerate(top_uids)}
-        return sorted(products, key=lambda item: (0, rank[item["uid"].casefold()]) if item["uid"].casefold() in rank else (1, item["sort_order"]))
+        existing_order = {safe_text(item.get("uid")).casefold(): index for index, item in enumerate(products)}
+        return sorted(
+            products,
+            key=lambda item: (
+                0,
+                rank[safe_text(item.get("uid")).casefold()],
+            )
+            if safe_text(item.get("uid")).casefold() in rank
+            else (1, existing_order.get(safe_text(item.get("uid")).casefold(), int(item.get("sort_order") or 0))),
+        )
+
+    def _products_in_price_segment_shuffle_order(self, products: list[dict[str, Any]], price_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        product_segments = {safe_text(product.get("uid")): {"uid": safe_text(product.get("uid"))} for product in products}
+        price_segments = {
+            safe_text(block.get("price_range_label")): {"price_label": safe_text(block.get("price_range_label"))}
+            for block in price_blocks
+        }
+        arranged = _arrange_price_segment_shuffle(
+            products,
+            price_blocks=price_blocks,
+            price_segments=price_segments,
+            product_segments=product_segments,
+        )
+        by_uid = {safe_text(product.get("uid")): product for product in products}
+        ordered: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for segment in arranged:
+            uid = safe_text(segment.get("uid"))
+            if uid and uid in by_uid and uid not in seen:
+                ordered.append(by_uid[uid])
+                seen.add(uid)
+        ordered.extend([product for product in products if safe_text(product.get("uid")) not in seen])
+        return ordered
+
+    def _assemble_cli_command(
+        self,
+        project_id: int,
+        *,
+        account_label: str,
+        intro_index: int,
+        mode: str,
+        top_uids: list[str],
+        product_order_strategy: str,
+    ) -> str:
+        parts = [
+            "python",
+            "-m",
+            "bworkflow_sql",
+            "assemble",
+            str(project_id),
+            "--account",
+            account_label,
+            "--intro-index",
+            str(max(1, int(intro_index or 1))),
+            "--mode",
+            "top" if mode == "top" else "standard",
+            "--product-order-strategy",
+            product_order_strategy,
+        ]
+        if top_uids:
+            parts.extend(["--top-uids", ",".join(top_uids)])
+        return " ".join(parts)
 
     def _voice_scope_fragment(self, project: dict[str, Any], account_label: str) -> str:
         root = safe_text(project.get("voice_root")) or DEFAULT_OUTPUT_ROOT
@@ -2109,11 +2422,6 @@ class WorkflowService:
                     text_hash=safe_text(block["text_hash"]),
                     block_label=shared_label,
                 )
-        if not voice and block["script_type"] == "product":
-            if preferred_voice_path_contains:
-                voice = self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label, path_contains=preferred_voice_path_contains)
-            if not voice:
-                voice = self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label)
         template_suffix = image_set_for_template(display_template)
         display_user = user_for_template(display_template)
         image = None
@@ -2226,6 +2534,10 @@ class WorkflowService:
         matched = [block for block in blocks if price_in_range(price, safe_text(block.get("price_range_label")))]
         return [random.choice(matched)] if matched else []
 
+    def _matching_price_block(self, product: dict[str, Any], blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
+        matched = self._matching_price_blocks(product, blocks)
+        return matched[0] if matched else None
+
     def _voice_ready_for_block(
         self,
         assets: list[dict[str, Any]],
@@ -2245,8 +2557,6 @@ class WorkflowService:
         )
         if exact:
             return True
-        if uid not in {"INTRO", "PRICE_TRANSITION"}:
-            return bool(self._ready_asset(assets, asset_type="voice", uid=uid, account_label=account_label))
         return bool(
             block_label
             and any(
@@ -2283,27 +2593,60 @@ class WorkflowService:
                 block_label=block_label,
             )
         ]
-        return random.choice(ready or blocks)
+        return random.choice(ready) if ready else None
 
-    def _matching_price_block_for_assets(
+    def _missing_voice_issue(
         self,
-        product: dict[str, Any],
-        blocks: list[dict[str, Any]],
-        assets: list[dict[str, Any]],
+        project_id: int,
         *,
         account_label: str,
-    ) -> dict[str, Any] | None:
-        price = first_number(safe_text(product.get("price_label")))
-        if price is None:
-            return None
-        matched = [block for block in blocks if price_in_range(price, safe_text(block.get("price_range_label")))]
-        label = safe_text(matched[0].get("price_range_label")) if matched else ""
-        return self._choose_voice_ready_block(
-            matched,
+        block: dict[str, Any],
+        uid: str,
+        product: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "level": "error",
+            "code": "missing_voice_asset",
+            "message": "current script block has no ready voice asset with matching text_hash",
+            "script_type": safe_text(block.get("script_type")),
+            "script_block_id": int(block.get("id") or 0),
+            "script_id": safe_text(block.get("script_id")),
+            "uid": safe_text(uid),
+            "owner_uid": safe_text(block.get("owner_uid")),
+            "product_name": safe_text(product.get("title")),
+            "block_label": safe_text(block.get("block_label")),
+            "price_range_label": safe_text(block.get("price_range_label")),
+            "account_label": account_label,
+            "text_hash": safe_text(block.get("text_hash")),
+            "command": f"python -m bworkflow_sql voice-counts {project_id} --account {account_label}",
+            "follow_up_command": f"python -m bworkflow_sql voice {project_id} --account {account_label}",
+        }
+
+    def _raise_if_missing_voice(
+        self,
+        project_id: int,
+        *,
+        account_label: str,
+        block: dict[str, Any],
+        assets: list[dict[str, Any]],
+        uid: str,
+        product: dict[str, Any],
+        block_label: str = "",
+    ) -> None:
+        if self._voice_ready_for_block(
             assets,
-            uid="PRICE_TRANSITION",
+            uid=uid,
+            block=block,
             account_label=account_label,
-            block_label=label,
+            block_label=block_label,
+        ):
+            return
+        issue = self._missing_voice_issue(project_id, account_label=account_label, block=block, uid=uid, product=product)
+        raise ValueError(
+            "missing_voice_asset: current text_hash has no ready voice asset. "
+            f"script_type={issue['script_type']} uid={issue['uid']} block_label={issue['block_label']} "
+            f"text_hash={issue['text_hash']}. "
+            f"Run `{issue['command']}` then `{issue['follow_up_command']}`."
         )
 
     def _append_spoken_paragraph(self, lines: list[str], text: str) -> None:
@@ -2433,6 +2776,61 @@ def render_package_stale_product_image_next_step(
             },
         ],
     }
+
+
+def _workflow_doctor_issues(source: str, issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        item = dict(issue)
+        item.setdefault("source", source)
+        item["source"] = source
+        result.append(item)
+    return result
+
+
+def _workflow_doctor_payload(
+    *,
+    project_id: int,
+    project: dict[str, Any],
+    account_label: str,
+    ok: bool,
+    status: str,
+    blocked_by: str,
+    checks: dict[str, Any],
+    issues: list[dict[str, Any]],
+    next_hint: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "ok": ok,
+        "status": status,
+        "blocked_by": blocked_by or None,
+        "project": {
+            "id": int(project_id),
+            "name": safe_text(project.get("name")),
+            "category": safe_text(project.get("category_name") or project.get("category")),
+            "scheme_id": safe_text(project.get("scheme_id")),
+            "scheme_name": safe_text(project.get("scheme_name")),
+        },
+        "account": account_label,
+        "checks": checks,
+        "issues": issues,
+        "next": next_hint or {},
+    }
+
+
+def _normalize_project_lookup_text(value: Any) -> str:
+    return re.sub(r"\s+", "", safe_text(value)).casefold()
+
+
+def _project_ref_matches(normalized_ref: str, value: Any) -> bool:
+    normalized_value = _normalize_project_lookup_text(value)
+    return bool(
+        normalized_ref
+        and normalized_value
+        and (normalized_ref == normalized_value or normalized_ref in normalized_value)
+    )
 
 
 def render_package_to_jianying_manifest(

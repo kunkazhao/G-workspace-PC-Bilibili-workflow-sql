@@ -33,6 +33,7 @@ def test_prepare_product_recommendation_output_writes_draft_package(
         product_card_template_id,
         mode,
         top_uids,
+        product_uids,
     ):
         calls.append(
             {
@@ -45,6 +46,7 @@ def test_prepare_product_recommendation_output_writes_draft_package(
                 "product_card_template_id": product_card_template_id,
                 "mode": mode,
                 "top_uids": top_uids,
+                "product_uids": product_uids,
             }
         )
         return SimpleNamespace(package=package, missing=[], stale_product_images=[])
@@ -79,6 +81,7 @@ def test_prepare_product_recommendation_output_writes_draft_package(
             "product_card_template_id": "",
             "mode": "standard",
             "top_uids": [],
+            "product_uids": [],
         }
     ]
 

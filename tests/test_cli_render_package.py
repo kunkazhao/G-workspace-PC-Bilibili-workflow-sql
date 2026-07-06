@@ -153,6 +153,45 @@ def test_materialize_episode_parser_registers_command():
     assert args.episode_path == "episode.md"
 
 
+def test_workflow_doctor_parser_registers_command():
+    args = cli.build_parser().parse_args(
+        [
+            "workflow-doctor",
+            "数码-蓝牙音响",
+            "--account",
+            "xiaobo",
+            "--scheme-name",
+            "主方案",
+            "--intro-label",
+            "intro-1",
+            "--intro-index",
+            "2",
+            "--mode",
+            "top",
+            "--top-uids",
+            "P003,P001",
+            "--product-order-strategy",
+            "stable",
+            "--product-card-template-id",
+            "muban-xiaobo-2",
+            "--product-media-mode",
+            "cover_only",
+        ]
+    )
+
+    assert args.command == "workflow-doctor"
+    assert args.project_ref == "数码-蓝牙音响"
+    assert args.account == "xiaobo"
+    assert args.scheme_name == "主方案"
+    assert args.intro_label == "intro-1"
+    assert args.intro_index == 2
+    assert args.mode == "top"
+    assert args.top_uids == "P003,P001"
+    assert args.product_order_strategy == "stable"
+    assert args.product_card_template_id == "muban-xiaobo-2"
+    assert args.product_media_mode == "cover_only"
+
+
 def test_assemble_plan_parser_registers_command():
     args = cli.build_parser().parse_args(
         [
@@ -169,6 +208,63 @@ def test_assemble_plan_parser_registers_command():
     assert args.project_id == 3
     assert args.account == "小博"
     assert args.intro_index == 2
+
+
+def test_assemble_plan_parser_registers_ordering_options():
+    args = cli.build_parser().parse_args(
+        [
+            "assemble-plan",
+            "3",
+            "--account",
+            "xiaobo",
+            "--intro-index",
+            "2",
+            "--mode",
+            "top",
+            "--top-uids",
+            "P003,P001",
+            "--product-order-strategy",
+            "stable",
+        ]
+    )
+
+    assert args.command == "assemble-plan"
+    assert args.project_id == 3
+    assert args.account == "xiaobo"
+    assert args.intro_index == 2
+    assert args.mode == "top"
+    assert args.top_uids == "P003,P001"
+    assert args.product_order_strategy == "stable"
+
+
+def test_assemble_parser_registers_ordering_options():
+    args = cli.build_parser().parse_args(
+        [
+            "assemble",
+            "3",
+            "--account",
+            "xiaobo",
+            "--intro-index",
+            "2",
+            "--mode",
+            "top",
+            "--top-uids",
+            "P003,P001",
+            "--product-order-strategy",
+            "stable",
+            "--output",
+            "spoken.md",
+        ]
+    )
+
+    assert args.command == "assemble"
+    assert args.project_id == 3
+    assert args.account == "xiaobo"
+    assert args.intro_index == 2
+    assert args.mode == "top"
+    assert args.top_uids == "P003,P001"
+    assert args.product_order_strategy == "stable"
+    assert args.output == "spoken.md"
 
 
 def test_template_calibrate_runner_parser_registers_command():
@@ -486,11 +582,94 @@ def test_cmd_materialize_episode_writes_result_json(capsys, monkeypatch):
     ]
 
 
+def test_cmd_workflow_doctor_writes_diagnostic_json(capsys, monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class FakeWorkflow:
+        def workflow_doctor(
+            self,
+            project_ref,
+            *,
+            account_label,
+            scheme_name,
+            intro_label,
+            intro_index,
+            mode,
+            top_uids,
+            product_order_strategy,
+            product_card_template_id,
+            product_media_mode,
+        ):
+            calls.append(
+                {
+                    "project_ref": project_ref,
+                    "account_label": account_label,
+                    "scheme_name": scheme_name,
+                    "intro_label": intro_label,
+                    "intro_index": intro_index,
+                    "mode": mode,
+                    "top_uids": top_uids,
+                    "product_order_strategy": product_order_strategy,
+                    "product_card_template_id": product_card_template_id,
+                    "product_media_mode": product_media_mode,
+                }
+            )
+            return {
+                "ok": False,
+                "status": "blocked",
+                "next": {"action": "generate_voice"},
+            }
+
+    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
+
+    cli.cmd_workflow_doctor(
+        Namespace(
+            project_ref="数码-蓝牙音响",
+            account="xiaobo",
+            scheme_name="主方案",
+            intro_label="intro-1",
+            intro_index=2,
+            mode="top",
+            top_uids="P003,P001",
+            product_order_strategy="stable",
+            product_card_template_id="muban-xiaobo-2",
+            product_media_mode="cover_only",
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["next"] == {"action": "generate_voice"}
+    assert calls == [
+        {
+            "project_ref": "数码-蓝牙音响",
+            "account_label": "xiaobo",
+            "scheme_name": "主方案",
+            "intro_label": "intro-1",
+            "intro_index": 2,
+            "mode": "top",
+            "top_uids": "P003,P001",
+            "product_order_strategy": "stable",
+            "product_card_template_id": "muban-xiaobo-2",
+            "product_media_mode": "cover_only",
+        }
+    ]
+
+
 def test_cmd_assemble_plan_writes_preview_json(capsys, monkeypatch):
     calls: list[dict[str, object]] = []
 
     class FakeWorkflow:
-        def assemble_spoken_script_plan(self, project_id, *, account_label, intro_index):
+        def assemble_spoken_script_plan(
+            self,
+            project_id,
+            *,
+            account_label,
+            intro_index,
+            mode,
+            top_uids,
+            product_order_strategy,
+        ):
             calls.append(
                 {
                     "project_id": project_id,
@@ -511,6 +690,9 @@ def test_cmd_assemble_plan_writes_preview_json(capsys, monkeypatch):
             project_id=3,
             account="小博",
             intro_index=2,
+            mode="top",
+            top_uids="P003,P001",
+            product_order_strategy="stable",
         )
     )
 
