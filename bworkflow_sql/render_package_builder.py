@@ -926,10 +926,11 @@ def _cover_cache_path(*, category: str, uid: str, url: str) -> Path:
     suffix = Path(parsed.path).suffix.lower()
     if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
         suffix = ".jpg"
+    url_hash = text_hash(url)[:12]
     return (
         PRODUCT_COVER_CACHE_ROOT
         / _safe_path_component(category or "uncategorized")
-        / f"{_safe_path_component(uid or 'product')}{suffix}"
+        / f"{_safe_path_component(uid or 'product')}-{url_hash}{suffix}"
     )
 
 

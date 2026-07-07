@@ -980,7 +980,11 @@ def test_build_product_recommendation_package_downloads_remote_cover_to_category
     )
     cover_path = Path(product["productCard"]["coverAsset"])
 
-    assert cover_path == tmp_path / "cover-cache" / "keyboard" / "P001.webp"
+    assert cover_path == builder._cover_cache_path(
+        category="keyboard",
+        uid="P001",
+        url="https://img.example.com/covers/P001.webp",
+    )
     assert cover_path.read_bytes() == b"cover-bytes"
     assert product["productCard"]["dataMap"]["cover"] == str(cover_path)
 
@@ -1016,10 +1020,40 @@ def test_build_product_recommendation_package_downloads_data_map_cover_url(
         for segment in result.package["segments"]
         if segment.get("productUid") == "P001"
     )
-    cover_path = tmp_path / "cover-cache" / "keyboard" / "P001.jpg"
+    cover_path = builder._cover_cache_path(
+        category="keyboard",
+        uid="P001",
+        url="https://img.example.com/covers/P001.jpg",
+    )
 
     assert product["productCard"]["coverAsset"] == str(cover_path)
     assert product["productCard"]["dataMap"]["cover"] == str(cover_path)
+
+
+def test_remote_cover_cache_path_changes_when_url_changes_but_suffix_does_not(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", tmp_path / "cover-cache")
+
+    old_path = builder._cover_cache_path(
+        category="speaker",
+        uid="ZMYX005",
+        url="https://cdn.example.com/covers/old-cover.jpg",
+    )
+    new_path = builder._cover_cache_path(
+        category="speaker",
+        uid="ZMYX005",
+        url="https://cdn.example.com/covers/new-cover.jpg",
+    )
+
+    assert old_path != new_path
+    assert old_path.name.startswith("ZMYX005-")
+    assert new_path.name.startswith("ZMYX005-")
+    assert old_path.suffix == ".jpg"
+    assert new_path.suffix == ".jpg"
 
 
 def test_build_product_recommendation_package_reports_missing_required_assets(
