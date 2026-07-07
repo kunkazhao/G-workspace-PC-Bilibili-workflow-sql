@@ -69,6 +69,30 @@ def test_product_images_parser_registers_command():
     assert args.product_card_template_id == "muban-xiaobo-1"
 
 
+def test_product_card_preflight_parser_registers_command():
+    args = cli.build_parser().parse_args(
+        [
+            "product-card-preflight",
+            "3",
+            "--account",
+            "xiaobo",
+            "--product-card-template-id",
+            "muban-xiaobo-1",
+            "--product-uid",
+            "P001",
+            "--expect-cover",
+            "P001-new.png",
+        ]
+    )
+
+    assert args.command == "product-card-preflight"
+    assert args.project_id == 3
+    assert args.account == "xiaobo"
+    assert args.product_card_template_id == "muban-xiaobo-1"
+    assert args.product_uid == "P001"
+    assert args.expect_cover == "P001-new.png"
+
+
 def test_template_calibrate_parser_registers_command():
     args = cli.build_parser().parse_args(
         [
@@ -958,3 +982,59 @@ def test_cmd_render_package_reports_missing_without_writing_package(
     assert payload["ok"] is False
     assert payload["missing"] == missing
     assert not output.exists()
+
+
+def test_cmd_product_card_preflight_writes_gate_json(capsys, monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class FakeWorkflow:
+        def product_card_preflight(
+            self,
+            project_id,
+            *,
+            account_label,
+            product_card_template_id,
+            product_uid,
+            expect_cover,
+        ):
+            calls.append(
+                {
+                    "project_id": project_id,
+                    "account_label": account_label,
+                    "product_card_template_id": product_card_template_id,
+                    "product_uid": product_uid,
+                    "expect_cover": expect_cover,
+                }
+            )
+            return {
+                "ok": False,
+                "status": "blocked",
+                "issues": [{"code": "missing_cover_asset", "uid": "P001"}],
+                "next": {"command": "python -m bworkflow_sql sync 3 --step master"},
+            }
+
+    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
+
+    cli.cmd_product_card_preflight(
+        Namespace(
+            project_id=3,
+            account="xiaobo",
+            product_card_template_id="muban-xiaobo-1",
+            product_uid="P001",
+            expect_cover="P001-new.png",
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["status"] == "blocked"
+    assert payload["next"]["command"] == "python -m bworkflow_sql sync 3 --step master"
+    assert calls == [
+        {
+            "project_id": 3,
+            "account_label": "xiaobo",
+            "product_card_template_id": "muban-xiaobo-1",
+            "product_uid": "P001",
+            "expect_cover": "P001-new.png",
+        }
+    ]

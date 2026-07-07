@@ -91,6 +91,7 @@ def cmd_create_project(args: argparse.Namespace) -> None:
         DEFAULT_VOICE_ROOT,
         INTERNAL_WORKSPACE_ROOT,
     )
+    from .ui_helpers import DEFAULT_SPOKEN_MONTH_PREFIX
     from .utils import now_iso
 
     db, repo, sync, _ = _init()
@@ -98,7 +99,7 @@ def cmd_create_project(args: argparse.Namespace) -> None:
         "SELECT id FROM projects WHERE workspace_id=? AND category_id=? AND scheme_id=? ORDER BY id DESC LIMIT 1",
         (args.workspace_id, args.category_id, args.scheme_id),
     )
-    md_path = Path(args.md_path) if args.md_path else DEFAULT_SPOKEN_MD_ROOT / args.name / "6月-小博.md"
+    md_path = Path(args.md_path) if args.md_path else DEFAULT_SPOKEN_MD_ROOT / args.name / f"{DEFAULT_SPOKEN_MONTH_PREFIX}-小博.md"
     project_id = db.upsert_project(
         {
             "id": int(existing["id"]) if existing else 0,
@@ -599,6 +600,18 @@ def cmd_template_doctor(args: argparse.Namespace) -> None:
     _json_out(result)
 
 
+def cmd_product_card_preflight(args: argparse.Namespace) -> None:
+    _, _, _, wf = _init()
+    result = wf.product_card_preflight(
+        project_id=args.project_id,
+        account_label=args.account,
+        product_card_template_id=args.product_card_template_id or "",
+        product_uid=args.product_uid or "",
+        expect_cover=args.expect_cover or "",
+    )
+    _json_out(result)
+
+
 def cmd_script_doctor(args: argparse.Namespace) -> None:
     _, _, _, wf = _init()
     result = wf.script_doctor(
@@ -857,6 +870,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Remotion-first product-card template id or display name; required for still/product-image generation",
     )
 
+    p = sub.add_parser("product-card-preflight", help="Preflight product-card data and image freshness before product-images or phase-7 output")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--account", required=True)
+    p.add_argument(
+        "--product-card-template-id",
+        required=True,
+        help="explicit Remotion-first product-card template id or display name",
+    )
+    p.add_argument("--product-uid", default="", help="optional single product UID to check")
+    p.add_argument("--expect-cover", default="", help="optional filename/substring expected in coverAsset or dataMap.cover")
+
     p = sub.add_parser("template-calibrate", help="生成单商品剪映模板位置校准草稿")
     p.add_argument("project_id", type=int)
     p.add_argument("--account", required=True, help="账号/用户标签，如 小燃")
@@ -959,6 +983,7 @@ DISPATCH = {
     "render-package": cmd_render_package,
     "render-final-video": cmd_render_final_video,
     "product-images": cmd_product_images,
+    "product-card-preflight": cmd_product_card_preflight,
     "template-calibrate": cmd_template_calibrate,
     "template-calibrate-runner": cmd_template_calibrate_runner,
     "template-doctor": cmd_template_doctor,

@@ -475,6 +475,26 @@ class WorkflowService:
             product_media_mode=product_media_mode,
         )
 
+    def product_card_preflight(
+        self,
+        project_id: int,
+        *,
+        account_label: str,
+        product_card_template_id: str,
+        product_uid: str = "",
+        expect_cover: str = "",
+    ) -> dict[str, Any]:
+        from .product_card_preflight import product_card_preflight
+
+        return product_card_preflight(
+            self.db,
+            project_id=project_id,
+            account_label=account_label,
+            product_card_template_id=product_card_template_id,
+            product_uid=product_uid,
+            expect_cover=expect_cover,
+        )
+
     def script_doctor(
         self,
         project_id: int,
