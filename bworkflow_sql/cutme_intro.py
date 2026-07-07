@@ -6,6 +6,7 @@ import secrets
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -767,12 +768,16 @@ def _record_intro_preflight_pipeline(
 
     phases = existing.get("phases") if isinstance(existing.get("phases"), dict) else {}
     intro_phase = phases.get("intro_video") if isinstance(phases.get("intro_video"), dict) else {}
+    updated_at_utc = now_iso()
+    updated_at_local = datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds")
     intro_phase.update(
         {
             "status": "ready" if result.get("ok") else "blocked",
             "preflight_status": safe_text(result.get("status")),
             "source_intro_plan_path": safe_text(result.get("source_intro_plan_path")),
-            "updated_at": now_iso(),
+            "updated_at": updated_at_utc,
+            "updated_at_utc": updated_at_utc,
+            "updated_at_local": updated_at_local,
         }
     )
     if result.get("ok"):

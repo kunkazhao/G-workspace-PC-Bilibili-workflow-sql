@@ -181,6 +181,9 @@ def test_intro_preflight_records_blocked_pipeline_state(tmp_path: Path):
     assert saved["phases"]["intro_video"]["status"] == "blocked"
     assert saved["phases"]["intro_video"]["preflight_status"] == "blocked_missing_intro_demo"
     assert saved["phases"]["intro_video"]["source_intro_plan_path"] == str(source_plan)
+    assert saved["phases"]["intro_video"]["updated_at_utc"].endswith("Z")
+    assert saved["phases"]["intro_video"]["updated_at_local"].endswith("+08:00")
+    assert saved["phases"]["intro_video"]["updated_at"] == saved["phases"]["intro_video"]["updated_at_utc"]
 
 
 def test_intro_preflight_rejects_recovered_intro_template(tmp_path: Path):
