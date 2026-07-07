@@ -13,6 +13,8 @@ from bworkflow_sql.ui_helpers import (
     collect_voice_status,
     entry_asset_issue_lines,
     is_valid_windows_filename,
+    account_label_from_spoken_path,
+    default_spoken_markdown_path,
     manifest_account_label,
     manifest_display_template,
     manifest_missing_assets,
@@ -251,6 +253,18 @@ def test_project_name_exists_matches_names_case_insensitively():
 
 def test_spoken_markdown_default_root_is_spoken_copy_folder():
     assert str(DEFAULT_SPOKEN_MD_ROOT) == r"G:\WriteSpace\B站-文案脚本\10_b站文案\1.口播文案"
+
+
+def test_default_spoken_markdown_path_uses_current_month_prefix():
+    path = default_spoken_markdown_path({"name": "数码-入耳蓝牙耳机"}, "小博")
+
+    assert path == DEFAULT_SPOKEN_MD_ROOT / "数码-入耳蓝牙耳机" / "7月-小博.md"
+
+
+def test_account_label_from_spoken_path_accepts_month_prefix():
+    path = DEFAULT_SPOKEN_MD_ROOT / "数码-入耳蓝牙耳机" / "7月-小博.md"
+
+    assert account_label_from_spoken_path(str(path)) == "小博"
 
 
 def test_manifest_account_label_prefers_manifest_then_entries():

@@ -93,6 +93,24 @@ def test_product_card_preflight_parser_registers_command():
     assert args.expect_cover == "P001-new.png"
 
 
+def test_intro_preflight_parser_registers_command():
+    args = cli.build_parser().parse_args(
+        [
+            "intro-preflight",
+            "23",
+            "--source-plan",
+            "source-intro-plan-引言1.json",
+            "--asset-root",
+            "assets",
+        ]
+    )
+
+    assert args.command == "intro-preflight"
+    assert args.project_id == 23
+    assert args.source_plan == "source-intro-plan-引言1.json"
+    assert args.asset_root == "assets"
+
+
 def test_template_calibrate_parser_registers_command():
     args = cli.build_parser().parse_args(
         [
@@ -1038,3 +1056,32 @@ def test_cmd_product_card_preflight_writes_gate_json(capsys, monkeypatch):
             "expect_cover": "P001-new.png",
         }
     ]
+
+
+def test_cmd_intro_preflight_writes_gate_json(capsys, monkeypatch):
+    class FakeRepo:
+        def project(self, project_id: int):
+            assert project_id == 23
+            return {"id": 23, "name": "数码-桌面音响"}
+
+    def fake_preflight(**kwargs):
+        assert kwargs["source_plan_path"] == "source.json"
+        assert kwargs["asset_root"] == "assets"
+        assert kwargs["project"] == {"id": 23, "name": "数码-桌面音响"}
+        return {
+            "ok": False,
+            "status": "blocked_missing_intro_demo",
+            "message": "缺 3 段数码-桌面音响通用产品展示素材",
+        }
+
+    monkeypatch.setattr(cli, "_init", lambda: ("db", FakeRepo(), None, None))
+    monkeypatch.setattr(cli, "preflight_intro_plan_for_cutme", fake_preflight, raising=False)
+
+    cli.cmd_intro_preflight(
+        Namespace(project_id=23, source_plan="source.json", asset_root="assets")
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["status"] == "blocked_missing_intro_demo"
+    assert payload["message"] == "缺 3 段数码-桌面音响通用产品展示素材"

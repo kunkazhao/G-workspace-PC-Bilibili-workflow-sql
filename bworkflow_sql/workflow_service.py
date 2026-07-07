@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .asset_paths import voice_user_dir
+from .cutme_intro import preflight_intro_plan_for_cutme
 from .db import Database
 from .repositories import Repository
 from .settings import (
@@ -528,6 +529,7 @@ class WorkflowService:
         checks: dict[str, Any] = {
             "script": None,
             "voice_and_assembly": None,
+            "intro_preflight": None,
             "template": None,
         }
         issues: list[dict[str, Any]] = []
@@ -570,6 +572,28 @@ class WorkflowService:
                 issues=issues,
                 next_hint=assembly.get("next") or {},
             )
+
+        selected_intro = script.get("selected_intro") if isinstance(script.get("selected_intro"), dict) else {}
+        source_intro_plan_path = safe_text(selected_intro.get("source_intro_plan_path"))
+        if source_intro_plan_path:
+            intro_preflight = preflight_intro_plan_for_cutme(
+                source_intro_plan_path=source_intro_plan_path,
+                project=project,
+            )
+            checks["intro_preflight"] = intro_preflight
+            issues.extend(_workflow_doctor_issues("intro-preflight", intro_preflight.get("issues") or []))
+            if not bool(intro_preflight.get("ok")):
+                return _workflow_doctor_payload(
+                    project_id=project_id,
+                    project=project,
+                    account_label=account,
+                    ok=False,
+                    status="blocked",
+                    blocked_by="intro_preflight",
+                    checks=checks,
+                    issues=issues,
+                    next_hint=intro_preflight.get("next") or {},
+                )
 
         if account and safe_text(product_card_template_id):
             template = self.template_doctor(

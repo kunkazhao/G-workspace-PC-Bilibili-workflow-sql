@@ -28,6 +28,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from .cutme_intro import preflight_intro_plan_for_cutme
 from .template_calibration_runner import (
     load_template_calibration_targets,
     run_template_calibration_targets,
@@ -404,6 +405,21 @@ def cmd_intro_plan(args: argparse.Namespace) -> None:
     })
 
 
+def cmd_intro_preflight(args: argparse.Namespace) -> None:
+    _, repo, _, _ = _init()
+    project = repo.project(args.project_id)
+    if not project:
+        _json_err(f"project does not exist: {args.project_id}")
+
+    result = preflight_intro_plan_for_cutme(
+        source_plan_path=args.source_plan,
+        project=project,
+        asset_root=args.asset_root,
+        pipeline_path=getattr(args, "pipeline", ""),
+    )
+    _json_out(result)
+
+
 def cmd_scaffold(args: argparse.Namespace) -> None:
     """为项目预建素材目录骨架（商品图 / 配音 / Roll-B）。
 
@@ -762,6 +778,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--markdown", help="覆盖写入目标 MD；默认使用项目 md_path 或文案骨架默认路径")
     p.add_argument("--sync", action="store_true", help="写入 Markdown 后立即同步入库")
 
+    p = sub.add_parser("intro-preflight", help="Check CutMe intro template and material gates before rendering")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--source-plan", required=True, help="source-intro-plan JSON path")
+    p.add_argument("--asset-root", default=str(Path("G:/2026项目-b站/素材-自动剪辑")), help="intro material root")
+    p.add_argument("--pipeline", default="", help="optional .pipeline.json path to record phase-6 preflight status")
+
     # scaffold
     p = sub.add_parser("scaffold", help="预建素材目录骨架（商品图/配音/Roll-B）")
     p.add_argument("project_id", type=int)
@@ -978,6 +1000,7 @@ DISPATCH = {
     "outline": cmd_outline,
     "research-pack": cmd_research_pack,
     "intro-plan": cmd_intro_plan,
+    "intro-preflight": cmd_intro_preflight,
     "scaffold": cmd_scaffold,
     "assets-check": cmd_assets_check,
     "render-package": cmd_render_package,

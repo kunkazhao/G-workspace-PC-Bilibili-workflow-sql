@@ -4,6 +4,7 @@ import json
 import os
 import re
 import threading
+import traceback
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -776,7 +777,7 @@ class WorkflowPage(BasePage):
             uid = safe_text(product.get("uid"))
             is_top_product = uid.casefold() in top_set
             if not is_top_product:
-                price_block = self.workflow._matching_price_block_for_assets(product, price_blocks, assets, account_label=account_label)
+                price_block = self.workflow._matching_price_block(product, price_blocks)
                 if price_block:
                     price_key = safe_text(price_block.get("price_range_label")) or str(price_block["id"])
                     if price_key not in used_price_labels:

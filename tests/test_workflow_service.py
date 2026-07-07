@@ -429,6 +429,64 @@ def test_workflow_doctor_blocks_on_missing_voice_after_script_ready(tmp_path: Pa
     assert "voice " in result["next"]["follow_up_command"]
 
 
+def test_workflow_doctor_blocks_on_intro_preflight_before_template(tmp_path: Path, monkeypatch):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    seed_ready_voice_assets(db, project_id, tmp_path)
+    source_plan = tmp_path / "source-intro-plan-引言1.json"
+    source_plan.write_text("{}", encoding="utf-8")
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        service,
+        "script_doctor",
+        lambda project_id_arg, *, intro_label="": {
+            "ok": True,
+            "status": "ready_for_downstream",
+            "issues": [],
+            "selected_intro": {"source_intro_plan_path": str(source_plan)},
+            "next": {"action": "continue_downstream"},
+        },
+    )
+
+    def fake_preflight(**kwargs):
+        calls.append(str(kwargs["source_intro_plan_path"]))
+        return {
+            "ok": False,
+            "status": "blocked_missing_intro_demo",
+            "message": "缺 3 段数码-桌面音响通用产品展示素材",
+            "issues": [{"type": "missing_intro_product_demo", "missing": 3}],
+            "next": {"action": "add_intro_product_demo_clips", "needed_count": 3},
+        }
+
+    def fail_template_doctor(*_args, **_kwargs):
+        raise AssertionError("workflow-doctor should not check template before intro preflight passes")
+
+    monkeypatch.setattr("bworkflow_sql.workflow_service.preflight_intro_plan_for_cutme", fake_preflight)
+    monkeypatch.setattr(service, "template_doctor", fail_template_doctor)
+
+    result = service.workflow_doctor(
+        project_id,
+        account_label="灏忕噧",
+        intro_label="寮曡█1",
+        intro_index=1,
+        product_card_template_id="muban-xiaoran-1",
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "blocked"
+    assert result["blocked_by"] == "intro_preflight"
+    assert result["checks"]["intro_preflight"]["status"] == "blocked_missing_intro_demo"
+    assert result["checks"]["template"] is None
+    assert result["issues"][-1] == {
+        "source": "intro-preflight",
+        "type": "missing_intro_product_demo",
+        "missing": 3,
+    }
+    assert result["next"]["action"] == "add_intro_product_demo_clips"
+    assert calls == [str(source_plan)]
+
+
 def test_workflow_doctor_includes_template_check_after_assembly_ready(tmp_path: Path, monkeypatch):
     db, project_id = seed_project(tmp_path)
     service = WorkflowService(db)

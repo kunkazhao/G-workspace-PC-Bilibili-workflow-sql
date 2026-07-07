@@ -343,6 +343,7 @@ class CutMePage(WorkflowPage):
                 return {
                     "path": result,
                     "prepared": prepared,
+                    "report_path": prepared.intro_plan_path.with_suffix(".report.json"),
                 }
 
             import sys as _sys
@@ -371,11 +372,16 @@ class CutMePage(WorkflowPage):
             prepared = payload.get("prepared") if isinstance(payload, dict) else None
             size_mb = result.stat().st_size / 1024 / 1024
             if prepared:
+                report_path = payload.get("report_path")
                 self.log(f"已准备 intro_plan：{prepared.intro_plan_path}")
+                if report_path:
+                    self.log(f"引言审核报告：{report_path}")
                 self.log(f"CutMe 配置：{prepared.config_path}")
                 self.log(f"素材预检查：{'通过' if prepared.preflight.get('ok', True) else '未通过'}")
+                self.log(f"素材登记表：{prepared.preflight.get('material_manifest_path') or '未使用，按文件夹扫描'}")
                 self.log(f"ASR 场景对齐：{'已执行' if prepared.aligned_with_asr else '已使用现有 timing'}")
                 self.log(f"已选素材：{json.dumps(prepared.selected_assets, ensure_ascii=False)}")
+                self.log("下一步：先看引言 MP4 和审核报告，用户确认 OK 后再进入阶段 7。")
             self.log(f"生成完成：{result}")
             self.log(f"文件大小：{size_mb:.1f} MB")
 

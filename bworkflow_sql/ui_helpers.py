@@ -33,6 +33,8 @@ from .sync_service import AUDIO_SUFFIXES
 from .template_config import image_set_for_template
 from .utils import compact_path, safe_text, text_hash
 
+DEFAULT_SPOKEN_MONTH_PREFIX = "7月"
+
 
 @dataclass
 class DialogSection:
@@ -642,7 +644,7 @@ def default_spoken_markdown_path(project: dict[str, Any], account_label: str = "
         "品类名称",
     )
     user_label = safe_file_component(account_label, "用户")
-    return DEFAULT_SPOKEN_MD_ROOT / project_name / f"6月-{user_label}.md"
+    return DEFAULT_SPOKEN_MD_ROOT / project_name / f"{DEFAULT_SPOKEN_MONTH_PREFIX}-{user_label}.md"
 
 
 def is_default_spoken_markdown_path(path_text: str) -> bool:
@@ -654,7 +656,7 @@ def is_default_spoken_markdown_path(path_text: str) -> bool:
 
 def account_label_from_spoken_path(path_text: str) -> str:
     stem = Path(path_text).stem if safe_text(path_text) else ""
-    match = re.match(r"^6月-(?P<label>.+)$", stem)
+    match = re.match(r"^\d{1,2}月-(?P<label>.+)$", stem)
     return safe_text(match.group("label")) if match else ""
 
 

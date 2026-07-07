@@ -17,6 +17,12 @@ from .tts_helpers import normalize_audio_loudness
 from .utils import now_iso, safe_text
 
 
+ALLOWED_INTRO_TEMPLATE_IDS = {"pain_avoidance_priority_v1"}
+BLOCKED_INTRO_TEMPLATE_IDS = {"recovered_markdown_intro_v1"}
+INTRO_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
+INTRO_MATERIAL_MANIFEST_NAME = "intro-materials.json"
+
+
 @dataclass(frozen=True)
 class PreparedCutMeIntro:
     intro_plan_path: Path
@@ -57,7 +63,15 @@ def find_intro_plan_for_text(project_id: int, intro_text: str) -> Path | None:
     workspace = default_intro_plan_workspace(project_id)
     if not workspace.is_dir():
         return None
-    for path in sorted(workspace.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+    paths = [
+        *sorted(workspace.glob("source-intro-plan*.json"), key=lambda item: item.stat().st_mtime, reverse=True),
+        *sorted(
+            (path for path in workspace.glob("*.json") if not path.name.startswith("source-intro-plan")),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        ),
+    ]
+    for path in paths:
         try:
             plan = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
@@ -90,6 +104,13 @@ def prepare_intro_plan_for_cutme(
         raise ValueError("intro_plan 必须是 JSON 对象")
 
     _validate_plan_matches_intro_text(plan, expected_intro_text)
+    preflight = preflight_intro_plan_for_cutme(
+        source_plan_path=plan_path,
+        project=project,
+        asset_root=asset_root,
+    )
+    if not preflight.get("ok"):
+        raise ValueError(str(preflight.get("message") or "intro preflight failed"))
     plan = _ensure_selected_assets(
         plan,
         project=project,
@@ -116,6 +137,13 @@ def prepare_intro_plan_for_cutme(
     output_path = Path(output_plan_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_intro_render_report(
+        output_path.with_suffix(".report.json"),
+        prepared_intro_plan_path=output_path,
+        plan=plan,
+        preflight=preflight,
+        renderer="hyperframes",
+    )
     return plan
 
 
@@ -213,7 +241,7 @@ def run_cutme_render(
     config_path: str | Path,
     output_path: str | Path,
     *,
-    renderer: str = "remotion",
+    renderer: str = "hyperframes",
 ) -> Path:
     config = Path(config_path)
     output = Path(output_path)
@@ -257,6 +285,181 @@ def run_cutme_render(
         )
         raise RuntimeError(f"CutMe 未生成输出文件：{output}\n{details}".strip())
     return output
+
+
+def preflight_intro_plan_for_cutme(
+    *,
+    source_plan_path: str | Path,
+    project: dict[str, Any],
+    asset_root: str | Path = DEFAULT_INTRO_ASSET_ROOT,
+    pipeline_path: str | Path | None = None,
+) -> dict[str, Any]:
+    plan_path = Path(source_plan_path)
+    if not plan_path.is_file():
+        raise FileNotFoundError(f"intro_plan 文件不存在：{plan_path}")
+
+    plan = json.loads(plan_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(plan, dict):
+        raise ValueError("intro_plan 必须是 JSON 对象")
+
+    category = project_category_folder(project)
+    root = Path(asset_root)
+    category_dir = root / category
+    common_dir = root / _intro_common_folder_name(plan)
+    required = _visual_cue_counts(plan)
+    required_product_count = int(required.get("product_demo") or 0)
+    required_triple_count = int(required.get("triple_cta") or 0)
+    product_videos, material_manifest_path = _intro_product_demo_files(category_dir)
+    triple_videos = _matching_triple_cta_files(common_dir, plan)
+    template_id = safe_text(plan.get("template_id") or plan.get("templateId"))
+
+    if template_id in BLOCKED_INTRO_TEMPLATE_IDS or (
+        template_id and template_id not in ALLOWED_INTRO_TEMPLATE_IDS
+    ):
+        return _record_intro_preflight_pipeline(
+            pipeline_path,
+            {
+            "ok": False,
+            "status": "blocked_wrong_intro_template",
+            "message": f"引言源计划模板不正确：{template_id}。请重新用标准引言模板生成 source-intro-plan。",
+            "source_intro_plan_path": str(plan_path),
+            "template_id": template_id,
+            "expected_template_ids": sorted(ALLOWED_INTRO_TEMPLATE_IDS),
+            "issues": [
+                {
+                    "type": "wrong_intro_template",
+                    "template_id": template_id,
+                    "expected": sorted(ALLOWED_INTRO_TEMPLATE_IDS),
+                }
+            ],
+            "next": {
+                "action": "regenerate_intro_plan",
+                "command": "python -m bworkflow_sql intro-plan <project_id> --slots <slots.json> --label 引言1 --sync",
+            },
+            },
+        )
+
+    selected = plan.get("selected_assets") if isinstance(plan.get("selected_assets"), dict) else {}
+    issues = _selected_intro_asset_issues(
+        selected=selected,
+        category_dir=category_dir,
+        common_dir=common_dir,
+        required_product_count=required_product_count,
+    )
+    if issues:
+        return _record_intro_preflight_pipeline(
+            pipeline_path,
+            _intro_preflight_result(
+            ok=False,
+            status="blocked_invalid_intro_demo_source",
+            message="引言素材来源不符合标准素材池规则，请移除临时素材后重新预检。",
+            plan_path=plan_path,
+            template_id=template_id,
+            root=root,
+            category=category,
+            category_dir=category_dir,
+            common_dir=common_dir,
+            material_manifest_path=material_manifest_path,
+            required_product_count=required_product_count,
+            product_videos=product_videos,
+            required_triple_count=required_triple_count,
+            triple_videos=triple_videos,
+            issues=issues,
+            selected=selected,
+            next_hint={"action": "remove_invalid_intro_demo_sources"},
+            ),
+        )
+
+    if required_product_count and len(product_videos) < required_product_count:
+        missing = required_product_count - len(product_videos)
+        return _record_intro_preflight_pipeline(
+            pipeline_path,
+            _intro_preflight_result(
+            ok=False,
+            status="blocked_missing_intro_demo",
+            message=f"缺 {missing} 段{category}通用产品展示素材",
+            plan_path=plan_path,
+            template_id=template_id,
+            root=root,
+            category=category,
+            category_dir=category_dir,
+            common_dir=common_dir,
+            material_manifest_path=material_manifest_path,
+            required_product_count=required_product_count,
+            product_videos=product_videos,
+            required_triple_count=required_triple_count,
+            triple_videos=triple_videos,
+            issues=[
+                {
+                    "type": "missing_intro_product_demo",
+                    "required": required_product_count,
+                    "available": len(product_videos),
+                    "missing": missing,
+                    "folder": str(category_dir),
+                }
+            ],
+            selected=selected,
+            next_hint={
+                "action": "add_intro_product_demo_clips",
+                "folder": str(category_dir),
+                "needed_count": missing,
+            },
+            ),
+        )
+
+    if required_triple_count and not triple_videos:
+        return _record_intro_preflight_pipeline(
+            pipeline_path,
+            _intro_preflight_result(
+            ok=False,
+            status="blocked_missing_triple_cta",
+            message=f"缺 引导三连 通用视频素材：{common_dir}",
+            plan_path=plan_path,
+            template_id=template_id,
+            root=root,
+            category=category,
+            category_dir=category_dir,
+            common_dir=common_dir,
+            material_manifest_path=material_manifest_path,
+            required_product_count=required_product_count,
+            product_videos=product_videos,
+            required_triple_count=required_triple_count,
+            triple_videos=triple_videos,
+            issues=[
+                {
+                    "type": "missing_triple_cta",
+                    "required": required_triple_count,
+                    "available": len(triple_videos),
+                    "folder": str(common_dir),
+                }
+            ],
+            selected=selected,
+            next_hint={"action": "add_triple_cta_clip", "folder": str(common_dir)},
+            ),
+        )
+
+    return _record_intro_preflight_pipeline(
+        pipeline_path,
+        _intro_preflight_result(
+        ok=True,
+        status="ready",
+        message="intro preflight passed",
+        plan_path=plan_path,
+        template_id=template_id,
+        root=root,
+        category=category,
+        category_dir=category_dir,
+        common_dir=common_dir,
+        material_manifest_path=material_manifest_path,
+        required_product_count=required_product_count,
+        product_videos=product_videos,
+        required_triple_count=required_triple_count,
+        triple_videos=triple_videos,
+        issues=[],
+        selected=selected,
+        next_hint={"action": "prepare_intro_video"},
+        ),
+    )
 
 
 def get_cutme_audio_duration(audio_path: str | Path) -> float:
@@ -380,6 +583,255 @@ def _visual_cue_counts(plan: dict[str, Any]) -> dict[str, int]:
             if role:
                 counts[role] = counts.get(role, 0) + 1
     return counts
+
+
+def _intro_common_folder_name(plan: dict[str, Any]) -> str:
+    asset_contract = plan.get("asset_contract")
+    if isinstance(asset_contract, dict):
+        value = safe_text(asset_contract.get("common_folder_name"))
+        if value:
+            return value
+    return "1-通用"
+
+
+def _list_intro_video_files(folder: Path) -> list[Path]:
+    if not folder.is_dir():
+        return []
+    return sorted(
+        path
+        for path in folder.iterdir()
+        if path.is_file() and path.suffix.lower() in INTRO_VIDEO_EXTS
+    )
+
+
+def _intro_product_demo_files(folder: Path) -> tuple[list[Path], Path | None]:
+    manifest_path = folder / INTRO_MATERIAL_MANIFEST_NAME
+    if not manifest_path.is_file():
+        return _list_intro_video_files(folder), None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return [], manifest_path
+    items = manifest.get("materials") if isinstance(manifest, dict) else []
+    result: list[Path] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        if safe_text(item.get("role")) != "product_demo":
+            continue
+        status = safe_text(item.get("status")).casefold()
+        approved = bool(item.get("approved")) or status == "approved"
+        if not approved:
+            continue
+        file_value = safe_text(item.get("file") or item.get("path"))
+        if not file_value:
+            continue
+        path = Path(file_value)
+        if not path.is_absolute():
+            path = folder / path
+        if path.is_file() and path.suffix.lower() in INTRO_VIDEO_EXTS and _path_is_under(path, folder):
+            result.append(path)
+    return sorted(dict.fromkeys(result)), manifest_path
+
+
+def _matching_triple_cta_files(common_dir: Path, plan: dict[str, Any]) -> list[Path]:
+    keywords = _clip_slot_keywords(plan, "triple_cta") or ["引导三连"]
+    return [
+        path
+        for path in _list_intro_video_files(common_dir)
+        if any(keyword in path.stem for keyword in keywords)
+    ]
+
+
+def _clip_slot_keywords(plan: dict[str, Any], role: str) -> list[str]:
+    asset_contract = plan.get("asset_contract")
+    if not isinstance(asset_contract, dict):
+        return []
+    for slot in asset_contract.get("clip_slots") or []:
+        if not isinstance(slot, dict) or slot.get("role") != role:
+            continue
+        return [safe_text(item) for item in slot.get("match_keywords") or [] if safe_text(item)]
+    return []
+
+
+def _selected_intro_asset_issues(
+    *,
+    selected: dict[str, Any],
+    category_dir: Path,
+    common_dir: Path,
+    required_product_count: int,
+) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    selected_products = list(selected.get("product_demo") or [])
+    if selected_products:
+        if len(selected_products) < required_product_count:
+            issues.append(
+                {
+                    "type": "selected_product_demo_count_shortage",
+                    "required": required_product_count,
+                    "selected": len(selected_products),
+                }
+            )
+        for path in selected_products:
+            if not _path_is_under(path, category_dir):
+                issues.append(
+                    {
+                        "type": "selected_product_demo_outside_material_pool",
+                        "path": str(path),
+                        "expected_folder": str(category_dir),
+                    }
+                )
+
+    selected_triple = safe_text(selected.get("triple_cta"))
+    if selected_triple and not _path_is_under(selected_triple, common_dir):
+        issues.append(
+            {
+                "type": "selected_triple_cta_outside_common_pool",
+                "path": selected_triple,
+                "expected_folder": str(common_dir),
+            }
+        )
+    return issues
+
+
+def _path_is_under(path: str | Path, parent: str | Path) -> bool:
+    try:
+        Path(path).resolve().relative_to(Path(parent).resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _intro_preflight_result(
+    *,
+    ok: bool,
+    status: str,
+    message: str,
+    plan_path: Path,
+    template_id: str,
+    root: Path,
+    category: str,
+    category_dir: Path,
+    common_dir: Path,
+    material_manifest_path: Path | None,
+    required_product_count: int,
+    product_videos: list[Path],
+    required_triple_count: int,
+    triple_videos: list[Path],
+    issues: list[dict[str, Any]],
+    selected: dict[str, Any],
+    next_hint: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "ok": ok,
+        "status": status,
+        "message": message,
+        "source_intro_plan_path": str(plan_path),
+        "template_id": template_id,
+        "asset_root": str(root),
+        "category_folder": category,
+        "category_material_folder": str(category_dir),
+        "material_manifest_path": str(material_manifest_path) if material_manifest_path else "",
+        "common_material_folder": str(common_dir),
+        "requirements": {
+            "product_demo": {
+                "required": required_product_count,
+                "available": len(product_videos),
+                "files": [str(path) for path in product_videos],
+            },
+            "triple_cta": {
+                "required": required_triple_count,
+                "available": len(triple_videos),
+                "files": [str(path) for path in triple_videos],
+            },
+        },
+        "selected_assets": selected,
+        "issues": issues,
+        "next": next_hint,
+    }
+
+
+def _record_intro_preflight_pipeline(
+    pipeline_path: str | Path | None,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    if not pipeline_path:
+        return result
+    path = Path(pipeline_path)
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8-sig")) if path.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+
+    phases = existing.get("phases") if isinstance(existing.get("phases"), dict) else {}
+    intro_phase = phases.get("intro_video") if isinstance(phases.get("intro_video"), dict) else {}
+    intro_phase.update(
+        {
+            "status": "ready" if result.get("ok") else "blocked",
+            "preflight_status": safe_text(result.get("status")),
+            "source_intro_plan_path": safe_text(result.get("source_intro_plan_path")),
+            "updated_at": now_iso(),
+        }
+    )
+    if result.get("ok"):
+        intro_phase.pop("last_error", None)
+    else:
+        intro_phase["last_error"] = {
+            "code": safe_text(result.get("status")),
+            "message": safe_text(result.get("message")),
+        }
+
+    phases["intro_video"] = intro_phase
+    existing["phases"] = phases
+    existing["current_phase"] = "intro_video"
+    existing["resume_hint"] = result.get("next") or {}
+    if result.get("ok"):
+        existing.pop("last_error", None)
+    else:
+        existing["last_error"] = {
+            "code": safe_text(result.get("status")),
+            "message": safe_text(result.get("message")),
+        }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
+
+
+def _write_intro_render_report(
+    path: Path,
+    *,
+    prepared_intro_plan_path: Path,
+    plan: dict[str, Any],
+    preflight: dict[str, Any],
+    renderer: str,
+) -> None:
+    report = {
+        **preflight,
+        "renderer": renderer,
+        "selected_assets": dict(plan.get("selected_assets") or {}),
+        "pc_workflow": dict(plan.get("pc_workflow") or {}),
+        "prepared_intro_plan_path": str(prepared_intro_plan_path),
+        "acceptance_checklist": _intro_acceptance_checklist(preflight),
+    }
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _intro_acceptance_checklist(preflight: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "must_report_to_user": True,
+        "requires_user_approval_before_phase_7": True,
+        "items": [
+            "核对引言模板为 pain_avoidance_priority_v1",
+            "核对 product_demo 素材均来自标准品类素材池",
+            "核对 triple_cta 素材来自通用素材池",
+            "抽帧检查片头画面和产品展示不跑偏",
+            "用户确认 OK 后再进入阶段 7",
+        ],
+        "source_intro_plan_path": safe_text(preflight.get("source_intro_plan_path")),
+        "material_manifest_path": safe_text(preflight.get("material_manifest_path")),
+    }
 
 
 def _ensure_cutme_import_path() -> None:

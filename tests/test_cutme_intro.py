@@ -116,6 +116,163 @@ def test_prepare_intro_plan_selects_assets_without_reuse(tmp_path: Path):
     assert prepared["pc_workflow"]["aligned_with_asr"] is False
     assert prepared["pc_workflow"]["seed"] == "fixed"
     assert json.loads(output_plan.read_text(encoding="utf-8"))["selected_assets"] == selected
+    report = json.loads(output_plan.with_suffix(".report.json").read_text(encoding="utf-8"))
+    assert report["ok"] is True
+    assert report["renderer"] == "hyperframes"
+    assert report["selected_assets"] == selected
+    assert report["category_material_folder"] == str(category_dir)
+    assert report["prepared_intro_plan_path"] == str(output_plan)
+    checklist = report["acceptance_checklist"]
+    assert checklist["must_report_to_user"] is True
+    assert checklist["requires_user_approval_before_phase_7"] is True
+    assert checklist["items"] == [
+        "核对引言模板为 pain_avoidance_priority_v1",
+        "核对 product_demo 素材均来自标准品类素材池",
+        "核对 triple_cta 素材来自通用素材池",
+        "抽帧检查片头画面和产品展示不跑偏",
+        "用户确认 OK 后再进入阶段 7",
+    ]
+
+
+def test_intro_preflight_blocks_missing_product_demo_clips(tmp_path: Path):
+    source_plan = tmp_path / "intro_plan.json"
+    _write_plan(source_plan)
+    asset_root = tmp_path / "assets"
+    (asset_root / "数码-桌面音响").mkdir(parents=True)
+    (asset_root / "1-通用").mkdir(parents=True)
+    (asset_root / "1-通用" / "引导三连1.mp4").write_bytes(b"")
+
+    result = cutme_intro_module.preflight_intro_plan_for_cutme(
+        source_plan_path=source_plan,
+        project={"id": 23, "name": "数码-桌面音响"},
+        asset_root=asset_root,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "blocked_missing_intro_demo"
+    assert result["requirements"]["product_demo"]["required"] == 3
+    assert result["requirements"]["product_demo"]["available"] == 0
+    assert "缺 3 段数码-桌面音响通用产品展示素材" in result["message"]
+    assert result["next"]["action"] == "add_intro_product_demo_clips"
+
+
+def test_intro_preflight_records_blocked_pipeline_state(tmp_path: Path):
+    source_plan = tmp_path / "intro_plan.json"
+    pipeline_path = tmp_path / ".pipeline.json"
+    _write_plan(source_plan)
+    asset_root = tmp_path / "assets"
+    (asset_root / "数码-桌面音响").mkdir(parents=True)
+    (asset_root / "1-通用").mkdir(parents=True)
+    (asset_root / "1-通用" / "引导三连1.mp4").write_bytes(b"")
+
+    result = cutme_intro_module.preflight_intro_plan_for_cutme(
+        source_plan_path=source_plan,
+        project={"id": 23, "name": "数码-桌面音响"},
+        asset_root=asset_root,
+        pipeline_path=pipeline_path,
+    )
+
+    saved = json.loads(pipeline_path.read_text(encoding="utf-8"))
+    assert result["status"] == "blocked_missing_intro_demo"
+    assert saved["current_phase"] == "intro_video"
+    assert saved["last_error"]["code"] == "blocked_missing_intro_demo"
+    assert saved["last_error"]["message"] == result["message"]
+    assert saved["resume_hint"]["action"] == "add_intro_product_demo_clips"
+    assert saved["phases"]["intro_video"]["status"] == "blocked"
+    assert saved["phases"]["intro_video"]["preflight_status"] == "blocked_missing_intro_demo"
+    assert saved["phases"]["intro_video"]["source_intro_plan_path"] == str(source_plan)
+
+
+def test_intro_preflight_rejects_recovered_intro_template(tmp_path: Path):
+    source_plan = tmp_path / "intro_plan.json"
+    _write_plan(source_plan)
+    plan = json.loads(source_plan.read_text(encoding="utf-8"))
+    plan["template_id"] = "recovered_markdown_intro_v1"
+    source_plan.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
+    result = cutme_intro_module.preflight_intro_plan_for_cutme(
+        source_plan_path=source_plan,
+        project={"id": 23, "name": "数码-桌面音响"},
+        asset_root=tmp_path / "assets",
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "blocked_wrong_intro_template"
+    assert "recovered_markdown_intro_v1" in result["message"]
+
+
+def test_intro_preflight_rejects_selected_product_demo_outside_material_pool(tmp_path: Path):
+    source_plan = tmp_path / "intro_plan.json"
+    _write_plan(source_plan)
+    asset_root = tmp_path / "assets"
+    category_dir = asset_root / "数码-桌面音响"
+    common_dir = asset_root / "1-通用"
+    category_dir.mkdir(parents=True)
+    common_dir.mkdir(parents=True)
+    for index in range(1, 4):
+        (category_dir / f"product-{index}.mp4").write_bytes(b"")
+    (common_dir / "引导三连1.mp4").write_bytes(b"")
+
+    outside = tmp_path / "single-review.mp4"
+    outside.write_bytes(b"")
+    plan = json.loads(source_plan.read_text(encoding="utf-8"))
+    plan["selected_assets"] = {
+        "product_demo": [
+            str(category_dir / "product-1.mp4"),
+            str(category_dir / "product-2.mp4"),
+            str(outside),
+        ],
+        "triple_cta": str(common_dir / "引导三连1.mp4"),
+    }
+    source_plan.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
+    result = cutme_intro_module.preflight_intro_plan_for_cutme(
+        source_plan_path=source_plan,
+        project={"id": 23, "name": "数码-桌面音响"},
+        asset_root=asset_root,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "blocked_invalid_intro_demo_source"
+    assert str(outside) in result["issues"][0]["path"]
+
+
+def test_intro_preflight_uses_intro_material_manifest_when_present(tmp_path: Path):
+    source_plan = tmp_path / "intro_plan.json"
+    _write_plan(source_plan)
+    asset_root = tmp_path / "assets"
+    category_dir = asset_root / "数码-桌面音响"
+    common_dir = asset_root / "1-通用"
+    category_dir.mkdir(parents=True)
+    common_dir.mkdir(parents=True)
+    for filename in ["approved-1.mp4", "approved-2.mp4", "unregistered.mp4"]:
+        (category_dir / filename).write_bytes(b"")
+    (common_dir / "引导三连1.mp4").write_bytes(b"")
+    (category_dir / "intro-materials.json").write_text(
+        json.dumps(
+            {
+                "materials": [
+                    {"file": "approved-1.mp4", "role": "product_demo", "status": "approved"},
+                    {"file": "approved-2.mp4", "role": "product_demo", "approved": True},
+                    {"file": "unregistered.mp4", "role": "product_demo", "status": "draft"},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = cutme_intro_module.preflight_intro_plan_for_cutme(
+        source_plan_path=source_plan,
+        project={"id": 23, "name": "数码-桌面音响"},
+        asset_root=asset_root,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "blocked_missing_intro_demo"
+    assert result["requirements"]["product_demo"]["available"] == 2
+    assert all("unregistered.mp4" not in path for path in result["requirements"]["product_demo"]["files"])
+    assert result["material_manifest_path"] == str(category_dir / "intro-materials.json")
 
 
 def test_prepare_intro_plan_rejects_script_mismatch(tmp_path: Path):

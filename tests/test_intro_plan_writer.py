@@ -115,3 +115,25 @@ def test_cutme_intro_finds_matching_source_plan(tmp_path: Path, monkeypatch):
     matched = cutme_intro_module.find_intro_plan_for_text(12, "最近想买键盘吗？\n听好了。")
 
     assert matched == plan_path
+
+
+def test_cutme_intro_prefers_source_plan_over_prepared_plan(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.cutme_intro as cutme_intro_module
+
+    monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    workspace = cutme_intro_module.default_intro_plan_workspace(12)
+    workspace.mkdir(parents=True)
+    prepared_plan = workspace / "intro-plan-10-小博.json"
+    source_plan = workspace / "source-intro-plan-引言1.json"
+    source_plan.write_text(
+        json.dumps({"full_script": "最近想买键盘吗？听好了。"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    prepared_plan.write_text(
+        json.dumps({"full_script": "最近想买键盘吗？听好了。"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    matched = cutme_intro_module.find_intro_plan_for_text(12, "最近想买键盘吗？\n听好了。")
+
+    assert matched == source_plan
