@@ -450,7 +450,7 @@ def test_workflow_doctor_blocks_on_intro_preflight_before_template(tmp_path: Pat
     )
 
     def fake_preflight(**kwargs):
-        calls.append(str(kwargs["source_intro_plan_path"]))
+        calls.append(str(kwargs["source_plan_path"]))
         return {
             "ok": False,
             "status": "blocked_missing_intro_demo",

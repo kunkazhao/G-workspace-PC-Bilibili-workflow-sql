@@ -6,9 +6,9 @@ from typing import Any
 from .cutme_intro import find_intro_plan_for_text
 from .db import Database
 from .md_parser import ParsedMarkdown, ScriptVariant, parse_markdown_file
+from .markdown_paths import product_copy_library_path, project_asset_markdown_path
 from .research_pack_service import ResearchPackService
 from .repositories import Repository
-from .settings import DEFAULT_MARKDOWN_ROOT
 from .utils import safe_text, text_hash
 
 
@@ -26,8 +26,19 @@ def diagnose_script_flow(
     products = repo.products(project_id, include_removed=False)
     blocks = repo.script_blocks(project_id)
     issues: list[dict[str, Any]] = []
-    md_path = Path(safe_text(project.get("md_path")))
+    bound_md_path = Path(safe_text(project.get("md_path")))
+    md_path, md_path_issue_code = project_asset_markdown_path(project)
     parsed: ParsedMarkdown | None = None
+    if md_path_issue_code:
+        issues.append(
+            {
+                "level": "warning",
+                "code": md_path_issue_code,
+                "message": "project md_path is not the reusable product-copy asset Markdown; using the product-copy library path instead.",
+                "bound_path": str(bound_md_path) if bound_md_path else "",
+                "asset_path": str(md_path),
+            }
+        )
 
     if not md_path or not md_path.is_file():
         issues.append(
@@ -41,7 +52,7 @@ def diagnose_script_flow(
     else:
         parsed = parse_markdown_file(md_path)
 
-    library_path = _product_copy_library_path(project)
+    library_path = product_copy_library_path(project)
     library_parsed = parse_markdown_file(library_path) if library_path.is_file() else None
     library_products = {product.uid: product for product in library_parsed.products} if library_parsed else {}
 
@@ -138,12 +149,33 @@ def diagnose_script_flow(
 
     price_transitions = parsed.price_transitions if parsed else []
     price_transition_ready = sum(len(item.scripts) for item in price_transitions)
-    if parsed and not price_transition_ready:
+    library_price_transition_ready = (
+        sum(len(item.scripts) for item in library_parsed.price_transitions) if library_parsed else 0
+    )
+    if parsed and price_transitions and not price_transition_ready:
         issues.append(
             {
                 "level": "info",
                 "code": "missing_price_transition_copy",
-                "message": "price transition copy is absent; render can skip transitions, but phase-3 copy may be incomplete.",
+                "message": "current episode Markdown has price transition headings but no ready price transition body.",
+            }
+        )
+    elif not price_transition_ready and library_price_transition_ready:
+        issues.append(
+            {
+                "level": "info",
+                "code": "episode_price_transition_needs_materialization",
+                "message": "reusable price transition copy exists in the product-copy library but is not materialized into the episode Markdown.",
+                "source_path": str(library_path),
+                "count": library_price_transition_ready,
+            }
+        )
+    elif parsed and not price_transition_ready:
+        issues.append(
+            {
+                "level": "info",
+                "code": "missing_price_transition_copy",
+                "message": "current episode Markdown has no price transition copy; render can skip transitions, but phase-3 copy may be incomplete.",
             }
         )
 
@@ -165,6 +197,7 @@ def diagnose_script_flow(
             "scheme_id": safe_text(project.get("scheme_id")),
             "scheme_name": safe_text(project.get("scheme_name")),
             "md_path": str(md_path) if md_path else "",
+            "bound_md_path": str(bound_md_path) if bound_md_path else "",
         },
         "summary": {
             "products_total": len(products),
@@ -173,6 +206,7 @@ def diagnose_script_flow(
             "product_copy_library_ready": product_copy_library_ready,
             "price_transition_sections": len(price_transitions),
             "price_transition_ready": price_transition_ready,
+            "price_transition_library_ready": library_price_transition_ready,
             "script_blocks_synced": markdown_sync["synced_count"],
         },
         "selected_intro": {
@@ -350,9 +384,4 @@ def _next_hint(db: Database, project_id: int, issues: list[dict[str, Any]], sync
 
 
 def _product_copy_library_path(project: dict[str, Any]) -> Path:
-    parent = safe_text(project.get("category_parent_name"))
-    child = safe_text(project.get("category_name"))
-    if parent and child:
-        return DEFAULT_MARKDOWN_ROOT / f"{parent}-{child}.md"
-    name = safe_text(project.get("name"))
-    return DEFAULT_MARKDOWN_ROOT / f"{name}.md"
+    return product_copy_library_path(project)

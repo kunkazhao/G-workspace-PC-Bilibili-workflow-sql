@@ -32,6 +32,30 @@ def _seed_project(tmp_path: Path) -> tuple[Database, int, Path]:
     return db, project_id, md_path
 
 
+def _seed_project_with_category(tmp_path: Path) -> tuple[Database, int, Path]:
+    db = Database(tmp_path / "script-doctor.db")
+    repo = Repository(db)
+    md_path = tmp_path / "spoken" / "episode.md"
+    project_id = db.upsert_project(
+        {
+            "name": "数码-键盘",
+            "category_parent_name": "数码",
+            "category_name": "键盘",
+            "scheme_id": "scheme-1",
+            "scheme_name": "主方案",
+            "md_path": str(md_path),
+        }
+    )
+    repo.upsert_products_from_master(
+        project_id,
+        [
+            {"uid": "P001", "title": "Alpha Keyboard", "price_label": "299元"},
+            {"uid": "P002", "title": "Beta Keyboard", "price_label": "399元"},
+        ],
+    )
+    return db, project_id, md_path
+
+
 def _write_matching_intro_plan(tmp_path: Path, project_id: int, intro_text: str) -> None:
     workspace = tmp_path / "workspace" / f"project-{project_id}" / "intro"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -48,8 +72,12 @@ def _write_matching_intro_plan(tmp_path: Path, project_id: int, intro_text: str)
     )
 
 
-def test_script_doctor_reports_missing_content_units(tmp_path: Path):
+def test_script_doctor_reports_missing_content_units(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.markdown_paths as markdown_paths_module
+
     db, project_id, md_path = _seed_project(tmp_path)
+    empty_library_root = tmp_path / "empty-copy-library"
+    monkeypatch.setattr(markdown_paths_module, "DEFAULT_MARKDOWN_ROOT", empty_library_root)
     md_path.write_text(
         """
 ## 商品文案
@@ -124,7 +152,7 @@ Beta 的单品文案。
 
 
 def test_script_doctor_reports_reusable_library_copy_when_episode_is_missing(tmp_path: Path, monkeypatch):
-    import bworkflow_sql.script_doctor as script_doctor_module
+    import bworkflow_sql.markdown_paths as markdown_paths_module
 
     db, project_id, _md_path = _seed_project(tmp_path)
     library_root = tmp_path / "copy-library"
@@ -148,7 +176,7 @@ Beta 已经写好的复用文案。
 """.strip(),
         encoding="utf-8",
     )
-    monkeypatch.setattr(script_doctor_module, "DEFAULT_MARKDOWN_ROOT", library_root)
+    monkeypatch.setattr(markdown_paths_module, "DEFAULT_MARKDOWN_ROOT", library_root)
 
     result = diagnose_script_flow(db, project_id=project_id)
 
@@ -161,6 +189,122 @@ Beta 已经写好的复用文案。
     assert result["next"]["source_path"] == str(library_path)
     assert not any(issue["code"] == "missing_product_copy" for issue in result["issues"])
     assert any(issue["code"] == "episode_markdown_needs_materialization" for issue in result["issues"])
+
+
+def test_script_doctor_reports_reusable_library_price_transitions_when_episode_is_missing(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.markdown_paths as markdown_paths_module
+
+    db, project_id, _md_path = _seed_project(tmp_path)
+    library_root = tmp_path / "copy-library"
+    library_path = library_root / "数码-键盘.md"
+    library_path.parent.mkdir(parents=True)
+    library_path.write_text(
+        """
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha 已经写好的复用文案。
+
+### 399元-P002-Beta Keyboard
+
+#### 正文
+
+Beta 已经写好的复用文案。
+
+## 价格过渡文案
+
+### 300元以下
+
+#### 正文
+
+三百以内先看基础体验。
+
+### 300-500元
+
+#### 正文
+
+三百到五百开始看做工和连接。
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(markdown_paths_module, "DEFAULT_MARKDOWN_ROOT", library_root)
+
+    result = diagnose_script_flow(db, project_id=project_id)
+
+    assert result["summary"]["price_transition_sections"] == 0
+    assert result["summary"]["price_transition_library_ready"] == 2
+    assert not any(issue["code"] == "missing_price_transition_copy" for issue in result["issues"])
+    assert any(issue["code"] == "episode_price_transition_needs_materialization" for issue in result["issues"])
+
+
+def test_script_doctor_uses_asset_markdown_when_project_md_path_points_to_spoken_artifact(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.cutme_intro as cutme_intro_module
+    import bworkflow_sql.markdown_paths as markdown_paths_module
+
+    monkeypatch.setattr(markdown_paths_module, "DEFAULT_MARKDOWN_ROOT", tmp_path / "copy-library")
+    monkeypatch.setattr(markdown_paths_module, "DEFAULT_SPOKEN_MD_ROOT", tmp_path / "spoken")
+    monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+
+    db, project_id, spoken_path = _seed_project_with_category(tmp_path)
+    spoken_path.parent.mkdir(parents=True)
+    spoken_path.write_text(
+        """
+## 引言文案
+
+### 引言1
+
+这是一次性口播稿，不应该作为资产源。
+""".strip(),
+        encoding="utf-8",
+    )
+    asset_path = tmp_path / "copy-library" / "数码-键盘.md"
+    asset_path.parent.mkdir(parents=True)
+    intro_text = "最近想买键盘吗？这是资产库里的标准引言。"
+    _write_matching_intro_plan(tmp_path, project_id, intro_text)
+    asset_path.write_text(
+        f"""
+## 引言文案
+
+### 引言1
+
+{intro_text}
+
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha 资产文案。
+
+### 399元-P002-Beta Keyboard
+
+#### 正文
+
+Beta 资产文案。
+
+## 价格过渡文案
+
+### 300-500元
+
+#### 正文
+
+三百到五百看轴体和连接。
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = diagnose_script_flow(db, project_id=project_id, intro_label="引言1")
+
+    assert result["project"]["md_path"] == str(asset_path)
+    assert result["project"]["bound_md_path"] == str(spoken_path)
+    assert result["summary"]["product_copy_ready"] == 2
+    assert result["summary"]["price_transition_ready"] == 1
+    assert result["selected_intro"]["source_intro_plan_path"].endswith("source-intro-plan-引言1.json")
+    assert any(issue["code"] == "project_md_path_points_to_spoken_artifact" for issue in result["issues"])
 
 
 def test_materialize_episode_markdown_copies_reusable_product_copy(tmp_path: Path):
@@ -197,6 +341,121 @@ Beta 复用文案。
     assert "## 商品文案" in text
     assert "## 价格过渡文案" in text
     assert db.fetchall("SELECT * FROM script_blocks WHERE project_id=?", (project_id,)) == []
+
+
+def test_materialize_episode_markdown_copies_reusable_price_transitions(tmp_path: Path):
+    db, project_id, md_path = _seed_project(tmp_path)
+    library_path = tmp_path / "library.md"
+    library_path.write_text(
+        """
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha 复用文案。
+
+### 399元-P002-Beta Keyboard
+
+#### 正文
+
+Beta 复用文案。
+
+## 价格过渡文案
+
+### 300元以下
+
+#### 正文
+
+三百以内先看能不能把电脑外放替掉，别先追求大动态。
+
+### 300-500元
+
+#### 正文
+
+三百到五百开始看连接、声场和桌面摆放，适合想认真升级电脑声音的人。
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = materialize_episode_markdown(db, project_id=project_id, library_path=library_path)
+
+    text = md_path.read_text(encoding="utf-8")
+    assert result["ok"] is True
+    assert result["price_transitions_materialized"] == 2
+    assert "## 价格过渡文案" in text
+    assert "### 300元以下" in text
+    assert "三百以内先看能不能把电脑外放替掉" in text
+    assert "### 300-500元" in text
+    assert "三百到五百开始看连接、声场和桌面摆放" in text
+
+
+def test_materialize_episode_markdown_refreshes_asset_intro_from_source_plan(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.cutme_intro as cutme_intro_module
+    import bworkflow_sql.markdown_paths as markdown_paths_module
+
+    monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    monkeypatch.setattr(markdown_paths_module, "DEFAULT_MARKDOWN_ROOT", tmp_path / "copy-library")
+    monkeypatch.setattr(markdown_paths_module, "DEFAULT_SPOKEN_MD_ROOT", tmp_path / "spoken")
+    db, project_id, spoken_path = _seed_project_with_category(tmp_path)
+    spoken_path.parent.mkdir(parents=True)
+    spoken_path.write_text(
+        """
+## 引言文案
+
+### 引言1
+
+一次性口播稿不能被改成资产源。
+""".strip(),
+        encoding="utf-8",
+    )
+    asset_path = tmp_path / "copy-library" / "数码-键盘.md"
+    asset_path.parent.mkdir(parents=True)
+    asset_path.write_text(
+        """
+## 引言文案
+
+旧的散落正文，不应该继续当成一个引言版本。
+
+### 引言1
+
+旧的引言1。
+""".strip(),
+        encoding="utf-8",
+    )
+    intro_text = "最近想买桌面音响吗？这是标准引言模板1生成的文案。"
+    _write_matching_intro_plan(tmp_path, project_id, intro_text)
+    asset_path.write_text(
+        """
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha 复用文案。
+
+### 399元-P002-Beta Keyboard
+
+#### 正文
+
+Beta 复用文案。
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = materialize_episode_markdown(db, project_id=project_id)
+
+    text = asset_path.read_text(encoding="utf-8")
+    spoken_text = spoken_path.read_text(encoding="utf-8")
+    assert result["ok"] is True
+    assert result["target_path"] == str(asset_path)
+    assert "### 引言1" in text
+    assert intro_text in text
+    assert "旧的引言1" not in text
+    assert "旧的散落正文" not in text
+    assert "一次性口播稿不能被改成资产源" in spoken_text
 
 
 def test_script_doctor_reports_ready_to_sync_when_copy_units_exist(tmp_path: Path, monkeypatch):

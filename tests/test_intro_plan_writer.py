@@ -100,6 +100,68 @@ def test_write_intro_plan_for_project_writes_markdown_and_syncs(tmp_path: Path, 
     assert intro["script_id"].startswith("intro:")
 
 
+def test_write_intro_plan_for_project_uses_asset_markdown_when_bound_to_spoken_artifact(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.intro_plan_writer as writer_module
+    import bworkflow_sql.markdown_paths as markdown_paths_module
+
+    monkeypatch.setattr(writer_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    monkeypatch.setattr(markdown_paths_module, "DEFAULT_MARKDOWN_ROOT", tmp_path / "copy-library")
+    monkeypatch.setattr(markdown_paths_module, "DEFAULT_SPOKEN_MD_ROOT", tmp_path / "spoken")
+    db = Database(tmp_path / "test.db")
+    spoken_path = tmp_path / "spoken" / "episode.md"
+    spoken_path.parent.mkdir(parents=True)
+    spoken_path.write_text(
+        """
+## 引言文案
+
+### 引言1
+
+一次性口播稿不能被 intro-plan 改写。
+""".strip(),
+        encoding="utf-8",
+    )
+    asset_path = tmp_path / "copy-library" / "数码-键盘.md"
+    asset_path.parent.mkdir(parents=True)
+    asset_path.write_text(
+        """
+## 引言文案
+
+### 引言1
+
+旧资产引言。
+
+## 商品文案
+""".strip(),
+        encoding="utf-8",
+    )
+    project_id = db.upsert_project(
+        {
+            "name": "数码-键盘",
+            "category_parent_name": "数码",
+            "category_name": "键盘",
+            "md_path": str(spoken_path),
+        }
+    )
+    slots_path = tmp_path / "slots.json"
+    slots_path.write_text(json.dumps(keyboard_slots(), ensure_ascii=False), encoding="utf-8")
+
+    result = write_intro_plan_for_project(
+        db=db,
+        project_id=project_id,
+        slots_path=slots_path,
+        label="引言1",
+        sync=False,
+    )
+
+    assert result.markdown_path == asset_path
+    assert "一次性口播稿不能被 intro-plan 改写" in spoken_path.read_text(encoding="utf-8")
+    assert result.full_script in asset_path.read_text(encoding="utf-8")
+    assert db.fetchone("SELECT md_path FROM projects WHERE id=?", (project_id,))["md_path"] == str(asset_path)
+
+
 def test_cutme_intro_finds_matching_source_plan(tmp_path: Path, monkeypatch):
     import bworkflow_sql.cutme_intro as cutme_intro_module
 

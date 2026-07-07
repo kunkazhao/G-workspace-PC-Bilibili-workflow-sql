@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 from .db import Database
-from .md_parser import ParsedMarkdown, ProductDoc, parse_markdown_file
+from .markdown_paths import project_asset_markdown_path
+from .md_parser import ParsedMarkdown, ProductDoc, ScriptVariant, parse_markdown_file
 from .outline_service import format_product_heading, render_price_transitions, render_product_body
 from .repositories import Repository
 from .script_doctor import _product_copy_library_path
@@ -29,7 +31,7 @@ def materialize_episode_markdown(
     source_path = Path(library_path) if library_path else _product_copy_library_path(project)
     if not source_path.is_file():
         raise FileNotFoundError(f"product copy library does not exist: {source_path}")
-    target_path = Path(episode_path) if episode_path else Path(safe_text(project.get("md_path")))
+    target_path = Path(episode_path) if episode_path else project_asset_markdown_path(project)[0]
     if not safe_text(str(target_path)):
         raise ValueError("project has no episode Markdown path")
 
@@ -37,13 +39,14 @@ def materialize_episode_markdown(
     existing = parse_markdown_file(target_path) if target_path.is_file() else None
     library_products = {item.uid: item for item in library.products}
     existing_products = {item.uid: item for item in existing.products} if existing else {}
+    source_intro_scripts = _source_intro_scripts(project_id)
     active_uids = {safe_text(item.get("uid")) for item in products}
     missing_library_copy: list[dict[str, str]] = []
     materialized = 0
 
     lines: list[str] = []
     lines += ["## 引言文案", ""]
-    intro_scripts = existing.intro_scripts if existing else []
+    intro_scripts = _materialized_intro_scripts(existing, source_intro_scripts)
     if intro_scripts:
         for intro in intro_scripts:
             lines += [f"### {intro.label}", intro.body.strip(), ""]
@@ -71,7 +74,8 @@ def materialize_episode_markdown(
             lines.extend(render_product_body(item))
             lines.append("")
 
-    lines += render_price_transitions(existing.price_transitions if existing else [], None)
+    price_transitions = existing.price_transitions if existing and existing.price_transitions else library.price_transitions
+    lines += render_price_transitions(price_transitions, None)
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
@@ -82,6 +86,7 @@ def materialize_episode_markdown(
         "source_path": str(source_path),
         "target_path": str(target_path),
         "materialized": materialized,
+        "price_transitions_materialized": len(price_transitions),
         "missing_library_copy": missing_library_copy,
         "total": len(products),
     }
@@ -93,3 +98,57 @@ def _materialized_product_doc(existing: ProductDoc | None, library: ProductDoc |
     if library and library.scripts:
         return library
     return existing or library
+
+
+def _materialized_intro_scripts(
+    existing: ParsedMarkdown | None,
+    source_intro_scripts: dict[str, ScriptVariant],
+) -> list[ScriptVariant]:
+    existing_scripts = list(existing.intro_scripts if existing else [])
+    if not source_intro_scripts:
+        return existing_scripts
+
+    result: list[ScriptVariant] = []
+    seen: set[str] = set()
+    for script in existing_scripts:
+        label = safe_text(script.label)
+        source_script = source_intro_scripts.get(label)
+        if source_script:
+            result.append(source_script)
+            seen.add(label)
+            continue
+        if label == "正文":
+            continue
+        result.append(script)
+        seen.add(label)
+    for label, script in source_intro_scripts.items():
+        if label not in seen:
+            result.append(script)
+    return result
+
+
+def _source_intro_scripts(project_id: int) -> dict[str, ScriptVariant]:
+    from .cutme_intro import ALLOWED_INTRO_TEMPLATE_IDS, default_intro_plan_workspace
+
+    workspace = default_intro_plan_workspace(project_id)
+    if not workspace.is_dir():
+        return {}
+    result: dict[str, ScriptVariant] = {}
+    for path in sorted(workspace.glob("source-intro-plan-*.json")):
+        label = path.stem.removeprefix("source-intro-plan-")
+        if not label:
+            continue
+        try:
+            plan = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(plan, dict):
+            continue
+        template_id = safe_text(plan.get("template_id") or plan.get("templateId"))
+        if template_id not in ALLOWED_INTRO_TEMPLATE_IDS:
+            continue
+        full_script = safe_text(plan.get("full_script"))
+        if not full_script:
+            continue
+        result[label] = ScriptVariant(label=label, body=full_script, script_id="")
+    return result

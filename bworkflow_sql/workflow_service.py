@@ -577,7 +577,7 @@ class WorkflowService:
         source_intro_plan_path = safe_text(selected_intro.get("source_intro_plan_path"))
         if source_intro_plan_path:
             intro_preflight = preflight_intro_plan_for_cutme(
-                source_intro_plan_path=source_intro_plan_path,
+                source_plan_path=source_intro_plan_path,
                 project=project,
             )
             checks["intro_preflight"] = intro_preflight

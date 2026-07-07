@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database
+from .markdown_paths import project_asset_markdown_path
 from .outline_service import OutlineService
 from .settings import CUTME_ROOT, INTERNAL_WORKSPACE_ROOT
 from .utils import safe_text
@@ -155,10 +156,9 @@ def upsert_intro_markdown_block(markdown_path: str | Path, *, label: str, body: 
 
 
 def _project_markdown_path(db: Database, project_id: int) -> Path:
-    row = db.fetchone("SELECT md_path FROM projects WHERE id=?", (project_id,))
-    md_path = safe_text(row["md_path"] if row else "")
-    if md_path:
-        return Path(md_path)
+    row = db.fetchone("SELECT * FROM projects WHERE id=?", (project_id,))
+    if row:
+        return project_asset_markdown_path(dict(row))[0]
     return OutlineService(db).default_markdown_path(project_id)
 
 
