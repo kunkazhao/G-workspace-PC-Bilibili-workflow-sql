@@ -13,7 +13,7 @@ from typing import Any
 from .asset_paths import project_category_folder
 from .intro_timeline import align_intro_plan_scenes_with_asr
 from .settings import CUTME_ROOT, DEFAULT_INTRO_ASSET_ROOT, INTERNAL_WORKSPACE_ROOT
-from .subtitle_helpers import normalize_subtitle_alignment_text
+from .subtitle_helpers import normalize_subtitle_alignment_text, distribute_subtitle_text
 from .tts_helpers import normalize_audio_loudness
 from .utils import now_iso, safe_text
 
@@ -163,6 +163,7 @@ def prepare_cutme_config(
 ) -> dict[str, Any]:
     normalize_audio_loudness(Path(audio_path))
     duration = get_cutme_audio_duration(audio_path)
+    intro_subtitles = _intro_subtitle_events_from_plan(intro_plan_path)
     config = {
         "text": intro_text,
         "audio_path": str(audio_path),
@@ -175,11 +176,58 @@ def prepare_cutme_config(
         "accent_color": accent_color,
         "seed": seed,
         "intro_plan_path": str(intro_plan_path),
+        "subtitles": intro_subtitles,
+        "output": {
+            "subtitles": {
+                "enabled": bool(intro_subtitles),
+                "styleId": "impact_yellow",
+                "source": "intro_plan_scenes",
+                "scope": "standalone_intro",
+            }
+        },
     }
     target = Path(config_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
     return config
+
+
+def intro_subtitle_events_from_plan(intro_plan_path: str | Path) -> list[dict[str, Any]]:
+    path = Path(intro_plan_path)
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(plan, dict):
+        return []
+
+    events: list[dict[str, Any]] = []
+    for scene in plan.get("scenes") or []:
+        if not isinstance(scene, dict):
+            continue
+        text = safe_text(scene.get("text"))
+        timing = scene.get("timing")
+        if not text or not isinstance(timing, dict):
+            continue
+        try:
+            start = max(0.0, float(timing.get("start") or 0.0))
+            duration = float(timing.get("duration") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if duration <= 0:
+            continue
+        for chunk_start, chunk_end, chunk_text in distribute_subtitle_text(text, start, duration):
+            events.append(
+                {
+                    "start": round(chunk_start, 3),
+                    "end": round(chunk_end, 3),
+                    "text": chunk_text,
+                }
+            )
+    return events
+
+
+_intro_subtitle_events_from_plan = intro_subtitle_events_from_plan
 
 
 def prepare_cutme_intro(
@@ -245,7 +293,8 @@ def run_cutme_render(
     renderer: str = "hyperframes",
 ) -> Path:
     config = Path(config_path)
-    output = Path(output_path)
+    output = Path(output_path).expanduser()
+    output = output.resolve() if output.is_absolute() else (Path.cwd() / output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     cutme_root_text = str(CUTME_ROOT)

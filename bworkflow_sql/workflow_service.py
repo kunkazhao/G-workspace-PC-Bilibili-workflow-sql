@@ -19,12 +19,19 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .asset_paths import voice_user_dir
-from .cutme_intro import preflight_intro_plan_for_cutme
+from .cutme_intro import (
+    default_intro_plan_workspace,
+    find_intro_plan_for_text,
+    prepare_cutme_intro,
+    preflight_intro_plan_for_cutme,
+    run_cutme_render,
+)
 from .db import Database
 from .repositories import Repository
 from .settings import (
     CUTME_ROOT,
     DEFAULT_INDEXTTS_DIR,
+    DEFAULT_INTRO_ASSET_ROOT,
     DEFAULT_JIANYING_DRAFT_ROOT,
     DEFAULT_OUTPUT_ROOT,
     DEFAULT_STANDALONE_VOICE_ROOT,
@@ -119,6 +126,7 @@ from .render_package_builder import (
     SUPPORTED_PRODUCT_MEDIA_MODES,
     SUPPORTED_PRODUCT_ORDER_STRATEGIES,
     SUPPORTED_OUTPUT_MODES,
+    SUPPORTED_SUBTITLE_ALIGNMENTS,
     build_product_recommendation_package,
     _arrange_price_segment_shuffle,
     _has_matching_price_groups,
@@ -349,6 +357,7 @@ class WorkflowService:
         product_uids: str | list[str] | None = None,
         product_card_template_id: str = "",
         package_output_path: str | Path | None = None,
+        subtitle_alignment: str = "proportional",
     ) -> dict[str, Any]:
         output_mode_value = safe_text(output_mode) or "jianying_draft"
         if output_mode_value not in SUPPORTED_OUTPUT_MODES:
@@ -359,6 +368,9 @@ class WorkflowService:
         order_strategy = safe_text(product_order_strategy) or DEFAULT_PRODUCT_ORDER_STRATEGY
         if order_strategy not in SUPPORTED_PRODUCT_ORDER_STRATEGIES:
             raise ValueError(f"unsupported product_order_strategy: {order_strategy}")
+        subtitle_mode = safe_text(subtitle_alignment) or "proportional"
+        if subtitle_mode not in SUPPORTED_SUBTITLE_ALIGNMENTS:
+            raise ValueError(f"unsupported subtitle_alignment: {subtitle_mode}")
         stale_policy = safe_text(stale_product_image_policy) or "block"
         if stale_policy not in {"block", "reuse"}:
             raise ValueError(f"unsupported stale_product_image_policy: {stale_policy}")
@@ -379,6 +391,7 @@ class WorkflowService:
             mode=sequence_mode,
             top_uids=top_uid_list,
             product_uids=product_uid_list,
+            subtitle_alignment=subtitle_mode,
         )
         output_path = (
             Path(package_output_path)
@@ -395,6 +408,7 @@ class WorkflowService:
             "product_media_mode": media_mode,
             "product_order_strategy": order_strategy,
             "product_card_template_id": safe_text(product_card_template_id) or None,
+            "subtitle_alignment": subtitle_mode,
             "mode": sequence_mode,
             "top_uids": top_uid_list,
             "product_uids": product_uid_list,
@@ -629,6 +643,79 @@ class WorkflowService:
             issues=issues,
             next_hint=assembly.get("next") or {},
         )
+
+    def render_intro_video(
+        self,
+        project_id: int,
+        *,
+        account_label: str,
+        intro_label: str = "寮曟█1",
+        output_path: str | Path | None = None,
+        asset_root: str | Path = "",
+    ) -> dict[str, Any]:
+        project = self._required_project(project_id)
+        account = safe_text(account_label)
+        if not account:
+            raise ValueError("render-intro-video requires --account")
+        intro_block = self._intro_block_for_label(project_id, intro_label)
+        voice = self._ready_asset(
+            self.repo.asset_bindings(project_id),
+            asset_type="voice",
+            uid="INTRO",
+            account_label=account,
+            script_block_id=int(intro_block["id"]),
+            text_hash=safe_text(intro_block.get("text_hash")),
+            block_label=safe_text(intro_block.get("block_label")),
+        )
+        if not voice:
+            raise ValueError("current intro block has no ready voice asset with matching text_hash")
+        voice_path = Path(safe_text(voice.get("path"))).expanduser().resolve()
+        if not voice_path.is_file():
+            raise ValueError(f"intro voice asset does not exist: {voice_path}")
+        source_plan_path = find_intro_plan_for_text(project_id, safe_text(intro_block.get("body")))
+        if source_plan_path is None:
+            raise ValueError("missing matching source-intro-plan for the selected intro block")
+        target = self._intro_video_output_path(
+            project_id,
+            account_label=account,
+            intro_label=safe_text(intro_block.get("block_label")) or intro_label,
+            output_path=output_path,
+        )
+        prepared = prepare_cutme_intro(
+            source_plan_path=source_plan_path,
+            audio_path=voice_path,
+            project=project,
+            account_label=account,
+            script_block_id=int(intro_block["id"]),
+            intro_text=safe_text(intro_block.get("body")),
+            title=safe_text(project.get("name")) or "Bilibili Intro",
+            asset_root=asset_root or DEFAULT_INTRO_ASSET_ROOT,
+        )
+        rendered = run_cutme_render(prepared.config_path, target)
+        config = json.loads(prepared.config_path.read_text(encoding="utf-8-sig"))
+        subtitles = config.get("subtitles") if isinstance(config.get("subtitles"), list) else []
+        report_path = prepared.intro_plan_path.with_suffix(".report.json")
+        return {
+            "ok": True,
+            "project_id": project_id,
+            "account": account,
+            "intro_label": safe_text(intro_block.get("block_label")),
+            "script_block_id": int(intro_block["id"]),
+            "source_intro_plan_path": str(source_plan_path),
+            "prepared_intro_plan_path": str(prepared.intro_plan_path),
+            "cutme_config_path": str(prepared.config_path),
+            "report_path": str(report_path),
+            "output_path": str(rendered),
+            "subtitle_enabled": bool(subtitles),
+            "subtitle_count": len(subtitles),
+            "selected_assets": prepared.selected_assets,
+            "preflight": prepared.preflight,
+            "aligned_with_asr": prepared.aligned_with_asr,
+            "verification_hint": {
+                "ffprobe": f"ffprobe -v error -show_streams -show_format {rendered}",
+                "frames": f"ffmpeg -hide_banner -ss 3 -i {rendered} -frames:v 1 <frame-3s.png>",
+            },
+        }
 
     def resolve_project_ref(
         self,
@@ -1527,6 +1614,43 @@ class WorkflowService:
         if not project:
             raise ValueError("请先选择品类项目。")
         return project
+
+    def _intro_block_for_label(self, project_id: int, intro_label: str) -> dict[str, Any]:
+        intro_blocks = [
+            block
+            for block in self.repo.script_blocks(project_id)
+            if safe_text(block.get("script_type")) == "intro"
+        ]
+        if not intro_blocks:
+            raise ValueError("current project has no synced intro block")
+        label = safe_text(intro_label)
+        if label:
+            for block in intro_blocks:
+                if safe_text(block.get("block_label")) == label:
+                    return block
+        return intro_blocks[0]
+
+    def _intro_video_output_path(
+        self,
+        project_id: int,
+        *,
+        account_label: str,
+        intro_label: str,
+        output_path: str | Path | None,
+    ) -> Path:
+        if output_path:
+            target = Path(output_path).expanduser()
+            target = target.resolve() if target.is_absolute() else (Path.cwd() / target).resolve()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            return target
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        stem = (
+            f"intro-video-{safe_path_component(intro_label or 'intro')}-"
+            f"{safe_path_component(account_label)}-subtitle-{timestamp}.mp4"
+        )
+        target = default_intro_plan_workspace(project_id) / stem
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return target.resolve()
 
     def _resolve_account(self, label: str) -> dict[str, Any]:
         accounts = self.repo.accounts()

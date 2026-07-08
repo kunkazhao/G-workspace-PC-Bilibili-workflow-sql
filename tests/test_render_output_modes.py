@@ -34,6 +34,7 @@ def test_prepare_product_recommendation_output_writes_draft_package(
         mode,
         top_uids,
         product_uids,
+        subtitle_alignment,
     ):
         calls.append(
             {
@@ -47,6 +48,7 @@ def test_prepare_product_recommendation_output_writes_draft_package(
                 "mode": mode,
                 "top_uids": top_uids,
                 "product_uids": product_uids,
+                "subtitle_alignment": subtitle_alignment,
             }
         )
         return SimpleNamespace(package=package, missing=[], stale_product_images=[])
@@ -82,6 +84,7 @@ def test_prepare_product_recommendation_output_writes_draft_package(
             "mode": "standard",
             "top_uids": [],
             "product_uids": [],
+            "subtitle_alignment": "proportional",
         }
     ]
 

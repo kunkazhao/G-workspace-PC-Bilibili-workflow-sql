@@ -420,6 +420,18 @@ def cmd_intro_preflight(args: argparse.Namespace) -> None:
     _json_out(result)
 
 
+def cmd_render_intro_video(args: argparse.Namespace) -> None:
+    _, _, _, wf = _init()
+    result = wf.render_intro_video(
+        args.project_id,
+        account_label=args.account,
+        intro_label=args.intro_label,
+        output_path=args.output or None,
+        asset_root=args.asset_root,
+    )
+    _json_out(result)
+
+
 def cmd_scaffold(args: argparse.Namespace) -> None:
     """为项目预建素材目录骨架（商品图 / 配音 / Roll-B）。
 
@@ -555,6 +567,7 @@ def cmd_render_package(args: argparse.Namespace) -> None:
         top_uids=args.top_uids,
         product_card_template_id=args.product_card_template_id,
         package_output_path=args.output or None,
+        subtitle_alignment=getattr(args, "subtitle_alignment", "proportional"),
     )
     _json_out(result)
 
@@ -668,6 +681,10 @@ def cmd_render_final_video(args: argparse.Namespace) -> None:
     from .final_video_pipeline import run_final_video_pipeline
 
     _, _, _, wf = _init()
+    intro_video_text = getattr(args, "intro_video_text", "") or ""
+    intro_video_text_file = getattr(args, "intro_video_text_file", "") or ""
+    if intro_video_text_file:
+        intro_video_text = Path(intro_video_text_file).read_text(encoding="utf-8-sig")
     result = run_final_video_pipeline(
         wf,
         project_id=args.project_id,
@@ -682,8 +699,11 @@ def cmd_render_final_video(args: argparse.Namespace) -> None:
         package_output_path=args.package_output or None,
         output_path=args.output or None,
         intro_video_path=args.intro_video or None,
+        intro_video_text=intro_video_text,
+        intro_video_source_plan_path=getattr(args, "intro_video_source_plan", "") or None,
         full_output_path=args.full_output or None,
         acceptance_mode=args.acceptance_mode,
+        subtitle_alignment=getattr(args, "subtitle_alignment", "proportional"),
     )
     _json_out(result)
 
@@ -787,6 +807,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--asset-root", default=str(Path("G:/2026项目-b站/素材-自动剪辑")), help="intro material root")
     p.add_argument("--pipeline", default="", help="optional .pipeline.json path to record phase-6 preflight status")
 
+    p = sub.add_parser("render-intro-video", help="Render standalone phase-6 intro MP4 with burned subtitles")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--account", required=True, help="voice/account label")
+    p.add_argument("--intro-label", default="寮曡█1", help="intro block label, for example 寮曡█1")
+    p.add_argument("--output", "-o", help="intro MP4 output path; defaults to the project intro workspace")
+    p.add_argument("--asset-root", default=str(Path("G:/2026椤圭洰-b绔?绱犳潗-鑷姩鍓緫")), help="intro material root")
+
     # scaffold
     p = sub.add_parser("scaffold", help="预建素材目录骨架（商品图/配音/Roll-B）")
     p.add_argument("project_id", type=int)
@@ -835,6 +862,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Remotion-first product-card template id or display name; defaults to the account template",
     )
+    p.add_argument(
+        "--subtitle-alignment",
+        choices=["proportional", "asr"],
+        default="proportional",
+        help="final_mp4 subtitle timing: proportional is fast; asr aligns text to audio for accuracy",
+    )
     p.add_argument("--output", "-o", help="render-package.json output path")
 
     p = sub.add_parser("render-final-video", help="Generate final MP4 through RenderPackage and CutMe")
@@ -879,7 +912,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--package-output", help="render-package.json output path")
     p.add_argument("--output", "-o", help="final mp4 output path")
     p.add_argument("--intro-video", help="accepted intro MP4 to prepend to the product recommendation MP4")
+    p.add_argument("--intro-video-text", default="", help="intro spoken text for burned subtitles")
+    p.add_argument("--intro-video-text-file", default="", help="UTF-8 text file containing intro spoken text for subtitles")
+    p.add_argument("--intro-video-source-plan", default="", help="source-intro-plan JSON; preferred for intro subtitle scene splitting")
     p.add_argument("--full-output", help="full MP4 output path when --intro-video is provided")
+    p.add_argument(
+        "--subtitle-alignment",
+        choices=["proportional", "asr"],
+        default="proportional",
+        help="subtitle timing: proportional is fast; asr aligns text to audio for accuracy",
+    )
     p.add_argument(
         "--acceptance-mode",
         choices=["quick", "full"],
@@ -1012,6 +1054,7 @@ DISPATCH = {
     "research-pack": cmd_research_pack,
     "intro-plan": cmd_intro_plan,
     "intro-preflight": cmd_intro_preflight,
+    "render-intro-video": cmd_render_intro_video,
     "scaffold": cmd_scaffold,
     "assets-check": cmd_assets_check,
     "render-package": cmd_render_package,

@@ -6,6 +6,25 @@ from pathlib import Path
 from bworkflow_sql.final_video_pipeline import _run_command, run_final_video_pipeline
 
 
+def test_run_final_video_pipeline_rejects_unknown_subtitle_alignment(tmp_path: Path):
+    class FakeWorkflow:
+        def regenerate_product_card_images(self, *args, **kwargs):
+            raise AssertionError("should validate before mutating workflow state")
+
+    try:
+        run_final_video_pipeline(
+            FakeWorkflow(),
+            project_id=3,
+            account_label="小博",
+            subtitle_alignment="guess",
+            cutme_root=tmp_path,
+        )
+    except ValueError as exc:
+        assert "unsupported subtitle_alignment" in str(exc)
+    else:
+        raise AssertionError("expected unsupported subtitle_alignment to fail")
+
+
 def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tmp_path: Path):
     calls: list[object] = []
     package_path = tmp_path / "render-package.json"
@@ -40,6 +59,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             top_uids,
             product_card_template_id,
             package_output_path,
+            subtitle_alignment,
         ):
             calls.append(
                 (
@@ -54,6 +74,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
                     top_uids,
                     product_card_template_id,
                     package_output_path,
+                    subtitle_alignment,
                 )
             )
             return {
@@ -126,6 +147,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             "",
             "muban-xiaobo-1",
             str(package_path),
+            "proportional",
         ),
     ]
     assert result["verification"]["ffprobe"]["duration"] == 10.0
@@ -243,6 +265,179 @@ def test_run_final_video_pipeline_concats_intro_video_into_full_mp4_with_quick_a
     assert manifest["selection"]["mode"] == "top"
     assert manifest["selection"]["top_uids"] == ["P001"]
     assert manifest["reports"]["price_transition_report"]["items"][0]["after_top_products"] == 1
+
+
+def test_run_final_video_pipeline_passes_asr_subtitle_alignment_to_package_builder(tmp_path: Path):
+    package_path = tmp_path / "render-package.json"
+    job_package_path = tmp_path / "job" / "render-package.json"
+    output_mp4 = tmp_path / "final.mp4"
+    package_path.write_text(json.dumps({"schemaVersion": "1.0.0", "segments": []}), encoding="utf-8")
+    captured: dict[str, str] = {}
+
+    class FakeWorkflow:
+        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):
+            return {"ok": True, "regenerated": [], "skipped": []}
+
+        def prepare_product_recommendation_output(self, project_id, **kwargs):
+            captured["subtitle_alignment"] = kwargs["subtitle_alignment"]
+            return {"ok": True, "package_path": str(package_path), "next": {"target_mp4": str(output_mp4)}}
+
+    def fake_runner(command, *, cwd, timeout):
+        if command[-1] == "--build-render-job":
+            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
+        if "--render-fast-final" in command:
+            output_mp4.write_bytes(b"mp4")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        if "-frames:v" in command:
+            Path(command[-1]).write_bytes(b"png")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        raise AssertionError(f"unexpected command: {command}")
+
+    run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=3,
+        account_label="小博",
+        package_output_path=package_path,
+        output_path=output_mp4,
+        subtitle_alignment="asr",
+        cutme_root=tmp_path,
+        runner=fake_runner,
+        probe_video=lambda path: {"duration": 1.0},
+        measure_loudness=lambda path: {"output_i": "-11.0"},
+    )
+
+    assert captured["subtitle_alignment"] == "asr"
+
+
+def test_run_final_video_pipeline_burns_intro_subtitles_before_concat(tmp_path: Path):
+    calls: list[list[str]] = []
+    package_path = tmp_path / "render-package.json"
+    job_package_path = tmp_path / "job" / "render-package.json"
+    product_mp4 = tmp_path / "product.mp4"
+    full_mp4 = tmp_path / "full.mp4"
+    intro_mp4 = tmp_path / "intro.mp4"
+    intro_mp4.write_bytes(b"intro")
+    package_path.write_text(json.dumps({"schemaVersion": "1.0.0", "segments": []}), encoding="utf-8")
+
+    class FakeWorkflow:
+        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):
+            return {"ok": True, "regenerated": [], "skipped": []}
+
+        def prepare_product_recommendation_output(self, project_id, **kwargs):
+            return {"ok": True, "package_path": str(package_path), "next": {"target_mp4": str(product_mp4)}}
+
+    def fake_runner(command, *, cwd, timeout):
+        calls.append(command)
+        if command[-1] == "--build-render-job":
+            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
+        if "--render-fast-final" in command:
+            product_mp4.write_bytes(b"product")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        if "-filter_complex" in command and str(full_mp4) in command:
+            full_mp4.write_bytes(b"full")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        if "-frames:v" in command:
+            Path(command[-1]).write_bytes(b"png")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        raise AssertionError(f"unexpected command: {command}")
+
+    run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=23,
+        account_label="小博",
+        package_output_path=package_path,
+        output_path=product_mp4,
+        intro_video_path=intro_mp4,
+        intro_video_text="这是引言字幕",
+        full_output_path=full_mp4,
+        cutme_root=tmp_path,
+        runner=fake_runner,
+        probe_video=lambda path: {"duration": 3.0},
+        measure_loudness=lambda path: {"output_i": "-11.0"},
+    )
+
+    concat_command = next(command for command in calls if "-filter_complex" in command and str(full_mp4) in command)
+    filter_complex = concat_command[concat_command.index("-filter_complex") + 1]
+    assert "subtitles=" in filter_complex
+    assert "intro-subtitles" in filter_complex
+    assert (tmp_path / "intro-subtitles.ass").is_file()
+
+
+def test_run_final_video_pipeline_uses_intro_source_plan_for_subtitle_splitting(tmp_path: Path):
+    calls: list[list[str]] = []
+    package_path = tmp_path / "render-package.json"
+    job_package_path = tmp_path / "job" / "render-package.json"
+    product_mp4 = tmp_path / "product.mp4"
+    full_mp4 = tmp_path / "full.mp4"
+    intro_mp4 = tmp_path / "intro.mp4"
+    source_plan = tmp_path / "source-intro-plan.json"
+    intro_mp4.write_bytes(b"intro")
+    package_path.write_text(json.dumps({"schemaVersion": "1.0.0", "segments": []}), encoding="utf-8")
+    source_plan.write_text(
+        json.dumps(
+            {
+                "scenes": [
+                    {
+                        "type": "hook_open",
+                        "text": "第一段按模板拆",
+                        "timing": {"start": 0.4, "duration": 1.6},
+                    },
+                    {
+                        "type": "pain_points",
+                        "text": "第二段继续按模板",
+                        "timing": {"start": 2.0, "duration": 2.0},
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeWorkflow:
+        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):
+            return {"ok": True, "regenerated": [], "skipped": []}
+
+        def prepare_product_recommendation_output(self, project_id, **kwargs):
+            return {"ok": True, "package_path": str(package_path), "next": {"target_mp4": str(product_mp4)}}
+
+    def fake_runner(command, *, cwd, timeout):
+        calls.append(command)
+        if command[-1] == "--build-render-job":
+            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
+        if "--render-fast-final" in command:
+            product_mp4.write_bytes(b"product")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        if "-filter_complex" in command and str(full_mp4) in command:
+            full_mp4.write_bytes(b"full")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        if "-frames:v" in command:
+            Path(command[-1]).write_bytes(b"png")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        raise AssertionError(f"unexpected command: {command}")
+
+    result = run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=23,
+        account_label="小博",
+        package_output_path=package_path,
+        output_path=product_mp4,
+        intro_video_path=intro_mp4,
+        intro_video_text="这是一整段兜底文案不应该进入字幕文件",
+        intro_video_source_plan_path=source_plan,
+        full_output_path=full_mp4,
+        cutme_root=tmp_path,
+        runner=fake_runner,
+        probe_video=lambda path: {"duration": 5.0},
+        measure_loudness=lambda path: {"output_i": "-11.0"},
+    )
+
+    ass_text = (tmp_path / "intro-subtitles.ass").read_text(encoding="utf-8")
+    assert "第一段按模板拆" in ass_text
+    assert "第二段继续按模板" in ass_text
+    assert "兜底文案" not in ass_text
+    assert "Dialogue: 0,0:00:00.40,0:00:02.00" in ass_text
+    assert result["intro_subtitle_source_plan_path"] == str(source_plan)
 
 
 def test_run_final_video_pipeline_passes_absolute_paths_to_cutme(tmp_path: Path, monkeypatch):

@@ -9,7 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from .cutme_intro import intro_subtitle_events_from_plan
 from .settings import CUTME_ROOT, INTERNAL_WORKSPACE_ROOT
+from .subtitle_helpers import align_subtitle_text_with_asr, distribute_subtitle_text
 from .utils import safe_text
 from .workflow_service import safe_path_component
 
@@ -33,8 +35,11 @@ def run_final_video_pipeline(
     package_output_path: str | Path | None = None,
     output_path: str | Path | None = None,
     intro_video_path: str | Path | None = None,
+    intro_video_text: str = "",
+    intro_video_source_plan_path: str | Path | None = None,
     full_output_path: str | Path | None = None,
     acceptance_mode: str = "full",
+    subtitle_alignment: str = "proportional",
     cutme_root: str | Path = CUTME_ROOT,
     runner: Runner | None = None,
     probe_video: ProbeVideo | None = None,
@@ -43,6 +48,9 @@ def run_final_video_pipeline(
     account = safe_text(account_label)
     if not account:
         raise ValueError("render-final-video 需要指定账号。")
+    subtitle_mode = safe_text(subtitle_alignment) or "proportional"
+    if subtitle_mode not in {"proportional", "asr"}:
+        raise ValueError(f"unsupported subtitle_alignment: {subtitle_mode}")
 
     render_root = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "render"
     render_root.mkdir(parents=True, exist_ok=True)
@@ -78,6 +86,7 @@ def run_final_video_pipeline(
         top_uids=top_uids,
         product_card_template_id=product_card_template_id,
         package_output_path=str(package_path),
+        subtitle_alignment=subtitle_mode,
     )
     if package_result.get("ok") is not True:
         return {
@@ -116,6 +125,7 @@ def run_final_video_pipeline(
 
     full_target_mp4: Path | None = None
     concat_result: Any | None = None
+    intro_subtitle_ass_path: Path | None = None
     if intro_video_path:
         intro_mp4 = _absolute_path(intro_video_path)
         if not intro_mp4.is_file():
@@ -125,10 +135,23 @@ def run_final_video_pipeline(
             if full_output_path
             else target_mp4.with_name(f"{target_mp4.stem}-with-intro{target_mp4.suffix}")
         )
+        intro_text = safe_text(intro_video_text).strip()
+        intro_source_plan_path = _absolute_path(intro_video_source_plan_path) if intro_video_source_plan_path else None
+        if intro_source_plan_path or intro_text:
+            intro_subtitle_ass_path = full_target_mp4.parent / "intro-subtitles.ass"
+            _write_intro_subtitles_ass(
+                intro_subtitle_ass_path,
+                intro_mp4,
+                intro_text,
+                intro_source_plan_path=intro_source_plan_path,
+                subtitle_alignment=subtitle_mode,
+                duration=_video_duration_seconds(intro_mp4, probe_video or _probe_video),
+            )
         concat_result = _concat_intro_and_product_video(
             intro_mp4,
             target_mp4,
             full_target_mp4,
+            intro_subtitle_ass_path=intro_subtitle_ass_path,
             cwd=Path(cutme_root),
             runner=command_runner,
         )
@@ -155,6 +178,7 @@ def run_final_video_pipeline(
         "account": account,
         "product_media_mode": product_media_mode,
         "product_order_strategy": product_order_strategy,
+        "subtitle_alignment": subtitle_mode,
         "product_image_mode": product_image_mode,
         "product_card_template_id": safe_text(product_card_template_id) or None,
         "package_path": str(package_path),
@@ -164,6 +188,8 @@ def run_final_video_pipeline(
         "full_output_mp4": str(full_target_mp4) if full_target_mp4 else None,
         "full_output_mp4_link": _markdown_link("打开完整 MP4", full_target_mp4) if full_target_mp4 else None,
         "intro_video_path": str(_absolute_path(intro_video_path)) if intro_video_path else None,
+        "intro_subtitle_ass_path": str(intro_subtitle_ass_path) if intro_subtitle_ass_path else None,
+        "intro_subtitle_source_plan_path": str(_absolute_path(intro_video_source_plan_path)) if intro_video_source_plan_path else None,
         "acceptance_mode": acceptance_mode,
         "product_images": product_images,
         "render_package": package_result,
@@ -190,6 +216,7 @@ def run_final_video_pipeline(
         target_mp4=target_mp4,
         full_target_mp4=full_target_mp4,
         intro_video_path=_absolute_path(intro_video_path) if intro_video_path else None,
+        intro_video_source_plan_path=_absolute_path(intro_video_source_plan_path) if intro_video_source_plan_path else None,
     )
     result["run_manifest_path"] = str(run_manifest_path)
     result["run_manifest_link"] = _markdown_link("打开本次生成记录", run_manifest_path)
@@ -425,13 +452,18 @@ def _concat_intro_and_product_video(
     product_mp4: Path,
     output_mp4: Path,
     *,
+    intro_subtitle_ass_path: Path | None = None,
     cwd: Path,
     runner: Runner,
 ) -> Any:
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
+    intro_video_filter = "[0:v]scale=1920:1080:flags=lanczos,setsar=1,fps=30,format=yuv420p"
+    if intro_subtitle_ass_path:
+        intro_video_filter += f",subtitles='{_ffmpeg_filter_path(intro_subtitle_ass_path)}'"
+    intro_video_filter += "[v0];"
     filter_complex = (
-        "[0:v]scale=1920:1080:flags=lanczos,setsar=1,fps=30,format=yuv420p[v0];"
-        "[1:v]scale=1920:1080:flags=lanczos,setsar=1,fps=30,format=yuv420p[v1];"
+        intro_video_filter
+        + "[1:v]scale=1920:1080:flags=lanczos,setsar=1,fps=30,format=yuv420p[v1];"
         "[0:a]aformat=sample_rates=48000:channel_layouts=stereo[a0];"
         "[1:a]aformat=sample_rates=48000:channel_layouts=stereo[a1];"
         "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a];"
@@ -477,6 +509,84 @@ def _concat_intro_and_product_video(
     )
 
 
+def _write_intro_subtitles_ass(
+    output_path: Path,
+    intro_mp4: Path,
+    text: str,
+    *,
+    intro_source_plan_path: Path | None = None,
+    subtitle_alignment: str,
+    duration: float,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_events = _intro_subtitle_events_from_source_plan(intro_source_plan_path)
+    if plan_events:
+        events = plan_events
+    elif safe_text(subtitle_alignment) == "asr":
+        events = align_subtitle_text_with_asr(intro_mp4, text, 0.0)
+    else:
+        events = distribute_subtitle_text(text, 0.0, max(0.0, float(duration or 0.0)))
+    output_path.write_text(_build_intro_ass(events), encoding="utf-8")
+
+
+def _intro_subtitle_events_from_source_plan(path: Path | None) -> list[tuple[float, float, str]]:
+    if path is None:
+        return []
+    events: list[tuple[float, float, str]] = []
+    for item in intro_subtitle_events_from_plan(path):
+        try:
+            start = float(item.get("start") or 0.0)
+            end = float(item.get("end") or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        text = safe_text(item.get("text") if isinstance(item, dict) else "")
+        if text and end > start:
+            events.append((start, end, text))
+    return events
+
+
+def _build_intro_ass(events: list[tuple[float, float, str]]) -> str:
+    lines = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        "PlayResX: 1920",
+        "PlayResY: 1080",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        "Style: Default,Microsoft YaHei,54,&H00FFFFFF,&H00FFFFFF,&H00222222,&H99000000,0,0,0,0,100,100,0,0,1,4,1,2,110,110,78,1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    for start, end, text in events:
+        if end <= start:
+            continue
+        lines.append(
+            "Dialogue: 0,"
+            f"{_ass_timestamp(start)},{_ass_timestamp(end)},Default,,0,0,0,,{_escape_ass_text(text)}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _ass_timestamp(seconds: float) -> str:
+    centiseconds = max(0, int(round(float(seconds or 0.0) * 100)))
+    hours, rem = divmod(centiseconds, 360000)
+    minutes, rem = divmod(rem, 6000)
+    secs, centis = divmod(rem, 100)
+    return f"{hours}:{minutes:02}:{secs:02}.{centis:02}"
+
+
+def _escape_ass_text(text: object) -> str:
+    return safe_text(text).replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\n", "\\N")
+
+
+def _ffmpeg_filter_path(path: Path) -> str:
+    value = str(path.resolve()).replace("\\", "/")
+    return value.replace(":", "\\:").replace("'", "\\'")
+
+
 def _video_duration_seconds(path: Path, probe_video: ProbeVideo) -> float:
     try:
         result = probe_video(path)
@@ -514,6 +624,7 @@ def _write_final_video_run_manifest(
     target_mp4: Path,
     full_target_mp4: Path | None,
     intro_video_path: Path | None,
+    intro_video_source_plan_path: Path | None = None,
 ) -> Path:
     run_dir = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "runs"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -524,6 +635,7 @@ def _write_final_video_run_manifest(
         target_mp4=target_mp4,
         full_target_mp4=full_target_mp4,
         intro_video_path=intro_video_path,
+        intro_video_source_plan_path=intro_video_source_plan_path,
     )
     manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return manifest_path
@@ -536,6 +648,7 @@ def _final_video_run_manifest_payload(
     target_mp4: Path,
     full_target_mp4: Path | None,
     intro_video_path: Path | None,
+    intro_video_source_plan_path: Path | None = None,
 ) -> dict[str, Any]:
     package_path = Path(safe_text(result.get("package_path")))
     job_package_path = Path(safe_text(result.get("job_package_path")))
@@ -545,6 +658,7 @@ def _final_video_run_manifest_payload(
         ("render_package", package_path),
         ("cutme_job_package", job_package_path),
         ("intro_video", intro_video_path),
+        ("intro_source_plan", intro_video_source_plan_path),
         ("product_mp4", target_mp4),
         ("full_mp4", full_target_mp4),
         ("clip_cache_manifest", Path(clip_cache_manifest) if clip_cache_manifest else None),
@@ -581,6 +695,7 @@ def _final_video_run_manifest_payload(
             "render_package_path": result.get("package_path"),
             "cutme_job_package_path": result.get("job_package_path"),
             "intro_video_path": str(intro_video_path) if intro_video_path else None,
+            "intro_video_source_plan_path": str(intro_video_source_plan_path) if intro_video_source_plan_path else None,
         },
         "outputs": {
             "product_mp4": str(target_mp4),

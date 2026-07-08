@@ -111,6 +111,30 @@ def test_intro_preflight_parser_registers_command():
     assert args.asset_root == "assets"
 
 
+def test_render_intro_video_parser_registers_command():
+    args = cli.build_parser().parse_args(
+        [
+            "render-intro-video",
+            "23",
+            "--account",
+            "xiaobo",
+            "--intro-label",
+            "intro-1",
+            "--output",
+            "intro.mp4",
+            "--asset-root",
+            "assets",
+        ]
+    )
+
+    assert args.command == "render-intro-video"
+    assert args.project_id == 23
+    assert args.account == "xiaobo"
+    assert args.intro_label == "intro-1"
+    assert args.output == "intro.mp4"
+    assert args.asset_root == "assets"
+
+
 def test_template_calibrate_parser_registers_command():
     args = cli.build_parser().parse_args(
         [
@@ -361,8 +385,14 @@ def test_render_final_video_parser_registers_command():
             "out.mp4",
             "--intro-video",
             "intro.mp4",
+            "--intro-video-text-file",
+            "intro.txt",
+            "--intro-video-source-plan",
+            "source-intro-plan.json",
             "--full-output",
             "full.mp4",
+            "--subtitle-alignment",
+            "asr",
             "--acceptance-mode",
             "quick",
         ]
@@ -381,7 +411,10 @@ def test_render_final_video_parser_registers_command():
     assert args.package_output == "package.json"
     assert args.output == "out.mp4"
     assert args.intro_video == "intro.mp4"
+    assert args.intro_video_text_file == "intro.txt"
+    assert args.intro_video_source_plan == "source-intro-plan.json"
     assert args.full_output == "full.mp4"
+    assert args.subtitle_alignment == "asr"
     assert args.acceptance_mode == "quick"
 
 
@@ -880,6 +913,7 @@ def test_cmd_render_package_writes_success_json_and_package(
             top_uids,
             product_card_template_id,
             package_output_path,
+            subtitle_alignment,
         ):
             calls.append(
                 {
@@ -893,6 +927,7 @@ def test_cmd_render_package_writes_success_json_and_package(
                     "top_uids": top_uids,
                     "product_card_template_id": product_card_template_id,
                     "package_output_path": package_output_path,
+                    "subtitle_alignment": subtitle_alignment,
                 }
             )
             return {
@@ -951,6 +986,7 @@ def test_cmd_render_package_writes_success_json_and_package(
             "top_uids": "",
             "product_card_template_id": "muban-xiaobo-1",
             "package_output_path": str(output),
+            "subtitle_alignment": "proportional",
         }
     ]
 
@@ -976,6 +1012,7 @@ def test_cmd_render_package_reports_missing_without_writing_package(
             top_uids,
             product_card_template_id,
             package_output_path,
+            subtitle_alignment,
         ):
             return {
                 "ok": False,
@@ -1094,3 +1131,55 @@ def test_cmd_intro_preflight_writes_gate_json(capsys, monkeypatch):
     assert payload["ok"] is False
     assert payload["status"] == "blocked_missing_intro_demo"
     assert payload["message"] == "缺 3 段数码-桌面音响通用产品展示素材"
+def test_cmd_render_intro_video_writes_standard_json(capsys, monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class FakeWorkflow:
+        def render_intro_video(
+            self,
+            project_id,
+            *,
+            account_label,
+            intro_label,
+            output_path,
+            asset_root,
+        ):
+            calls.append(
+                {
+                    "project_id": project_id,
+                    "account_label": account_label,
+                    "intro_label": intro_label,
+                    "output_path": output_path,
+                    "asset_root": asset_root,
+                }
+            )
+            return {
+                "ok": True,
+                "output_path": "G:/workspace/out/intro.mp4",
+                "subtitle_count": 3,
+            }
+
+    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
+
+    cli.cmd_render_intro_video(
+        Namespace(
+            project_id=23,
+            account="xiaobo",
+            intro_label="intro-1",
+            output="intro.mp4",
+            asset_root="assets",
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["subtitle_count"] == 3
+    assert calls == [
+        {
+            "project_id": 23,
+            "account_label": "xiaobo",
+            "intro_label": "intro-1",
+            "output_path": "intro.mp4",
+            "asset_root": "assets",
+        }
+    ]

@@ -376,6 +376,58 @@ def test_final_mp4_package_includes_subtitles_from_shared_split_rules(
     assert all(item["end"] > item["start"] for item in product["subtitles"])
 
 
+def test_final_mp4_package_can_align_subtitles_with_asr(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    monkeypatch.setattr(builder, "resolve_product_card_template", lambda *_args, **_kwargs: {})
+    text = "Alpha first. Beta second."
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE script_blocks SET body=?, text_hash=? WHERE script_type='product' AND owner_uid='P001'",
+            (text, text_hash(text)),
+        )
+        block_id = conn.execute(
+            "SELECT id FROM script_blocks WHERE script_type='product' AND owner_uid='P001'"
+        ).fetchone()["id"]
+        conn.execute(
+            "UPDATE asset_bindings SET text_hash=? WHERE asset_type='voice' AND uid='P001' AND script_block_id=?",
+            (text_hash(text), block_id),
+        )
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 6.0)
+
+    def fake_align(audio_path, text_value, offset_sec):
+        assert offset_sec == 0.0
+        if Path(audio_path).name != "P001.wav":
+            return [(0.0, 1.0, text_value)]
+        assert text_value == text
+        return [(0.25, 1.2, "Alpha first."), (1.45, 2.8, "Beta second.")]
+
+    monkeypatch.setattr(builder, "align_subtitle_text_with_asr", fake_align)
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+        subtitle_alignment="asr",
+    )
+
+    product = next(
+        segment
+        for segment in result.package["segments"]
+        if segment["type"] == "product_recommendation" and segment["productUid"] == "P001"
+    )
+    assert result.package["output"]["subtitles"]["alignment"] == "asr"
+    assert product["subtitles"] == [
+        {"start": 0.25, "end": 1.2, "text": "Alpha first."},
+        {"start": 1.45, "end": 2.8, "text": "Beta second."},
+    ]
+
+
 def test_final_mp4_subtitle_random_pool_has_six_styles():
     import bworkflow_sql.render_package_builder as builder
 

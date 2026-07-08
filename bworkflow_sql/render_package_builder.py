@@ -13,7 +13,7 @@ from typing import Any
 from .db import Database
 from .repositories import Repository
 from .settings import INTERNAL_WORKSPACE_ROOT
-from .subtitle_helpers import distribute_subtitle_text, probe_media_duration_seconds
+from .subtitle_helpers import align_subtitle_text_with_asr, distribute_subtitle_text, probe_media_duration_seconds
 from .template_config import (
     display_template_from_image_path,
     get_remotion_template_metadata,
@@ -31,6 +31,7 @@ SUPPORTED_PRODUCT_MEDIA_MODES = {"cover_only", "video_preferred"}
 DEFAULT_PRODUCT_MEDIA_MODE = "video_preferred"
 SUPPORTED_PRODUCT_ORDER_STRATEGIES = {"price_segment_shuffle", "stable"}
 DEFAULT_PRODUCT_ORDER_STRATEGY = "price_segment_shuffle"
+SUPPORTED_SUBTITLE_ALIGNMENTS = {"proportional", "asr"}
 GLOBAL_SUBTITLE_STYLE_IDS = (
     "classic_white",
     "impact_yellow",
@@ -232,6 +233,7 @@ def build_product_recommendation_package(
     mode: str = "standard",
     top_uids: list[str] | None = None,
     product_uids: list[str] | None = None,
+    subtitle_alignment: str = "proportional",
 ) -> ProductRenderPackageResult:
     if output_mode not in SUPPORTED_OUTPUT_MODES:
         raise ValueError(f"unsupported output_mode: {output_mode}")
@@ -241,6 +243,9 @@ def build_product_recommendation_package(
     order_strategy = safe_text(product_order_strategy) or DEFAULT_PRODUCT_ORDER_STRATEGY
     if order_strategy not in SUPPORTED_PRODUCT_ORDER_STRATEGIES:
         raise ValueError(f"unsupported product_order_strategy: {order_strategy}")
+    subtitle_mode = safe_text(subtitle_alignment) or "proportional"
+    if subtitle_mode not in SUPPORTED_SUBTITLE_ALIGNMENTS:
+        raise ValueError(f"unsupported subtitle_alignment: {subtitle_mode}")
     explicit_template_requested = bool(safe_text(product_card_template_id))
     selected_template = resolve_product_card_template(
         account_label,
@@ -315,7 +320,12 @@ def build_product_recommendation_package(
             "sourceScriptBlockId": int(block.get("id") or 0),
         }
         if output_mode == "final_mp4":
-            price_segments[label]["subtitles"] = _segment_subtitles(body, duration)
+            price_segments[label]["subtitles"] = _segment_subtitles(
+                body,
+                duration,
+                audio_path=voice_path,
+                subtitle_alignment=subtitle_mode,
+            )
 
     for product in products:
         uid = safe_text(product.get("uid"))
@@ -419,7 +429,12 @@ def build_product_recommendation_package(
                 "voice": int(voice.get("id") or 0),
                 "video": int(video.get("id") or 0) if video else None,
             },
-            "subtitles": _segment_subtitles(safe_text(block.get("body")), duration)
+            "subtitles": _segment_subtitles(
+                safe_text(block.get("body")),
+                duration,
+                audio_path=voice_path,
+                subtitle_alignment=subtitle_mode,
+            )
             if output_mode == "final_mp4"
             else [],
         }
@@ -511,6 +526,7 @@ def build_product_recommendation_package(
             "enabled": True,
             "styleId": _choose_subtitle_style_id(package),
             "styleScope": "global",
+            "alignment": subtitle_mode,
         }
     return ProductRenderPackageResult(
         package=package,
@@ -519,7 +535,28 @@ def build_product_recommendation_package(
     )
 
 
-def _segment_subtitles(text: str, duration: float) -> list[dict[str, Any]]:
+def _segment_subtitles(
+    text: str,
+    duration: float,
+    *,
+    audio_path: Path | None = None,
+    subtitle_alignment: str = "proportional",
+) -> list[dict[str, Any]]:
+    mode = safe_text(subtitle_alignment) or "proportional"
+    if mode not in SUPPORTED_SUBTITLE_ALIGNMENTS:
+        raise ValueError(f"unsupported subtitle_alignment: {mode}")
+    if mode == "asr":
+        if audio_path is None:
+            raise ValueError("ASR subtitle alignment requires audio_path")
+        aligned = align_subtitle_text_with_asr(audio_path, safe_text(text), 0.0)
+        return [
+            {
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "text": safe_text(chunk),
+            }
+            for start, end, chunk in aligned
+        ]
     return [
         {
             "start": round(start, 3),

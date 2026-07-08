@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -313,6 +314,127 @@ def test_prepare_cutme_config_writes_intro_plan_path(tmp_path: Path, monkeypatch
     assert saved["intro_plan_path"] == str(plan_path)
     assert saved["audio_duration"] == 12.5
     assert saved["seed"] == ""
+
+
+def test_prepare_cutme_config_writes_intro_subtitle_contract_from_scenes(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setattr(cutme_intro_module, "get_cutme_audio_duration", lambda _path: 12.5)
+    config_path = tmp_path / "cutme-config.json"
+    plan_path = tmp_path / "prepared.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "scenes": [
+                    {
+                        "type": "hook_open",
+                        "text": "第一句先说清楚问题",
+                        "timing": {"start": 0.0, "duration": 2.2},
+                    },
+                    {
+                        "type": "pain_points",
+                        "text": "第二句再讲避坑",
+                        "timing": {"start": 2.2, "duration": 2.0},
+                    },
+                    {
+                        "type": "empty",
+                        "text": "",
+                        "timing": {"start": 4.2, "duration": 1.0},
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    config = cutme_intro_module.prepare_cutme_config(
+        config_path=config_path,
+        intro_plan_path=plan_path,
+        audio_path=tmp_path / "intro.wav",
+        intro_text="第一句先说清楚问题第二句再讲避坑",
+        title="桌面音响怎么选？",
+        asset_folder="",
+    )
+
+    subtitles = config["output"]["subtitles"]
+    assert subtitles == {
+        "enabled": True,
+        "styleId": "impact_yellow",
+        "source": "intro_plan_scenes",
+        "scope": "standalone_intro",
+    }
+    assert config["subtitles"] == [
+        {"start": 0.0, "end": 2.2, "text": "第一句先说清楚问题"},
+        {"start": 2.2, "end": 4.2, "text": "第二句再讲避坑"},
+    ]
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["subtitles"] == config["subtitles"]
+    assert saved["output"]["subtitles"]["scope"] == "standalone_intro"
+
+
+def test_prepare_cutme_config_splits_long_intro_scene_subtitles_with_shared_rules(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setattr(cutme_intro_module, "get_cutme_audio_duration", lambda _path: 12.5)
+    config_path = tmp_path / "cutme-config.json"
+    plan_path = tmp_path / "prepared.json"
+    long_scene_text = "如果你经常打游戏看电影，那沉浸感和声音规模，就不能太糊，比如人声和低频都要撑得住"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "scenes": [
+                    {
+                        "type": "usage_scenarios",
+                        "text": long_scene_text,
+                        "timing": {"start": 8.0, "duration": 6.0},
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    config = cutme_intro_module.prepare_cutme_config(
+        config_path=config_path,
+        intro_plan_path=plan_path,
+        audio_path=tmp_path / "intro.wav",
+        intro_text=long_scene_text,
+        title="桌面音响怎么选？",
+        asset_folder="",
+    )
+
+    subtitles = config["subtitles"]
+    assert len(subtitles) > 1
+    assert all(len(item["text"]) <= 24 for item in subtitles)
+    assert "".join(item["text"] for item in subtitles) == "如果你经常打游戏看电影那沉浸感和声音规模就不能太糊比如人声和低频都要撑得住"
+    assert subtitles[0]["start"] == 8.0
+    assert subtitles[-1]["end"] == 14.0
+    assert all(item["end"] > item["start"] for item in subtitles)
+
+
+def test_run_cutme_render_passes_absolute_output_path(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / "cutme-config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    captured: dict[str, str] = {}
+
+    def fake_run(command, **kwargs):
+        captured["output"] = command[command.index("--output") + 1]
+        output = Path(captured["output"])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"mp4")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(cutme_intro_module.subprocess, "run", fake_run)
+
+    result = cutme_intro_module.run_cutme_render(config_path, Path("relative") / "intro.mp4")
+
+    assert Path(captured["output"]).is_absolute()
+    assert result == tmp_path / "relative" / "intro.mp4"
 
 
 def test_build_intro_visual_seed_is_fresh_per_prepare(monkeypatch):
