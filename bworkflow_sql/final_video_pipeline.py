@@ -4,6 +4,7 @@ import json
 import locale
 import re
 import subprocess
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -181,6 +182,17 @@ def run_final_video_pipeline(
         "price_transition_report": price_transition_report,
         "frames": frames,
     }
+    run_manifest_path = _write_final_video_run_manifest(
+        project_id=project_id,
+        timestamp=timestamp,
+        package=package_payload,
+        result=result,
+        target_mp4=target_mp4,
+        full_target_mp4=full_target_mp4,
+        intro_video_path=_absolute_path(intro_video_path) if intro_video_path else None,
+    )
+    result["run_manifest_path"] = str(run_manifest_path)
+    result["run_manifest_link"] = _markdown_link("打开本次生成记录", run_manifest_path)
     return result
 
 
@@ -491,6 +503,186 @@ def _read_clip_cache_summary(path: Path) -> dict[str, Any]:
         "cache_hits": summary.get("cache_hits", 0),
         "rendered": summary.get("rendered", 0),
     }
+
+
+def _write_final_video_run_manifest(
+    *,
+    project_id: int,
+    timestamp: str,
+    package: dict[str, Any],
+    result: dict[str, Any],
+    target_mp4: Path,
+    full_target_mp4: Path | None,
+    intro_video_path: Path | None,
+) -> Path:
+    run_dir = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "runs"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = run_dir / f"final-video-{timestamp}.run-manifest.json"
+    payload = _final_video_run_manifest_payload(
+        package=package,
+        result=result,
+        target_mp4=target_mp4,
+        full_target_mp4=full_target_mp4,
+        intro_video_path=intro_video_path,
+    )
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return manifest_path
+
+
+def _final_video_run_manifest_payload(
+    *,
+    package: dict[str, Any],
+    result: dict[str, Any],
+    target_mp4: Path,
+    full_target_mp4: Path | None,
+    intro_video_path: Path | None,
+) -> dict[str, Any]:
+    package_path = Path(safe_text(result.get("package_path")))
+    job_package_path = Path(safe_text(result.get("job_package_path")))
+    clip_cache_manifest = safe_text(result.get("cutme", {}).get("clip_cache_manifest"))
+    frame_paths = [Path(frame["path"]) for frame in result.get("frames") or [] if safe_text(frame.get("path"))]
+    fingerprint_targets: list[tuple[str, Path | None]] = [
+        ("render_package", package_path),
+        ("cutme_job_package", job_package_path),
+        ("intro_video", intro_video_path),
+        ("product_mp4", target_mp4),
+        ("full_mp4", full_target_mp4),
+        ("clip_cache_manifest", Path(clip_cache_manifest) if clip_cache_manifest else None),
+    ]
+    fingerprint_targets.extend((f"acceptance_frame:{path.stem}", path) for path in frame_paths)
+
+    return {
+        "schemaVersion": "1.0.0",
+        "kind": "bworkflow.final_video_run",
+        "createdAt": datetime.now().isoformat(timespec="seconds"),
+        "asset_model": {
+            "asset_library": "reusable_copy_and_parameter_assets",
+            "pipeline": "this_run_selection",
+            "run_manifest": "generation_evidence",
+            "note": (
+                "Copy, intro, price-transition, parameter, voice, and product-card assets are reusable inputs; "
+                "this manifest records one concrete generation run and may reference outputs that are later moved or deleted."
+            ),
+        },
+        "project": {
+            "id": result.get("project_id"),
+            "account": result.get("account"),
+        },
+        "selection": {
+            "product_media_mode": result.get("product_media_mode"),
+            "product_order_strategy": result.get("product_order_strategy"),
+            "product_image_mode": result.get("product_image_mode"),
+            "product_card_template_id": result.get("product_card_template_id"),
+            "mode": _safe_text_or_default(result.get("price_transition_report", {}).get("mode"), result.get("mode")),
+            "top_uids": result.get("price_transition_report", {}).get("top_uids") or [],
+            "acceptance_mode": result.get("acceptance_mode"),
+        },
+        "inputs": {
+            "render_package_path": result.get("package_path"),
+            "cutme_job_package_path": result.get("job_package_path"),
+            "intro_video_path": str(intro_video_path) if intro_video_path else None,
+        },
+        "outputs": {
+            "product_mp4": str(target_mp4),
+            "full_mp4": str(full_target_mp4) if full_target_mp4 else None,
+            "acceptance_frames": result.get("frames") or [],
+        },
+        "segments": _run_manifest_segments(package),
+        "segment_fingerprints": _segment_fingerprints(package),
+        "file_fingerprints": [_file_fingerprint(role, path) for role, path in fingerprint_targets],
+        "reports": {
+            "price_transition_report": result.get("price_transition_report"),
+            "clip_cache": result.get("cutme", {}).get("clip_cache"),
+            "verification": result.get("verification"),
+        },
+    }
+
+
+def _safe_text_or_default(value: Any, default: Any) -> str:
+    text = safe_text(value)
+    return text or safe_text(default)
+
+
+def _run_manifest_segments(package: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    products: list[dict[str, Any]] = []
+    price_transitions: list[dict[str, Any]] = []
+    for position, segment in enumerate(package.get("segments") or [], start=1):
+        if not isinstance(segment, dict):
+            continue
+        segment_type = safe_text(segment.get("type"))
+        if segment_type == "product_recommendation":
+            products.append(
+                {
+                    "position": position,
+                    "uid": _segment_product_uid(segment),
+                    "title": safe_text(segment.get("title") or segment.get("productTitle")),
+                    "voiceAsset": safe_text(segment.get("voiceAsset")),
+                    "imageCardAsset": safe_text(segment.get("imageCardAsset")),
+                    "videoAsset": safe_text(segment.get("videoAsset")),
+                }
+            )
+        elif segment_type == "price_transition":
+            price_transitions.append(
+                {
+                    "position": position,
+                    "label": safe_text(segment.get("priceRangeLabel")),
+                    "voiceAsset": safe_text(segment.get("voiceAsset")),
+                    "text": safe_text(segment.get("transitionText")),
+                }
+            )
+    return {"products": products, "price_transitions": price_transitions}
+
+
+def _segment_product_uid(segment: dict[str, Any]) -> str:
+    return safe_text(segment.get("productUid") or segment.get("uid") or segment.get("product_id"))
+
+
+def _segment_fingerprints(package: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for position, segment in enumerate(package.get("segments") or [], start=1):
+        if not isinstance(segment, dict):
+            continue
+        semantic = _semantic_segment_payload(segment)
+        items.append(
+            {
+                "position": position,
+                "type": safe_text(segment.get("type")),
+                "uid": _segment_product_uid(segment),
+                "sha256": _json_sha256(semantic),
+            }
+        )
+    return items
+
+
+def _semantic_segment_payload(segment: dict[str, Any]) -> dict[str, Any]:
+    ignored = {"duration", "start", "end"}
+    return {key: value for key, value in segment.items() if key not in ignored}
+
+
+def _json_sha256(value: Any) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _file_fingerprint(role: str, path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {"role": role, "path": None, "exists": False, "size": 0, "sha256": ""}
+    exists = path.is_file()
+    return {
+        "role": role,
+        "path": str(path),
+        "exists": exists,
+        "size": path.stat().st_size if exists else 0,
+        "sha256": _path_sha256(path) if exists else "",
+    }
+
+
+def _path_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _price_transition_report(package: dict[str, Any], *, mode: str, top_uids: str) -> dict[str, Any]:

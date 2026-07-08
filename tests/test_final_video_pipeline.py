@@ -133,6 +133,25 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
     assert result["verification"]["loudnorm"]["output_i"] == "-11.04"
     assert result["price_transition_report"]["count"] == 1
     assert result["price_transition_report"]["items"][0]["after_top_products"] == 0
+    manifest_path = Path(result["run_manifest_path"])
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["kind"] == "bworkflow.final_video_run"
+    assert manifest["asset_model"]["asset_library"] == "reusable_copy_and_parameter_assets"
+    assert manifest["asset_model"]["pipeline"] == "this_run_selection"
+    assert manifest["asset_model"]["run_manifest"] == "generation_evidence"
+    assert manifest["project"]["id"] == 3
+    assert manifest["selection"]["product_media_mode"] == "video_preferred"
+    assert manifest["selection"]["product_order_strategy"] == "stable"
+    assert manifest["outputs"]["product_mp4"] == str(output_mp4)
+    assert manifest["outputs"]["full_mp4"] is None
+    assert [item["position"] for item in manifest["segments"]["price_transitions"]] == [1]
+    assert [item["position"] for item in manifest["segments"]["products"]] == [2, 3]
+    package_fingerprint = next(
+        item for item in manifest["file_fingerprints"] if item["role"] == "render_package"
+    )
+    assert package_fingerprint["exists"] is True
+    assert len(package_fingerprint["sha256"]) == 64
 
 
 def test_run_final_video_pipeline_concats_intro_video_into_full_mp4_with_quick_acceptance(tmp_path: Path):
@@ -216,6 +235,14 @@ def test_run_final_video_pipeline_concats_intro_video_into_full_mp4_with_quick_a
     assert result["price_transition_report"]["count"] == 1
     assert result["price_transition_report"]["items"][0]["position"] == 2
     assert result["price_transition_report"]["items"][0]["after_top_products"] == 1
+    manifest_path = Path(result["run_manifest_path"])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["outputs"]["product_mp4"] == str(product_mp4)
+    assert manifest["outputs"]["full_mp4"] == str(full_mp4)
+    assert manifest["inputs"]["intro_video_path"] == str(intro_mp4.resolve())
+    assert manifest["selection"]["mode"] == "top"
+    assert manifest["selection"]["top_uids"] == ["P001"]
+    assert manifest["reports"]["price_transition_report"]["items"][0]["after_top_products"] == 1
 
 
 def test_run_final_video_pipeline_passes_absolute_paths_to_cutme(tmp_path: Path, monkeypatch):

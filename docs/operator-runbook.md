@@ -338,3 +338,20 @@ data\workspace\project-{project_id}\intro\source-intro-plan-引言1.json
 ```powershell
 python -m pytest -q tests/test_intro_plan_writer.py tests/test_cutme_intro.py tests/test_intro_timeline.py
 ```
+
+## Final MP4 run manifest
+
+Every `render-final-video` run writes a run manifest under
+`data\workspace\project-{project_id}\runs\final-video-*.run-manifest.json` and
+returns it as `run_manifest_path`. This file is the evidence for one concrete
+generation run: selected account/template/order/media mode, RenderPackage path,
+intro video path, product/full MP4 paths, acceptance frames,
+`price_transition_report`, segment fingerprints, and file fingerprints.
+
+The run manifest is not a reusable copy asset and is not the workflow phase
+state. Reusable copy/parameter assets live in the WriteSpace asset library;
+`.pipeline.json` records the current production selection and phase; the run
+manifest records what one output actually used. If a user-selected output
+directory is moved or deleted later, treat the missing MP4 as a missing
+historical artifact and rerun generation. Do not treat it as a broken asset
+library or stale `.pipeline.json`.
