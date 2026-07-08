@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import hashlib
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -508,7 +509,7 @@ def build_product_recommendation_package(
     if output_mode == "final_mp4":
         package["output"]["subtitles"] = {
             "enabled": True,
-            "styleId": _choose_subtitle_style_id(),
+            "styleId": _choose_subtitle_style_id(package),
             "styleScope": "global",
         }
     return ProductRenderPackageResult(
@@ -533,8 +534,22 @@ def _segment_subtitles(text: str, duration: float) -> list[dict[str, Any]]:
     ]
 
 
-def _choose_subtitle_style_id() -> str:
-    return random.SystemRandom().choice(GLOBAL_SUBTITLE_STYLE_IDS)
+def _choose_subtitle_style_id(package: dict[str, Any] | None = None) -> str:
+    if not package:
+        return random.SystemRandom().choice(GLOBAL_SUBTITLE_STYLE_IDS)
+    project = package.get("project") if isinstance(package.get("project"), dict) else {}
+    output = package.get("output") if isinstance(package.get("output"), dict) else {}
+    seed_parts = [
+        safe_text(project.get("id")),
+        safe_text(project.get("category")),
+        safe_text(project.get("account")),
+        safe_text(output.get("productCardTemplateId")),
+        safe_text(output.get("productMediaMode")),
+        safe_text(output.get("productOrderStrategy")),
+    ]
+    seed = "|".join(seed_parts)
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
+    return GLOBAL_SUBTITLE_STYLE_IDS[int(digest[:8], 16) % len(GLOBAL_SUBTITLE_STYLE_IDS)]
 
 
 def _shuffle_products(products: list[dict[str, Any]]) -> list[dict[str, Any]]:

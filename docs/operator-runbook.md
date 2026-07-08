@@ -163,11 +163,37 @@ python -m venv "G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/.v
 `--mode top --top-uids UID1,UID2`，置顶 UID 必须保持用户给定顺序排在最前面；只有剩余商品
 参与段内随机或稳定排序。没有可匹配价格段时保持正常稳定顺序，不打乱整批商品。
 
+### 完整 MP4、快速验收与片段缓存
+
+如果已经有用户确认 OK 的引言 MP4，不要手写 ffmpeg 拼接。直接在
+`render-final-video` 上加：
+
+```powershell
+python -m bworkflow_sql render-final-video <project_id> --account <账号> --intro-video <intro.mp4> --full-output <完整.mp4> --acceptance-mode quick
+```
+
+`--output` 仍然表示商品推荐段 MP4；`--full-output` 表示“引言 + 商品推荐段”
+的完整 MP4。拼接阶段固定输出 H.264 1920x1080/30fps、AAC 48kHz，并使用
+`loudnorm=I=-11:TP=-1:LRA=11,aresample=48000`。
+
+CutMe fast-final 会在输出目录旁写
+`fast-final-work\clip-cache-manifest.json`，用于复用未变化的商品段和价格过渡
+段。这个缓存是加速项，不是前置条件：如果用户移动或删除了指定输出目录，或某个
+clip 文件缺失，系统必须自动重渲染对应片段，不能因此阻断生成。
+
+为了让缓存稳定生效，同一套任务输入下的“随机视觉项”必须可复现：
+`output.subtitles.styleId` 由 B-Workflow 按项目/账号/模板/媒体模式/排序策略稳定选择；
+CutMe 默认推荐背景图按 package seed 稳定选择，不随每次运行或价格段内商品随机顺序漂移。
+
+最终汇报必须包含 `price_transition_report`。尤其是 `--mode top` 时，置顶商品
+会先出现，价格过渡段排在置顶商品之后；不要只说“有/没有价格过渡”，要说明第一段
+价格过渡在几个置顶商品之后出现。
+
 ### Final MP4 字幕样式
 
 `render-final-video` / `render-package --output-mode final_mp4` 默认写入
 `output.subtitles.enabled=true` 和 `styleScope="global"`，并从 CutMe 的全局
-生产样式池里随机选择一个 concrete `styleId`。当前生产池为：
+生产样式池里按任务输入稳定选择一个 concrete `styleId`。当前生产池为：
 `classic_white`、`impact_yellow`、`panel_white`、`warm_cream`、`tech_cyan`、
 `orange_energy`。
 

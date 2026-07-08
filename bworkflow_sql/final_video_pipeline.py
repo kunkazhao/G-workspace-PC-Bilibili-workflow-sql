@@ -31,6 +31,9 @@ def run_final_video_pipeline(
     product_card_template_id: str = "",
     package_output_path: str | Path | None = None,
     output_path: str | Path | None = None,
+    intro_video_path: str | Path | None = None,
+    full_output_path: str | Path | None = None,
+    acceptance_mode: str = "full",
     cutme_root: str | Path = CUTME_ROOT,
     runner: Runner | None = None,
     probe_video: ProbeVideo | None = None,
@@ -110,16 +113,42 @@ def run_final_video_pipeline(
         timeout=7200,
     )
 
-    ffprobe_result = (probe_video or _probe_video)(target_mp4)
-    loudnorm_result = (measure_loudness or _measure_loudness)(target_mp4)
+    full_target_mp4: Path | None = None
+    concat_result: Any | None = None
+    if intro_video_path:
+        intro_mp4 = _absolute_path(intro_video_path)
+        if not intro_mp4.is_file():
+            raise FileNotFoundError(f"intro video does not exist: {intro_mp4}")
+        full_target_mp4 = (
+            _absolute_path(full_output_path)
+            if full_output_path
+            else target_mp4.with_name(f"{target_mp4.stem}-with-intro{target_mp4.suffix}")
+        )
+        concat_result = _concat_intro_and_product_video(
+            intro_mp4,
+            target_mp4,
+            full_target_mp4,
+            cwd=Path(cutme_root),
+            runner=command_runner,
+        )
+
+    verification_target = full_target_mp4 or target_mp4
+    ffprobe_result = (probe_video or _probe_video)(verification_target)
+    loudnorm_result = None if acceptance_mode == "quick" else (measure_loudness or _measure_loudness)(verification_target)
     frames = _extract_acceptance_frames(
-        target_mp4,
+        verification_target,
         package_path,
         cwd=Path(cutme_root),
         runner=command_runner,
+        intro_offset=_video_duration_seconds(_absolute_path(intro_video_path), probe_video or _probe_video)
+        if full_target_mp4 and intro_video_path
+        else 0.0,
     )
+    package_payload = json.loads(package_path.read_text(encoding="utf-8-sig"))
+    price_transition_report = _price_transition_report(package_payload, mode=mode, top_uids=top_uids)
+    clip_cache_manifest = _find_clip_cache_manifest(target_mp4)
 
-    return {
+    result = {
         "ok": True,
         "project_id": project_id,
         "account": account,
@@ -131,18 +160,28 @@ def run_final_video_pipeline(
         "job_package_path": str(job_package_path),
         "output_mp4": str(target_mp4),
         "output_mp4_link": _markdown_link("打开完整 MP4", target_mp4),
+        "full_output_mp4": str(full_target_mp4) if full_target_mp4 else None,
+        "full_output_mp4_link": _markdown_link("打开完整 MP4", full_target_mp4) if full_target_mp4 else None,
+        "intro_video_path": str(_absolute_path(intro_video_path)) if intro_video_path else None,
+        "acceptance_mode": acceptance_mode,
         "product_images": product_images,
         "render_package": package_result,
         "cutme": {
             "build": _command_summary(build),
             "render": _command_summary(render),
+            "concat_intro": _command_summary(concat_result) if concat_result is not None else None,
+            "clip_cache_manifest": str(clip_cache_manifest) if clip_cache_manifest else None,
+            "clip_cache": _read_clip_cache_summary(clip_cache_manifest) if clip_cache_manifest else None,
         },
         "verification": {
             "ffprobe": ffprobe_result,
             "loudnorm": loudnorm_result,
+            "full_ffprobe": ffprobe_result if full_target_mp4 else None,
         },
+        "price_transition_report": price_transition_report,
         "frames": frames,
     }
+    return result
 
 
 def _run_command(command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -253,6 +292,7 @@ def _extract_acceptance_frames(
     *,
     cwd: Path,
     runner: Runner,
+    intro_offset: float = 0.0,
 ) -> list[dict[str, Any]]:
     package = json.loads(package_path.read_text(encoding="utf-8"))
     frame_specs = _acceptance_frame_specs(package)
@@ -266,7 +306,7 @@ def _extract_acceptance_frames(
                 "ffmpeg",
                 "-y",
                 "-ss",
-                _format_seconds(float(spec["time"])),
+                _format_seconds(float(spec["time"]) + intro_offset),
                 "-i",
                 str(target_mp4),
                 "-frames:v",
@@ -279,7 +319,8 @@ def _extract_acceptance_frames(
         frames.append(
             {
                 "label": spec["label"],
-                "time": spec["time"],
+                "time": spec["time"] + intro_offset,
+                "package_time": spec["time"],
                 "path": str(frame_path),
                 "link": _markdown_link(spec["label"], frame_path),
             }
@@ -365,6 +406,132 @@ def _audio_stream_summary(stream: dict[str, Any]) -> str:
         return ""
     sample_rate = safe_text(stream.get("sample_rate"))
     return f"{safe_text(stream.get('codec_name'))} {sample_rate}Hz"
+
+
+def _concat_intro_and_product_video(
+    intro_mp4: Path,
+    product_mp4: Path,
+    output_mp4: Path,
+    *,
+    cwd: Path,
+    runner: Runner,
+) -> Any:
+    output_mp4.parent.mkdir(parents=True, exist_ok=True)
+    filter_complex = (
+        "[0:v]scale=1920:1080:flags=lanczos,setsar=1,fps=30,format=yuv420p[v0];"
+        "[1:v]scale=1920:1080:flags=lanczos,setsar=1,fps=30,format=yuv420p[v1];"
+        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo[a0];"
+        "[1:a]aformat=sample_rates=48000:channel_layouts=stereo[a1];"
+        "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a];"
+        "[a]loudnorm=I=-11:TP=-1:LRA=11,aresample=48000[aout]"
+    )
+    return runner(
+        [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-i",
+            str(intro_mp4),
+            "-i",
+            str(product_mp4),
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[v]",
+            "-map",
+            "[aout]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            "30",
+            "-c:a",
+            "aac",
+            "-ar",
+            "48000",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            str(output_mp4),
+        ],
+        cwd=cwd,
+        timeout=7200,
+    )
+
+
+def _video_duration_seconds(path: Path, probe_video: ProbeVideo) -> float:
+    try:
+        result = probe_video(path)
+        return float(result.get("duration") or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _find_clip_cache_manifest(product_mp4: Path) -> Path | None:
+    candidate = product_mp4.parent / "fast-final-work" / "clip-cache-manifest.json"
+    return candidate if candidate.is_file() else None
+
+
+def _read_clip_cache_summary(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {"manifest_path": str(path), "readable": False}
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    return {
+        "manifest_path": str(path),
+        "readable": True,
+        "segments_total": summary.get("segments_total", 0),
+        "cache_hits": summary.get("cache_hits", 0),
+        "rendered": summary.get("rendered", 0),
+    }
+
+
+def _price_transition_report(package: dict[str, Any], *, mode: str, top_uids: str) -> dict[str, Any]:
+    top_uid_list = [item.strip() for item in top_uids.split(",") if item.strip()]
+    items: list[dict[str, Any]] = []
+    product_count_before = 0
+    for position, segment in enumerate(package.get("segments") or [], start=1):
+        if not isinstance(segment, dict):
+            continue
+        segment_type = safe_text(segment.get("type"))
+        if segment_type == "product_recommendation":
+            product_count_before += 1
+            continue
+        if segment_type != "price_transition":
+            continue
+        items.append(
+            {
+                "position": position,
+                "label": safe_text(segment.get("priceRangeLabel")),
+                "after_products": product_count_before,
+                "after_top_products": min(product_count_before, len(top_uid_list)) if mode == "top" else 0,
+                "text": safe_text(segment.get("transitionText")),
+                "voiceAsset": safe_text(segment.get("voiceAsset")),
+            }
+        )
+    return {
+        "count": len(items),
+        "mode": mode,
+        "top_uids": top_uid_list,
+        "summary": _price_transition_summary(items, mode=mode, top_uids=top_uid_list),
+        "items": items,
+    }
+
+
+def _price_transition_summary(items: list[dict[str, Any]], *, mode: str, top_uids: list[str]) -> str:
+    if not items:
+        return "本次 RenderPackage 没有价格过渡段。"
+    first = items[0]
+    if mode == "top" and top_uids:
+        return f"本次价格过渡共 {len(items)} 段；因启用置顶，第一段价格过渡在 {len(top_uids)} 个置顶商品之后出现。"
+    return f"本次价格过渡共 {len(items)} 段；第一段在第 {first['position']} 个片段出现。"
 
 
 def _command_stdout(result: Any) -> str:

@@ -359,6 +359,12 @@ def test_render_final_video_parser_registers_command():
             "package.json",
             "--output",
             "out.mp4",
+            "--intro-video",
+            "intro.mp4",
+            "--full-output",
+            "full.mp4",
+            "--acceptance-mode",
+            "quick",
         ]
     )
 
@@ -374,6 +380,9 @@ def test_render_final_video_parser_registers_command():
     assert args.product_card_template_id == "muban-xiaobo-1"
     assert args.package_output == "package.json"
     assert args.output == "out.mp4"
+    assert args.intro_video == "intro.mp4"
+    assert args.full_output == "full.mp4"
+    assert args.acceptance_mode == "quick"
 
 
 def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):

@@ -351,7 +351,7 @@ def test_final_mp4_package_includes_subtitles_from_shared_split_rules(
             (text_hash(text), block_id),
         )
     monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 6.0)
-    monkeypatch.setattr(builder, "_choose_subtitle_style_id", lambda: "impact_yellow")
+    monkeypatch.setattr(builder, "_choose_subtitle_style_id", lambda _package=None: "impact_yellow")
 
     result = build_product_recommendation_package(
         db,
@@ -387,6 +387,33 @@ def test_final_mp4_subtitle_random_pool_has_six_styles():
         "tech_cyan",
         "orange_energy",
     )
+
+
+def test_final_mp4_subtitle_style_is_stable_for_same_package_inputs(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 6.0)
+
+    first = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+        product_card_template_id="muban-xiaobo-1",
+    )
+    second = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+        product_card_template_id="muban-xiaobo-1",
+    )
+
+    assert first.package["output"]["subtitles"]["styleId"] == second.package["output"]["subtitles"]["styleId"]
 
 
 def test_price_transition_card_uses_fill_slots_with_voice_timing(

@@ -681,6 +681,9 @@ def cmd_render_final_video(args: argparse.Namespace) -> None:
         product_card_template_id=args.product_card_template_id or "",
         package_output_path=args.package_output or None,
         output_path=args.output or None,
+        intro_video_path=args.intro_video or None,
+        full_output_path=args.full_output or None,
+        acceptance_mode=args.acceptance_mode,
     )
     _json_out(result)
 
@@ -875,6 +878,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--package-output", help="render-package.json output path")
     p.add_argument("--output", "-o", help="final mp4 output path")
+    p.add_argument("--intro-video", help="accepted intro MP4 to prepend to the product recommendation MP4")
+    p.add_argument("--full-output", help="full MP4 output path when --intro-video is provided")
+    p.add_argument(
+        "--acceptance-mode",
+        choices=["quick", "full"],
+        default="full",
+        help="quick skips slow loudnorm scanning; full runs ffprobe, loudnorm, and frame extraction",
+    )
 
     p = sub.add_parser("product-images", help="Regenerate Remotion product-card images")
     p.add_argument("project_id", type=int)
