@@ -64,6 +64,7 @@ from ..workflow_service import (
     subtitle_manifest_entries,
     voice_provider_label,
 )
+from ..asr import service as asr_service
 from ..dialogs import TaskProgressDialog
 from ..ui_helpers import (
     DialogSection,
@@ -119,6 +120,11 @@ from ..ui_helpers import (
     voice_row_choice_label,
     voice_state,
 )
+
+
+def _asr_alignment_label() -> str:
+    provider = asr_service.provider_label()
+    return f"ASR provider {provider} (model={DEFAULT_SUBTITLE_ASR_MODEL}, workers={DEFAULT_SUBTITLE_ASR_WORKERS})"
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -340,7 +346,7 @@ class SubtitleSrtPage(WorkflowPage):
                     ("导出文件", str(output_path)),
                     (
                         "字幕对齐",
-                        f"独立 ASR 子进程（faster-whisper {DEFAULT_SUBTITLE_ASR_MODEL}，CPU 线程 {DEFAULT_SUBTITLE_ASR_WORKERS}）",
+                        _asr_alignment_label(),
                     ),
                     ("片头视频时长校准", str(intro_video) if intro_video is not None else "未选择"),
                     ("片头文案", f"{len(intro_text)} 字" if intro_video is not None and intro_text else "未填写"),
@@ -399,7 +405,7 @@ class SubtitleSrtPage(WorkflowPage):
         progress_dialog.append(f"manifest：{payload['manifest']}")
         progress_dialog.append(f"导出文件：{payload['output_path']}")
         progress_dialog.append(
-            f"字幕对齐：独立 ASR 子进程（faster-whisper {DEFAULT_SUBTITLE_ASR_MODEL}，CPU 线程 {DEFAULT_SUBTITLE_ASR_WORKERS}）"
+            f"字幕对齐：{_asr_alignment_label()}"
         )
         if payload["intro_video"]:
             progress_dialog.append(f"片头视频时长校准：{payload['intro_video']}")

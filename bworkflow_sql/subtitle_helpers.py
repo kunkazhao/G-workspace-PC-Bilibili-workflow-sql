@@ -8,6 +8,8 @@ import wave
 from pathlib import Path
 from typing import Any
 
+from .asr import service as asr_service
+from .asr.providers.faster_whisper import DEFAULT_ASR_PYTHON, DEFAULT_ASR_WORKER
 from .utils import safe_text
 from .subtitle_rules import (
     SUBTITLE_ALIGN_DROP_RE,
@@ -29,8 +31,8 @@ DEFAULT_SUBTITLE_ASR_BEAM_SIZE = 2
 DEFAULT_SUBTITLE_ASR_WORKERS = 3
 DEFAULT_SUBTITLE_SPEECH_SNAP_WINDOW_SEC = 0.5
 DEFAULT_SUBTITLE_OVERLAP_GAP_SEC = 0.02
-DEFAULT_SUBTITLE_ASR_PYTHON = Path(__file__).resolve().parents[1] / ".venv-asr" / "Scripts" / "python.exe"
-DEFAULT_SUBTITLE_ASR_WORKER = Path(__file__).resolve().parents[1] / "scripts" / "subtitle_asr_worker.py"
+DEFAULT_SUBTITLE_ASR_PYTHON = DEFAULT_ASR_PYTHON
+DEFAULT_SUBTITLE_ASR_WORKER = DEFAULT_ASR_WORKER
 
 
 def subtitle_manifest_entries(payload: Any) -> list[dict[str, Any]]:
@@ -124,8 +126,7 @@ def _expand_asr_unit(start: float, end: float, text: str) -> list[dict[str, Any]
 
 
 def subtitle_asr_python_path() -> Path:
-    configured = safe_text(os.environ.get("BWORKFLOW_ASR_PYTHON"))
-    return Path(configured) if configured else DEFAULT_SUBTITLE_ASR_PYTHON
+    return asr_service.get_provider("faster_whisper").python_path()
 
 
 def run_subtitle_asr_worker(
@@ -135,49 +136,16 @@ def run_subtitle_asr_worker(
     language: str,
     beam_size: int,
     workers: int,
+    provider_name: str | None = None,
 ) -> list[list[dict[str, Any]]]:
-    python_exe = subtitle_asr_python_path()
-    if not python_exe.exists():
-        raise ValueError(
-            f"独立 ASR 环境不存在：{python_exe}\n"
-            "请运行 scripts\\setup_subtitle_asr.ps1 安装项目专用 Python 3.11 环境。"
-        )
-    if not DEFAULT_SUBTITLE_ASR_WORKER.exists():
-        raise ValueError(f"ASR 子进程脚本不存在：{DEFAULT_SUBTITLE_ASR_WORKER}")
-
-    payload = {
-        "model_name": model_name,
-        "language": language,
-        "beam_size": max(1, int(beam_size or 1)),
-        "cpu_threads": max(1, int(workers or 1)),
-        "jobs": [{"audio_path": safe_text(job.get("audio_path"))} for job in jobs],
-    }
-    with tempfile.TemporaryDirectory(prefix="bworkflow-asr-") as temp_dir:
-        request_path = Path(temp_dir) / "request.json"
-        response_path = Path(temp_dir) / "response.json"
-        request_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        completed = subprocess.run(
-            [str(python_exe), str(DEFAULT_SUBTITLE_ASR_WORKER), str(request_path), str(response_path)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=3600,
-            creationflags=creationflags,
-        )
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "").strip()
-            raise ValueError(f"独立 ASR 子进程失败（退出码 {completed.returncode}）：{detail or '没有错误输出'}")
-        if not response_path.exists():
-            raise ValueError("独立 ASR 子进程没有生成结果文件。")
-        response = json.loads(response_path.read_text(encoding="utf-8-sig"))
-    if not isinstance(response, dict) or not isinstance(response.get("results"), list):
-        raise ValueError("独立 ASR 子进程返回格式无效。")
-    results = response["results"]
-    if len(results) != len(jobs):
-        raise ValueError(f"独立 ASR 返回条数不匹配：任务 {len(jobs)}，结果 {len(results)}。")
-    return [result if isinstance(result, list) else [] for result in results]
+    return asr_service.transcribe_jobs(
+        jobs,
+        model_name=model_name,
+        language=language,
+        beam_size=beam_size,
+        workers=workers,
+        provider_name=provider_name,
+    )
 
 
 def run_subtitle_alignment_asr(
@@ -186,6 +154,7 @@ def run_subtitle_alignment_asr(
     model_name: str = DEFAULT_SUBTITLE_ASR_MODEL,
     language: str = DEFAULT_SUBTITLE_ASR_LANGUAGE,
     beam_size: int = DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
+    provider_name: str | None = None,
 ) -> list[dict[str, Any]]:
     path = Path(audio_path)
     if not path.exists():
@@ -196,6 +165,7 @@ def run_subtitle_alignment_asr(
         language=language,
         beam_size=beam_size,
         workers=1,
+        provider_name=provider_name,
     )[0]
 
 
@@ -274,11 +244,18 @@ def align_subtitle_text_with_asr(
     model_name: str = DEFAULT_SUBTITLE_ASR_MODEL,
     language: str = DEFAULT_SUBTITLE_ASR_LANGUAGE,
     beam_size: int = DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
+    provider_name: str | None = None,
 ) -> list[tuple[float, float, str]]:
     chunks = split_subtitle_text(text)
     if not chunks:
         return []
-    units = run_subtitle_alignment_asr(audio_path, model_name=model_name, language=language, beam_size=beam_size)
+    units = run_subtitle_alignment_asr(
+        audio_path,
+        model_name=model_name,
+        language=language,
+        beam_size=beam_size,
+        provider_name=provider_name,
+    )
     return align_subtitle_text_with_units(audio_path, chunks, units, offset_sec)
 
 
@@ -328,6 +305,7 @@ def align_subtitle_jobs_with_asr(
     language: str = DEFAULT_SUBTITLE_ASR_LANGUAGE,
     beam_size: int = DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
     workers: int = DEFAULT_SUBTITLE_ASR_WORKERS,
+    provider_name: str | None = None,
 ) -> list[tuple[float, float, str]]:
     if not jobs:
         return []
@@ -337,6 +315,7 @@ def align_subtitle_jobs_with_asr(
         language=language,
         beam_size=beam_size,
         workers=workers,
+        provider_name=provider_name,
     )
     merged: list[tuple[float, float, str]] = []
     for index, (job, units) in enumerate(zip(jobs, unit_results)):

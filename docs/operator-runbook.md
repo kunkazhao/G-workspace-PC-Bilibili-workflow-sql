@@ -143,7 +143,7 @@ python -m bworkflow_sql jianying <project_id> \
   --subtitle-no-vad
 ```
 
-`--subtitle-no-vad` 用于当前机器上 onnxruntime/VAD 初始化失败时的兼容路径；字幕 ASR 会优先使用项目根目录 `.venv-asr\Scripts\python.exe`，也可用 `BWORKFLOW_JIANYING_SUBTITLE_PYTHON` 覆盖。
+`--subtitle-no-vad` 用于当前机器上 onnxruntime/VAD 初始化失败时的兼容路径。字幕 ASR 统一走 `bworkflow_sql.asr.service` provider 抽象；默认 provider 是 `faster_whisper`，可用 `BWORKFLOW_ASR_PROVIDER` 覆盖。默认 faster-whisper provider 会优先使用项目根目录 `.venv-asr\Scripts\python.exe`，也可用 `BWORKFLOW_ASR_PYTHON` 覆盖。
 
 如果项目内 `.venv` 还没初始化，先执行：
 
@@ -251,7 +251,7 @@ python -m cutme --preview-subtitle-styles --output G:\workspace\赵二-工具-Cu
 关键规则：
 
 - 对齐前必须校验 `scenes[].text` 拼接后与 `full_script` 一致，不能让 LLM 改字后继续对齐。
-- ASR 仍复用现有独立子进程和 `align_subtitle_text_with_units(...)`，不要在 CutMe 里重复引入 Whisper。
+- ASR 统一走 B-Workflow 的 `bworkflow_sql.asr.service` provider 抽象，并复用 `align_subtitle_text_with_units(...)`；不要在 CutMe 里重复引入 Whisper 或云端 ASR SDK。
 - CutMe 只消费 `scenes[].timing`，并根据 `hook_open`、`pain_points`、`self_check`、`priority_preview` 控制产品展示和引导三连素材。
 
 ## CutMe 引言页面新链路

@@ -21,7 +21,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from python_env import inject_local_site_packages, preferred_python_commands
+from python_env import inject_local_site_packages
+from bworkflow_sql.asr import service as asr_service
 from bworkflow_sql.subtitle_rules import split_subtitle_text
 from image_index import DEFAULT_IMAGE_INDEX_PATH, resolve_image_paths
 from PIL import Image, ImageDraw, ImageFont
@@ -74,7 +75,6 @@ def _resolve_default_background() -> str:
 DEFAULT_BACKGROUND_IMAGE = _resolve_default_background()
 PUNCTUATION_TRANSLATION = str.maketrans("", "", "，。！？；：、,.!?;:()（）【】[]《》<>“”\\\"'‘’`~…—-")
 WHITESPACE_RE = re.compile(r"\s+")
-SYSTEM_PYTHON_COMMANDS = preferred_python_commands()
 QWEN_FORCED_ALIGNER_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B"
 QWEN_LANGUAGE_MAP = {
     "zh": "Chinese",
@@ -150,7 +150,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-dir", help="兼容旧测试模式：商品图片目录。")
     parser.add_argument("--audio-dir", help="兼容旧测试模式：配音目录。")
     parser.add_argument("--subtitle-language", default="zh", help="本地字幕对齐语言。")
-    parser.add_argument("--subtitle-model", default="base", help="faster-whisper 模型名。")
+    parser.add_argument("--subtitle-model", default="base", help="ASR provider 模型名。")
     parser.add_argument(
         "--subtitle-engine",
         choices=["whisper", "qwen"],
@@ -641,71 +641,15 @@ def split_longest_clause(clauses: list[str]) -> list[str]:
     return clauses
 
 
-def subtitle_python_commands() -> list[list[str]]:
-    commands: list[list[str]] = []
-    override = normalize_text(os.environ.get("BWORKFLOW_JIANYING_SUBTITLE_PYTHON"))
-    if override:
-        commands.append([override])
-    local_asr_python = Path(__file__).resolve().parents[2] / ".venv-asr" / "Scripts" / "python.exe"
-    if local_asr_python.exists():
-        commands.append([str(local_asr_python)])
-    for command in SYSTEM_PYTHON_COMMANDS:
-        if command not in commands:
-            commands.append(command)
-    return commands
-
 
 def run_alignment_asr(audio_path: Path, model_name: str, language: str, *, vad_filter: bool = True) -> list[dict[str, Any]]:
-    code = """
-import json
-import sys
-from faster_whisper import WhisperModel
-
-audio_path = sys.argv[1]
-model_name = sys.argv[2]
-language = sys.argv[3]
-vad_filter = sys.argv[4] == "1"
-
-model = WhisperModel(model_name, device="cpu", compute_type="int8")
-segments, _info = model.transcribe(
-    audio_path,
-    language=language,
-    vad_filter=vad_filter,
-    word_timestamps=True,
-    beam_size=5,
-)
-
-payload = []
-for seg in segments:
-    payload.append(
-        {
-            "start": round(seg.start, 3),
-            "end": round(seg.end, 3),
-            "text": seg.text.strip(),
-        }
+    return asr_service.transcribe_segments(
+        audio_path,
+        model_name=model_name,
+        language=language,
+        beam_size=5,
+        vad_filter=vad_filter,
     )
-
-print(json.dumps(payload, ensure_ascii=False))
-""".strip()
-
-    with tempfile.TemporaryDirectory(prefix="jy_subtitle_") as temp_dir:
-        temp_audio = Path(temp_dir) / f"audio{audio_path.suffix.lower()}"
-        shutil.copy2(audio_path, temp_audio)
-        last_error: RuntimeError | None = None
-        for command in subtitle_python_commands():
-            try:
-                result = subprocess.run(
-                    [*command, "-c", code, str(temp_audio), model_name, language, "1" if vad_filter else "0"],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                return json.loads(result.stdout)
-            except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
-                last_error = RuntimeError(
-                    f"字幕对齐失败（{' '.join(command)}）：{exc}\n{getattr(exc, 'stderr', '')}"
-                )
-        raise last_error or RuntimeError("没有可用的 Python 运行时来执行字幕对齐。")
 
 
 def partition_clauses_to_segments(clauses: list[str], segment_weights: list[float]) -> list[str]:

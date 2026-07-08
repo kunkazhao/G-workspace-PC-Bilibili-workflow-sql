@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import subprocess
 import sys
 import types
 from pathlib import Path
@@ -41,32 +40,36 @@ def load_engine_module():
             sys.modules["qwen_asr"] = previous_qwen
 
 
-def test_alignment_asr_uses_subtitle_python_override_and_can_disable_vad(tmp_path: Path, monkeypatch):
+def test_alignment_asr_uses_shared_asr_service_and_can_disable_vad(tmp_path: Path, monkeypatch):
     module = load_engine_module()
     audio_path = tmp_path / "voice.wav"
     audio_path.write_bytes(b"fake-wave")
-    override_python = tmp_path / "asr-python.exe"
-    monkeypatch.setenv("BWORKFLOW_JIANYING_SUBTITLE_PYTHON", str(override_python))
-    monkeypatch.setattr(module, "SYSTEM_PYTHON_COMMANDS", [["fallback-python"]])
+    captured: dict[str, object] = {}
 
-    captured: dict[str, list[str]] = {}
-
-    def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        captured["command"] = command
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout='[{"start": 0.0, "end": 1.0, "text": "测试"}]',
-            stderr="",
+    def fake_transcribe_segments(audio, *, model_name, language, beam_size, vad_filter):
+        captured.update(
+            {
+                "audio_path": audio,
+                "model_name": model_name,
+                "language": language,
+                "beam_size": beam_size,
+                "vad_filter": vad_filter,
+            }
         )
+        return [{"start": 0.0, "end": 1.0, "text": "测试"}]
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module.asr_service, "transcribe_segments", fake_transcribe_segments)
 
     segments = module.run_alignment_asr(audio_path, "base", "zh", vad_filter=False)
 
     assert segments == [{"start": 0.0, "end": 1.0, "text": "测试"}]
-    assert captured["command"][0] == str(override_python)
-    assert captured["command"][-1] == "0"
+    assert captured == {
+        "audio_path": audio_path,
+        "model_name": "base",
+        "language": "zh",
+        "beam_size": 5,
+        "vad_filter": False,
+    }
 
 
 def test_engine_subtitle_chunks_use_shared_bworkflow_rules():

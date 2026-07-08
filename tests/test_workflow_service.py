@@ -1654,7 +1654,11 @@ def test_export_subtitle_srt_uses_asr_alignment_when_enabled(tmp_path: Path, mon
     )
     output = tmp_path / "out.srt"
 
-    def fake_align_jobs(jobs, *, model_name, language, beam_size, workers):
+    def fake_provider_label(provider_name=None):
+        assert provider_name == "fake-provider"
+        return "fake-provider"
+
+    def fake_align_jobs(jobs, *, model_name, language, beam_size, workers, provider_name=None):
         assert len(jobs) == 1
         assert Path(jobs[0]["audio_path"]) == product_audio
         assert jobs[0]["text"] == "第一句。第二句。"
@@ -1663,8 +1667,10 @@ def test_export_subtitle_srt_uses_asr_alignment_when_enabled(tmp_path: Path, mon
         assert language == workflow_service_module.DEFAULT_SUBTITLE_ASR_LANGUAGE
         assert beam_size == workflow_service_module.DEFAULT_SUBTITLE_ASR_BEAM_SIZE
         assert workers == workflow_service_module.DEFAULT_SUBTITLE_ASR_WORKERS
+        assert provider_name == "fake-provider"
         return [(0.2, 0.9, "第一句"), (0.9, 1.8, "第二句")]
 
+    monkeypatch.setattr(workflow_service_module.asr_service, "provider_label", fake_provider_label)
     monkeypatch.setattr(workflow_service_module, "align_subtitle_jobs_with_asr", fake_align_jobs)
 
     result = service.export_subtitle_srt(
@@ -1672,10 +1678,11 @@ def test_export_subtitle_srt_uses_asr_alignment_when_enabled(tmp_path: Path, mon
         manifest_path=manifest,
         output_path=output,
         align_with_asr=True,
+        subtitle_asr_provider="fake-provider",
     )
 
     assert result.returncode == 0
-    assert "字幕对齐：独立 ASR 子进程" in result.stdout
+    assert "ASR provider: fake-provider" in result.stdout
     text = output.read_text(encoding="utf-8-sig")
     assert "00:00:00,200 --> 00:00:00,900" in text
     assert "00:00:00,900 --> 00:00:01,800" in text
@@ -1687,8 +1694,9 @@ def test_asr_alignment_snaps_subtitle_start_after_breath_pause(tmp_path: Path, m
     audio_path = tmp_path / "voice.wav"
     write_test_wav(audio_path, [(0.4, 0.6), (0.3, 0.0), (0.4, 0.6)], frame_rate=1000)
 
-    def fake_asr(_audio_path, *, model_name, language, beam_size):
+    def fake_asr(_audio_path, *, model_name, language, beam_size, provider_name=None):
         assert beam_size == workflow_service_module.DEFAULT_SUBTITLE_ASR_BEAM_SIZE
+        assert provider_name is None
         return [
             {"start": 0.0, "end": 0.1, "text": "第"},
             {"start": 0.1, "end": 0.2, "text": "一"},
@@ -1718,12 +1726,13 @@ def test_asr_alignment_runs_all_jobs_in_one_isolated_worker(tmp_path: Path, monk
     ]
     calls = []
 
-    def fake_worker(worker_jobs, *, model_name, language, beam_size, workers):
+    def fake_worker(worker_jobs, *, model_name, language, beam_size, workers, provider_name=None):
         calls.append(worker_jobs)
         assert model_name == workflow_service_module.DEFAULT_SUBTITLE_ASR_MODEL
         assert language == workflow_service_module.DEFAULT_SUBTITLE_ASR_LANGUAGE
         assert beam_size == workflow_service_module.DEFAULT_SUBTITLE_ASR_BEAM_SIZE
         assert workers == 3
+        assert provider_name is None
         return [
             [{"start": 0.1, "end": 0.8, "text": "第一句"}],
             [{"start": 0.2, "end": 0.9, "text": "第二句"}],
