@@ -34,6 +34,7 @@ from .settings import (
     LEGACY_B_WORKFLOW_SKILL_SCRIPTS,
 )
 from .utils import file_metadata, now_iso, safe_text, text_hash
+from .asr import service as asr_service
 from .template_config import (
     display_template_from_image_path,
     display_template_for_product_card_template_id,
@@ -1570,6 +1571,7 @@ class WorkflowService:
         subtitle_asr_model: str = DEFAULT_SUBTITLE_ASR_MODEL,
         subtitle_asr_language: str = DEFAULT_SUBTITLE_ASR_LANGUAGE,
         subtitle_asr_workers: int = DEFAULT_SUBTITLE_ASR_WORKERS,
+        subtitle_asr_provider: str | None = None,
     ) -> WorkflowRunResult:
         self._required_project(project_id)
         manifest = Path(manifest_path)
@@ -1639,6 +1641,7 @@ class WorkflowService:
                     language=subtitle_asr_language,
                     beam_size=DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
                     workers=subtitle_asr_workers,
+                    provider_name=subtitle_asr_provider,
                 )
             )
         if not srt_items:
@@ -1652,9 +1655,10 @@ class WorkflowService:
             f"总时长：{total_duration:.3f} 秒\n"
         )
         if align_with_asr:
+            provider_label = asr_service.provider_label(subtitle_asr_provider)
             stdout += (
-                f"字幕对齐：独立 ASR 子进程（faster-whisper {subtitle_asr_model}，"
-                f"beam={DEFAULT_SUBTITLE_ASR_BEAM_SIZE}，CPU 线程 {max(1, int(subtitle_asr_workers or 1))}）\n"
+                f"ASR provider: {provider_label} (model={subtitle_asr_model}, "
+                f"beam={DEFAULT_SUBTITLE_ASR_BEAM_SIZE}, workers={max(1, int(subtitle_asr_workers or 1))})\n"
             )
         if intro_video is not None:
             stdout += f"引言成片偏移：{initial_offset:.3f} 秒\n"
