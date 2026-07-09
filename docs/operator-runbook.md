@@ -203,6 +203,19 @@ python -m bworkflow_sql render-final-video <project_id> --account <账号> --int
 的完整 MP4。拼接阶段固定输出 H.264 1920x1080/30fps、AAC 48kHz，并使用
 `loudnorm=I=-11:TP=-1:LRA=11,aresample=48000`。
 
+标准交付目录优先使用 `--delivery-dir <dir>`，不要让 Agent 临时拼多个输出路径：
+
+```powershell
+python -m bworkflow_sql render-final-video <project_id> --account <账号> --intro-video <intro.mp4> --delivery-dir <交付目录> --acceptance-mode quick
+```
+
+传入 `--delivery-dir` 后，完整成片 MP4 和商品推荐段 MP4 直接写在交付目录一级，
+文件名固定为 `完整成片-<timestamp>.mp4` 和 `商品推荐段-<timestamp>.mp4`。
+不要再创建 `01_最终成片` 二级目录，也不要把目录名、账号名塞进文件名。验收截图写入
+`02_验收证据\<timestamp>\frames\`，RenderPackage、片头字幕 ASS 等过程文件写入
+`03_过程记录\<timestamp>\`。项目级片段缓存仍在
+`data\workspace\project-<id>\render\final-video-cache\`，不进入交付目录。
+
 `--acceptance-mode` 分四档：`none` 只保留文件/ffprobe 级验证；`quick`
 用于常规生产快验，不跑 loudnorm、不抽验收帧；`visual` 会抽关键帧但不跑
 完整 loudnorm；`full` 同时跑关键帧和完整 loudnorm，适合最终归档验收。命令

@@ -698,6 +698,7 @@ def cmd_render_final_video(args: argparse.Namespace) -> None:
         product_card_template_id=args.product_card_template_id or "",
         package_output_path=args.package_output or None,
         output_path=args.output or None,
+        delivery_dir=args.delivery_dir or None,
         intro_video_path=args.intro_video or None,
         intro_video_text=intro_video_text,
         intro_video_source_plan_path=getattr(args, "intro_video_source_plan", "") or None,
@@ -912,6 +913,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--package-output", help="render-package.json output path")
     p.add_argument("--output", "-o", help="final mp4 output path")
+    p.add_argument(
+        "--delivery-dir",
+        default="",
+        help="standard delivery directory: MP4s go at root, evidence/process files go into subdirectories",
+    )
     p.add_argument("--intro-video", help="accepted intro MP4 to prepend to the product recommendation MP4")
     p.add_argument("--intro-video-text", default="", help="intro spoken text for burned subtitles")
     p.add_argument("--intro-video-text-file", default="", help="UTF-8 text file containing intro spoken text for subtitles")

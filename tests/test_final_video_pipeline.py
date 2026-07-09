@@ -269,6 +269,99 @@ def test_run_final_video_pipeline_concats_intro_video_into_full_mp4_with_quick_a
     assert manifest["reports"]["price_transition_report"]["items"][0]["after_top_products"] == 1
 
 
+def test_run_final_video_pipeline_delivery_dir_keeps_mp4s_at_root_and_evidence_in_subdirs(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    delivery_dir = tmp_path / "delivery"
+    package_path = tmp_path / "source-package.json"
+    job_package_path = tmp_path / "job" / "render-package.json"
+    intro_mp4 = tmp_path / "intro-subtitle.mp4"
+    captured: dict[str, Path] = {}
+    intro_mp4.write_bytes(b"intro")
+    package_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "1.0.0",
+                "segments": [
+                    {"type": "price_transition", "duration": 1.0},
+                    {"type": "product_recommendation", "duration": 2.0},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeWorkflow:
+        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):
+            return {"ok": True, "regenerated": [], "skipped": []}
+
+        def prepare_product_recommendation_output(self, project_id, **kwargs):
+            captured["package_output"] = Path(kwargs["package_output_path"])
+            run_dir = captured["package_output"].parent
+            timestamp = run_dir.name
+            captured["process_dir"] = run_dir
+            captured["evidence_dir"] = delivery_dir / "02_验收证据" / timestamp
+            captured["frames_dir"] = captured["evidence_dir"] / "frames"
+            captured["product_mp4"] = delivery_dir / f"商品推荐段-{timestamp}.mp4"
+            captured["full_mp4"] = delivery_dir / f"完整成片-{timestamp}.mp4"
+            assert captured["package_output"] == run_dir / "render-package.json"
+            return {
+                "ok": True,
+                "package_path": str(package_path),
+                "next": {"target_mp4": str(tmp_path / "old-default.mp4")},
+            }
+
+    def fake_runner(command, *, cwd, timeout):
+        if command[-1] == "--build-render-job":
+            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
+        if "--render-fast-final" in command:
+            assert command[command.index("--output") + 1] == str(captured["product_mp4"])
+            captured["product_mp4"].write_bytes(b"product")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        if "-filter_complex" in command and str(captured["full_mp4"]) in command:
+            captured["full_mp4"].write_bytes(b"full")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        if "-frames:v" in command:
+            frame_path = Path(command[-1])
+            assert frame_path.parent == captured["frames_dir"]
+            frame_path.write_bytes(b"png")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        raise AssertionError(f"unexpected command: {command}")
+
+    result = run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=23,
+        account_label="小博",
+        delivery_dir=delivery_dir,
+        intro_video_path=intro_mp4,
+        acceptance_mode="visual",
+        cutme_root=tmp_path,
+        runner=fake_runner,
+        probe_video=lambda path: {"duration": 3.0, "path": str(path)},
+        measure_loudness=lambda path: {"output_i": "-11.0"},
+    )
+
+    assert result["output_mp4"] == str(captured["product_mp4"])
+    assert result["full_output_mp4"] == str(captured["full_mp4"])
+    assert result["package_path"] == str(package_path)
+    assert result["delivery"]["dir"] == str(delivery_dir)
+    assert result["delivery"]["evidence_dir"] == str(captured["evidence_dir"])
+    assert result["delivery"]["process_dir"] == str(captured["process_dir"])
+    assert all(Path(frame["path"]).parent == captured["frames_dir"] for frame in result["frames"])
+    assert captured["product_mp4"].is_file()
+    assert captured["full_mp4"].is_file()
+    assert not (delivery_dir / "01_最终成片").exists()
+    manifest = json.loads(Path(result["run_manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["outputs"]["product_mp4"] == str(captured["product_mp4"])
+    assert manifest["outputs"]["full_mp4"] == str(captured["full_mp4"])
+    assert manifest["delivery"]["dir"] == str(delivery_dir)
+    assert manifest["delivery"]["evidence_dir"] == str(captured["evidence_dir"])
+
+
 def test_run_final_video_pipeline_passes_asr_subtitle_alignment_to_package_builder(tmp_path: Path):
     package_path = tmp_path / "render-package.json"
     job_package_path = tmp_path / "job" / "render-package.json"

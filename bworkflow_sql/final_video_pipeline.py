@@ -63,6 +63,7 @@ def run_final_video_pipeline(
     product_card_template_id: str = "",
     package_output_path: str | Path | None = None,
     output_path: str | Path | None = None,
+    delivery_dir: str | Path | None = None,
     intro_video_path: str | Path | None = None,
     intro_video_text: str = "",
     intro_video_source_plan_path: str | Path | None = None,
@@ -92,6 +93,11 @@ def run_final_video_pipeline(
     clip_cache_manifest_path = clip_cache_dir / "clip-cache-manifest.json"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     stem = f"render-package-{safe_path_component(account)}-final-video-{timestamp}"
+    delivery_layout = _delivery_layout(delivery_dir, account=account, timestamp=timestamp)
+    if delivery_layout:
+        package_output_path = package_output_path or delivery_layout["package_path"]
+        output_path = output_path or delivery_layout["product_mp4"]
+        full_output_path = full_output_path or delivery_layout["full_mp4"]
     package_path = _absolute_path(package_output_path) if package_output_path else render_root / f"{stem}.json"
     target_mp4 = _absolute_path(output_path) if output_path else package_path.with_suffix(".mp4")
 
@@ -181,7 +187,11 @@ def run_final_video_pipeline(
         intro_text = safe_text(intro_video_text).strip()
         intro_source_plan_path = _absolute_path(intro_video_source_plan_path) if intro_video_source_plan_path else None
         if intro_source_plan_path or intro_text:
-            intro_subtitle_ass_path = full_target_mp4.parent / "intro-subtitles.ass"
+            intro_subtitle_ass_path = (
+                delivery_layout["process_dir"] / "intro-subtitles.ass"
+                if delivery_layout
+                else full_target_mp4.parent / "intro-subtitles.ass"
+            )
             intro_subtitle_report = _write_intro_subtitles_ass(
                 intro_subtitle_ass_path,
                 intro_mp4,
@@ -232,6 +242,7 @@ def run_final_video_pipeline(
                 package_path,
                 cwd=Path(cutme_root),
                 runner=command_runner,
+                frame_dir=delivery_layout["frames_dir"] if delivery_layout else None,
                 intro_offset=_video_duration_seconds(_absolute_path(intro_video_path), probe_video or _probe_video)
                 if full_target_mp4 and intro_video_path
                 else 0.0,
@@ -280,6 +291,8 @@ def run_final_video_pipeline(
         "price_transition_report": price_transition_report,
         "frames": frames,
     }
+    if delivery_layout:
+        result["delivery"] = _delivery_result(delivery_layout)
     result["timings"] = timings.finish()
     run_manifest_path = _write_final_video_run_manifest(
         project_id=project_id,
@@ -329,6 +342,39 @@ def _run_command(command: list[str], *, cwd: Path, timeout: int) -> subprocess.C
 
 def _absolute_path(path_text: str | Path) -> Path:
     return Path(path_text).expanduser().resolve()
+
+
+def _delivery_layout(
+    delivery_dir: str | Path | None,
+    *,
+    account: str,
+    timestamp: str,
+) -> dict[str, Path] | None:
+    if not delivery_dir:
+        return None
+    root = _absolute_path(delivery_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    evidence_dir = root / "02_验收证据" / timestamp
+    process_dir = root / "03_过程记录" / timestamp
+    frames_dir = evidence_dir / "frames"
+    return {
+        "dir": root,
+        "evidence_dir": evidence_dir,
+        "process_dir": process_dir,
+        "frames_dir": frames_dir,
+        "product_mp4": root / f"商品推荐段-{timestamp}.mp4",
+        "full_mp4": root / f"完整成片-{timestamp}.mp4",
+        "package_path": process_dir / "render-package.json",
+    }
+
+
+def _delivery_result(layout: dict[str, Path]) -> dict[str, str]:
+    return {
+        "dir": str(layout["dir"]),
+        "evidence_dir": str(layout["evidence_dir"]),
+        "process_dir": str(layout["process_dir"]),
+        "frames_dir": str(layout["frames_dir"]),
+    }
 
 
 def _decode_process_bytes(value: bytes | str | None) -> str:
@@ -412,11 +458,12 @@ def _extract_acceptance_frames(
     *,
     cwd: Path,
     runner: Runner,
+    frame_dir: Path | None = None,
     intro_offset: float = 0.0,
 ) -> list[dict[str, Any]]:
     package = json.loads(package_path.read_text(encoding="utf-8"))
     frame_specs = _acceptance_frame_specs(package)
-    frame_dir = target_mp4.parent / f"{target_mp4.stem}-frames"
+    frame_dir = frame_dir or target_mp4.parent / f"{target_mp4.stem}-frames"
     frame_dir.mkdir(parents=True, exist_ok=True)
     frames: list[dict[str, Any]] = []
     for spec in frame_specs:
@@ -870,6 +917,7 @@ def _final_video_run_manifest_payload(
             "full_mp4": str(full_target_mp4) if full_target_mp4 else None,
             "acceptance_frames": result.get("frames") or [],
         },
+        "delivery": result.get("delivery") or None,
         "segments": _run_manifest_segments(package),
         "segment_fingerprints": _segment_fingerprints(package),
         "file_fingerprints": [_file_fingerprint(role, path) for role, path in fingerprint_targets],
