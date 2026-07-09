@@ -145,6 +145,33 @@ python -m bworkflow_sql jianying <project_id> \
 
 `--subtitle-no-vad` 用于当前机器上 onnxruntime/VAD 初始化失败时的兼容路径。字幕 ASR 统一走 `bworkflow_sql.asr.service` provider 抽象；默认 provider 是 `faster_whisper`，可用 `BWORKFLOW_ASR_PROVIDER` 覆盖。默认 faster-whisper provider 会优先使用项目根目录 `.venv-asr\Scripts\python.exe`，也可用 `BWORKFLOW_ASR_PYTHON` 覆盖。
 
+豆包 ASR provider 已接入同一个抽象层，启用方式：
+
+```powershell
+$env:BWORKFLOW_ASR_PROVIDER = "doubao"
+$env:BWORKFLOW_DOUBAO_ASR_API_KEY = "<火山新版控制台 X-Api-Key>"
+# 或旧版控制台：
+$env:BWORKFLOW_DOUBAO_ASR_APP_KEY = "<X-Api-App-Key>"
+$env:BWORKFLOW_DOUBAO_ASR_ACCESS_KEY = "<X-Api-Access-Key>"
+```
+
+默认资源 ID 是 `volc.seedasr.auc`，可用 `BWORKFLOW_DOUBAO_ASR_RESOURCE_ID`
+覆盖到 `volc.bigasr.auc`。官方“录音文件识别标准版 HTTP”接口提交的是音频
+URL，不是本地文件二进制；因此本地 `G:\...wav` 不能直接给豆包识别。要在现有
+字幕流程中使用豆包，必须满足其中一种条件：
+
+- 调用 `asr_service.transcribe_jobs(...)` 时在 job 里传 `audio_url`；
+- 或配置 `BWORKFLOW_DOUBAO_ASR_LOCAL_ROOT` 与
+  `BWORKFLOW_DOUBAO_ASR_URL_ROOT`，把本地音频路径映射成火山云端可访问的
+  HTTPS URL。
+
+如果只设置 `BWORKFLOW_ASR_PROVIDER=doubao`，但音频仍是普通本地路径，provider
+会明确报错，不会假装上传本地文件。以后新增其他 ASR 模型时，只新增
+`bworkflow_sql/asr/providers/<provider>.py` 并在 `bworkflow_sql.asr.service`
+注册 provider；需要云端 URL 的 provider 复用
+`bworkflow_sql.asr.audio_sources.resolve_cloud_audio_source(...)`。字幕、引言
+timing、剪映生成和 RenderPackage 层不要直接调用具体 ASR SDK。
+
 如果项目内 `.venv` 还没初始化，先执行：
 
 ```bash

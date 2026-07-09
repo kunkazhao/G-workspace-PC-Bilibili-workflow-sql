@@ -88,6 +88,32 @@ Legacy migration helpers are available in `资产中心` and `用户管理`:
 
 Operational notes for voice changes, closing audio, dialog placement, and subtitle checks are maintained in `docs/operator-runbook.md`.
 
+## ASR Provider Notes
+
+Subtitle export, intro-scene timing, Jianying subtitle alignment, and final MP4
+ASR subtitle alignment all go through `bworkflow_sql.asr.service`. The default
+provider is local `faster_whisper`.
+
+To select another provider, set:
+
+```powershell
+$env:BWORKFLOW_ASR_PROVIDER = "doubao"
+```
+
+The Doubao provider uses Volcengine recording-file ASR. Configure either
+`BWORKFLOW_DOUBAO_ASR_API_KEY` for the new console, or
+`BWORKFLOW_DOUBAO_ASR_APP_KEY` plus `BWORKFLOW_DOUBAO_ASR_ACCESS_KEY` for the
+old console. The official API accepts an audio URL, not a local file upload, so
+local audio paths require an `audio_url` job field or a
+`BWORKFLOW_DOUBAO_ASR_LOCAL_ROOT` / `BWORKFLOW_DOUBAO_ASR_URL_ROOT` mapping to a
+publicly reachable URL root.
+
+New ASR models should be added as providers under `bworkflow_sql/asr/providers`
+and registered in `bworkflow_sql.asr.service`. Providers that need cloud audio
+URLs should reuse `bworkflow_sql.asr.audio_sources.resolve_cloud_audio_source`.
+Callers should keep using the shared service instead of importing provider SDKs
+directly.
+
 Project and sync rules:
 
 - Project names are unique. Creating or saving a project with an existing name shows a warning instead of silently creating a duplicate.

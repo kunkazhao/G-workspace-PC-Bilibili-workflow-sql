@@ -54,6 +54,8 @@ def run_final_video_pipeline(
 
     render_root = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "render"
     render_root.mkdir(parents=True, exist_ok=True)
+    clip_cache_dir = render_root / "final-video-cache"
+    clip_cache_manifest_path = clip_cache_dir / "clip-cache-manifest.json"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     stem = f"render-package-{safe_path_component(account)}-final-video-{timestamp}"
     package_path = _absolute_path(package_output_path) if package_output_path else render_root / f"{stem}.json"
@@ -118,6 +120,8 @@ def run_final_video_pipeline(
             "--render-fast-final",
             "--output",
             str(target_mp4),
+            "--cache-dir",
+            str(clip_cache_dir),
         ],
         cwd=Path(cutme_root),
         timeout=7200,
@@ -126,6 +130,7 @@ def run_final_video_pipeline(
     full_target_mp4: Path | None = None
     concat_result: Any | None = None
     intro_subtitle_ass_path: Path | None = None
+    intro_subtitle_report: dict[str, Any] | None = None
     if intro_video_path:
         intro_mp4 = _absolute_path(intro_video_path)
         if not intro_mp4.is_file():
@@ -139,13 +144,26 @@ def run_final_video_pipeline(
         intro_source_plan_path = _absolute_path(intro_video_source_plan_path) if intro_video_source_plan_path else None
         if intro_source_plan_path or intro_text:
             intro_subtitle_ass_path = full_target_mp4.parent / "intro-subtitles.ass"
-            _write_intro_subtitles_ass(
+            intro_subtitle_report = _write_intro_subtitles_ass(
                 intro_subtitle_ass_path,
                 intro_mp4,
                 intro_text,
                 intro_source_plan_path=intro_source_plan_path,
                 subtitle_alignment=subtitle_mode,
                 duration=_video_duration_seconds(intro_mp4, probe_video or _probe_video),
+            )
+        elif _looks_like_subtitled_intro_video(intro_mp4):
+            intro_subtitle_report = {
+                "required": True,
+                "status": "ready",
+                "source": "embedded_intro_mp4",
+                "event_count": None,
+                "ass_path": None,
+                "source_plan_path": None,
+            }
+        else:
+            raise ValueError(
+                "intro subtitle blocked: intro video was provided, but neither source plan nor fallback text was provided."
             )
         concat_result = _concat_intro_and_product_video(
             intro_mp4,
@@ -170,7 +188,7 @@ def run_final_video_pipeline(
     )
     package_payload = json.loads(package_path.read_text(encoding="utf-8-sig"))
     price_transition_report = _price_transition_report(package_payload, mode=mode, top_uids=top_uids)
-    clip_cache_manifest = _find_clip_cache_manifest(target_mp4)
+    clip_cache_manifest = _find_clip_cache_manifest(clip_cache_manifest_path)
 
     result = {
         "ok": True,
@@ -190,6 +208,7 @@ def run_final_video_pipeline(
         "intro_video_path": str(_absolute_path(intro_video_path)) if intro_video_path else None,
         "intro_subtitle_ass_path": str(intro_subtitle_ass_path) if intro_subtitle_ass_path else None,
         "intro_subtitle_source_plan_path": str(_absolute_path(intro_video_source_plan_path)) if intro_video_source_plan_path else None,
+        "intro_subtitles": intro_subtitle_report,
         "acceptance_mode": acceptance_mode,
         "product_images": product_images,
         "render_package": package_result,
@@ -197,6 +216,7 @@ def run_final_video_pipeline(
             "build": _command_summary(build),
             "render": _command_summary(render),
             "concat_intro": _command_summary(concat_result) if concat_result is not None else None,
+            "clip_cache_dir": str(clip_cache_dir),
             "clip_cache_manifest": str(clip_cache_manifest) if clip_cache_manifest else None,
             "clip_cache": _read_clip_cache_summary(clip_cache_manifest) if clip_cache_manifest else None,
         },
@@ -517,16 +537,34 @@ def _write_intro_subtitles_ass(
     intro_source_plan_path: Path | None = None,
     subtitle_alignment: str,
     duration: float,
-) -> None:
+) -> dict[str, Any]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     plan_events = _intro_subtitle_events_from_source_plan(intro_source_plan_path)
     if plan_events:
         events = plan_events
+        source = "source_plan"
     elif safe_text(subtitle_alignment) == "asr":
         events = align_subtitle_text_with_asr(intro_mp4, text, 0.0)
+        source = "asr"
     else:
         events = distribute_subtitle_text(text, 0.0, max(0.0, float(duration or 0.0)))
+        source = "fallback_text"
+    if not events:
+        source_plan_note = " source plan produced zero events." if intro_source_plan_path else ""
+        raise ValueError(
+            "intro subtitle blocked: no intro subtitle events were generated."
+            + source_plan_note
+            + " Provide a timed source plan or --intro-video-text-file."
+        )
     output_path.write_text(_build_intro_ass(events), encoding="utf-8")
+    return {
+        "required": True,
+        "status": "ready",
+        "source": source,
+        "event_count": len(events),
+        "ass_path": str(output_path),
+        "source_plan_path": str(intro_source_plan_path) if intro_source_plan_path else None,
+    }
 
 
 def _intro_subtitle_events_from_source_plan(path: Path | None) -> list[tuple[float, float, str]]:
@@ -543,6 +581,11 @@ def _intro_subtitle_events_from_source_plan(path: Path | None) -> list[tuple[flo
         if text and end > start:
             events.append((start, end, text))
     return events
+
+
+def _looks_like_subtitled_intro_video(path: Path) -> bool:
+    stem = path.stem.casefold()
+    return any(marker in stem for marker in ("subtitle", "subtitled", "字幕"))
 
 
 def _build_intro_ass(events: list[tuple[float, float, str]]) -> str:
@@ -595,8 +638,7 @@ def _video_duration_seconds(path: Path, probe_video: ProbeVideo) -> float:
         return 0.0
 
 
-def _find_clip_cache_manifest(product_mp4: Path) -> Path | None:
-    candidate = product_mp4.parent / "fast-final-work" / "clip-cache-manifest.json"
+def _find_clip_cache_manifest(candidate: Path) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
@@ -696,6 +738,7 @@ def _final_video_run_manifest_payload(
             "cutme_job_package_path": result.get("job_package_path"),
             "intro_video_path": str(intro_video_path) if intro_video_path else None,
             "intro_video_source_plan_path": str(intro_video_source_plan_path) if intro_video_source_plan_path else None,
+            "intro_subtitles": result.get("intro_subtitles"),
         },
         "outputs": {
             "product_mp4": str(target_mp4),

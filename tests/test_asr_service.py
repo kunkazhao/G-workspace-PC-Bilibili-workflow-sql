@@ -49,3 +49,17 @@ def test_unknown_provider_lists_available_names(monkeypatch):
 
     with pytest.raises(ValueError, match="unknown ASR provider"):
         service.get_provider("missing")
+
+
+def test_doubao_provider_is_registered_and_selected_by_env(monkeypatch):
+    from bworkflow_sql.asr import service
+
+    monkeypatch.setenv("BWORKFLOW_ASR_PROVIDER", "doubao")
+
+    assert service.provider_label() == "doubao"
+
+
+def test_doubao_provider_aliases_share_one_provider_instance():
+    from bworkflow_sql.asr import service
+
+    assert service.get_provider("doubao") is service.get_provider("volcengine-doubao")

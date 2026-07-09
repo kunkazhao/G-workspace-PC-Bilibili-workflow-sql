@@ -6,14 +6,22 @@ from typing import Any
 
 from ..utils import safe_text
 from .providers.base import AsrProvider
+from .providers.doubao import DoubaoProvider
 from .providers.faster_whisper import FasterWhisperProvider
 
 DEFAULT_ASR_PROVIDER = "faster_whisper"
 
+_DOUBAO_PROVIDER = DoubaoProvider()
+_FASTER_WHISPER_PROVIDER = FasterWhisperProvider()
+
 _PROVIDERS: dict[str, AsrProvider] = {
-    FasterWhisperProvider.name: FasterWhisperProvider(),
-    "faster-whisper": FasterWhisperProvider(),
-    "whisper": FasterWhisperProvider(),
+    DoubaoProvider.name: _DOUBAO_PROVIDER,
+    "doubao-asr": _DOUBAO_PROVIDER,
+    "volcengine": _DOUBAO_PROVIDER,
+    "volcengine-doubao": _DOUBAO_PROVIDER,
+    FasterWhisperProvider.name: _FASTER_WHISPER_PROVIDER,
+    "faster-whisper": _FASTER_WHISPER_PROVIDER,
+    "whisper": _FASTER_WHISPER_PROVIDER,
 }
 
 
