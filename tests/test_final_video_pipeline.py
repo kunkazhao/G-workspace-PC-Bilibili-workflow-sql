@@ -699,6 +699,226 @@ def test_run_final_video_pipeline_passes_project_level_cache_dir_to_cutme(
     assert clip_cache_fingerprint["exists"] is True
 
 
+def test_run_final_video_pipeline_records_latest_run_in_pipeline(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    package_path = tmp_path / "render-package.json"
+    job_package_path = tmp_path / "job" / "render-package.json"
+    product_mp4 = tmp_path / "product.mp4"
+    full_mp4 = tmp_path / "full.mp4"
+    intro_mp4 = tmp_path / "intro-subtitle.mp4"
+    pipeline_path = tmp_path / ".pipeline.json"
+    intro_mp4.write_bytes(b"intro")
+    package_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "1.0.0",
+                "segments": [{"type": "product_recommendation", "productUid": "P001", "duration": 1.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pipeline_path.write_text(
+        json.dumps(
+            {
+                "current_phase": "intro_video",
+                "phases": {
+                    "assembly": {
+                        "run_manifest_path": "old.run-manifest.json",
+                        "final_mp4_path": "old.mp4",
+                    }
+                },
+                "paths": {"manifest": "old.run-manifest.json", "final_mp4": "old.mp4"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeWorkflow:
+        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):
+            return {"ok": True, "regenerated": [], "skipped": []}
+
+        def prepare_product_recommendation_output(self, project_id, **kwargs):
+            return {"ok": True, "package_path": str(package_path), "next": {"target_mp4": str(product_mp4)}}
+
+    def fake_runner(command, *, cwd, timeout):
+        if command[-1] == "--build-render-job":
+            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
+        if "--render-fast-final" in command:
+            product_mp4.write_bytes(b"product")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        if "-filter_complex" in command and str(full_mp4) in command:
+            full_mp4.write_bytes(b"full")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        if "-frames:v" in command:
+            Path(command[-1]).write_bytes(b"png")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        raise AssertionError(f"unexpected command: {command}")
+
+    result = run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=23,
+        account_label="小博",
+        product_media_mode="cover_only",
+        product_order_strategy="price_segment_shuffle",
+        product_card_template_id="muban-xiaobo-3",
+        mode="top",
+        top_uids="P001",
+        package_output_path=package_path,
+        output_path=product_mp4,
+        intro_video_path=intro_mp4,
+        full_output_path=full_mp4,
+        pipeline_path=pipeline_path,
+        acceptance_mode="quick",
+        cutme_root=tmp_path,
+        runner=fake_runner,
+        probe_video=lambda path: {"duration": 1.0},
+        measure_loudness=lambda path: {"output_i": "-11.0"},
+    )
+
+    saved = json.loads(pipeline_path.read_text(encoding="utf-8"))
+    assert saved["current_phase"] == "assembly"
+    assert saved["phases"]["assembly"]["status"] == "done"
+    assert saved["phases"]["assembly"]["run_manifest_path"] == result["run_manifest_path"]
+    assert saved["phases"]["assembly"]["final_mp4_path"] == str(full_mp4)
+    assert saved["phases"]["assembly"]["product_only_mp4_path"] == str(product_mp4)
+    assert saved["phases"]["assembly"]["product_card_template_id"] == "muban-xiaobo-3"
+    assert saved["phases"]["assembly"]["mode"] == "top"
+    assert saved["phases"]["assembly"]["top_uids"] == ["P001"]
+    assert saved["paths"]["manifest"] == result["run_manifest_path"]
+    assert saved["paths"]["final_mp4"] == str(full_mp4)
+
+
+def test_run_final_video_pipeline_quick_acceptance_skips_visual_frames_and_records_timings(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    package_path = tmp_path / "render-package.json"
+    job_package_path = tmp_path / "job" / "render-package.json"
+    output_mp4 = tmp_path / "final.mp4"
+    package_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "1.0.0",
+                "segments": [{"type": "price_transition", "duration": 1.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+
+    class FakeWorkflow:
+        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):
+            return {"ok": True, "regenerated": [], "skipped": []}
+
+        def prepare_product_recommendation_output(self, project_id, **kwargs):
+            return {"ok": True, "package_path": str(package_path), "next": {"target_mp4": str(output_mp4)}}
+
+    def fake_runner(command, *, cwd, timeout):
+        commands.append(command)
+        if command[-1] == "--build-render-job":
+            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
+        if "--render-fast-final" in command:
+            output_mp4.write_bytes(b"mp4")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        if "-frames:v" in command:
+            raise AssertionError("quick acceptance should not extract visual frames")
+        raise AssertionError(f"unexpected command: {command}")
+
+    result = run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=23,
+        account_label="小博",
+        package_output_path=package_path,
+        output_path=output_mp4,
+        acceptance_mode="quick",
+        cutme_root=tmp_path,
+        runner=fake_runner,
+        probe_video=lambda path: {"duration": 1.0},
+        measure_loudness=lambda path: {"output_i": "-11.0"},
+    )
+
+    assert result["frames"] == []
+    assert result["verification"]["loudnorm"] is None
+    assert "timings" in result
+    assert result["timings"]["total_ms"] >= 0
+    manifest = json.loads(Path(result["run_manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["reports"]["timings"]["total_ms"] >= 0
+    assert all("-frames:v" not in command for command in commands)
+
+
+def test_run_final_video_pipeline_visual_acceptance_extracts_frames_without_loudnorm(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    package_path = tmp_path / "render-package.json"
+    job_package_path = tmp_path / "job" / "render-package.json"
+    output_mp4 = tmp_path / "final.mp4"
+    package_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "1.0.0",
+                "segments": [
+                    {"type": "price_transition", "duration": 1.0},
+                    {"type": "product_recommendation", "duration": 1.0},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    frame_commands = 0
+    loudnorm_calls = 0
+
+    class FakeWorkflow:
+        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):
+            return {"ok": True, "regenerated": [], "skipped": []}
+
+        def prepare_product_recommendation_output(self, project_id, **kwargs):
+            return {"ok": True, "package_path": str(package_path), "next": {"target_mp4": str(output_mp4)}}
+
+    def fake_runner(command, *, cwd, timeout):
+        nonlocal frame_commands
+        if command[-1] == "--build-render-job":
+            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
+        if "--render-fast-final" in command:
+            output_mp4.write_bytes(b"mp4")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        if "-frames:v" in command:
+            frame_commands += 1
+            Path(command[-1]).write_bytes(b"png")
+            return {"stdout": "", "stderr": "", "returncode": 0}
+        raise AssertionError(f"unexpected command: {command}")
+
+    def fake_loudness(path):
+        nonlocal loudnorm_calls
+        loudnorm_calls += 1
+        return {"output_i": "-11.0"}
+
+    result = run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=23,
+        account_label="小博",
+        package_output_path=package_path,
+        output_path=output_mp4,
+        acceptance_mode="visual",
+        cutme_root=tmp_path,
+        runner=fake_runner,
+        probe_video=lambda path: {"duration": 1.0},
+        measure_loudness=fake_loudness,
+    )
+
+    assert frame_commands == len(result["frames"])
+    assert frame_commands > 0
+    assert loudnorm_calls == 0
+
+
 def test_run_command_decodes_windows_local_encoded_chinese_paths(tmp_path: Path):
     completed = _run_command(
         [

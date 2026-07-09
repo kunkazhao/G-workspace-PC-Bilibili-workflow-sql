@@ -702,6 +702,7 @@ def cmd_render_final_video(args: argparse.Namespace) -> None:
         intro_video_text=intro_video_text,
         intro_video_source_plan_path=getattr(args, "intro_video_source_plan", "") or None,
         full_output_path=args.full_output or None,
+        pipeline_path=getattr(args, "pipeline", "") or None,
         acceptance_mode=args.acceptance_mode,
         subtitle_alignment=getattr(args, "subtitle_alignment", "proportional"),
     )
@@ -916,6 +917,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--intro-video-text-file", default="", help="UTF-8 text file containing intro spoken text for subtitles")
     p.add_argument("--intro-video-source-plan", default="", help="source-intro-plan JSON; preferred for intro subtitle scene splitting")
     p.add_argument("--full-output", help="full MP4 output path when --intro-video is provided")
+    p.add_argument("--pipeline", default="", help="optional .pipeline.json path to record the latest final MP4 run")
     p.add_argument(
         "--subtitle-alignment",
         choices=["proportional", "asr"],
@@ -924,9 +926,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--acceptance-mode",
-        choices=["quick", "full"],
+        choices=["none", "quick", "visual", "full"],
         default="full",
-        help="quick skips slow loudnorm scanning; full runs ffprobe, loudnorm, and frame extraction",
+        help="none/quick are fast checks; visual extracts frames; full also runs loudnorm",
     )
 
     p = sub.add_parser("product-images", help="Regenerate Remotion product-card images")

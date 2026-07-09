@@ -203,6 +203,12 @@ python -m bworkflow_sql render-final-video <project_id> --account <账号> --int
 的完整 MP4。拼接阶段固定输出 H.264 1920x1080/30fps、AAC 48kHz，并使用
 `loudnorm=I=-11:TP=-1:LRA=11,aresample=48000`。
 
+`--acceptance-mode` 分四档：`none` 只保留文件/ffprobe 级验证；`quick`
+用于常规生产快验，不跑 loudnorm、不抽验收帧；`visual` 会抽关键帧但不跑
+完整 loudnorm；`full` 同时跑关键帧和完整 loudnorm，适合最终归档验收。命令
+返回和 run manifest 会记录 `timings`，用于复盘 package、CutMe 渲染、拼接、
+ffprobe、抽帧、loudnorm 各阶段耗时。
+
 CutMe fast-final 会在输出目录旁写
 `fast-final-work\clip-cache-manifest.json`，用于复用未变化的商品段和价格过渡
 段。这个缓存是加速项，不是前置条件：如果用户移动或删除了指定输出目录，或某个
@@ -381,4 +387,7 @@ state. Reusable copy/parameter assets live in the WriteSpace asset library;
 manifest records what one output actually used. If a user-selected output
 directory is moved or deleted later, treat the missing MP4 as a missing
 historical artifact and rerun generation. Do not treat it as a broken asset
-library or stale `.pipeline.json`.
+library or stale `.pipeline.json`. For normal workflow production, pass
+`--pipeline <path-to-.pipeline.json>` to `render-final-video` so the latest
+manifest and MP4 paths are written back for TotalControl `workflow.ps1
+status/next`.

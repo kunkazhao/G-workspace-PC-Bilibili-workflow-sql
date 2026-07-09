@@ -7,6 +7,7 @@ import subprocess
 import hashlib
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable
 
 from .cutme_intro import intro_subtitle_events_from_plan
@@ -18,6 +19,34 @@ from .workflow_service import safe_path_component
 Runner = Callable[..., Any]
 ProbeVideo = Callable[[Path], dict[str, Any]]
 MeasureLoudness = Callable[[Path], dict[str, Any]]
+
+
+class _TimingCollector:
+    def __init__(self) -> None:
+        self._started_at = perf_counter()
+        self._items: dict[str, int] = {}
+
+    def measure(self, key: str):
+        collector = self
+
+        class _Timer:
+            def __enter__(self):
+                self.started_at = perf_counter()
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                collector._items[key] = int(round((perf_counter() - self.started_at) * 1000))
+                return False
+
+        return _Timer()
+
+    def set_zero(self, key: str) -> None:
+        self._items.setdefault(key, 0)
+
+    def finish(self) -> dict[str, int]:
+        payload = dict(self._items)
+        payload["total_ms"] = int(round((perf_counter() - self._started_at) * 1000))
+        return payload
 
 
 def run_final_video_pipeline(
@@ -38,6 +67,7 @@ def run_final_video_pipeline(
     intro_video_text: str = "",
     intro_video_source_plan_path: str | Path | None = None,
     full_output_path: str | Path | None = None,
+    pipeline_path: str | Path | None = None,
     acceptance_mode: str = "full",
     subtitle_alignment: str = "proportional",
     cutme_root: str | Path = CUTME_ROOT,
@@ -51,6 +81,10 @@ def run_final_video_pipeline(
     subtitle_mode = safe_text(subtitle_alignment) or "proportional"
     if subtitle_mode not in {"proportional", "asr"}:
         raise ValueError(f"unsupported subtitle_alignment: {subtitle_mode}")
+    acceptance = safe_text(acceptance_mode) or "full"
+    if acceptance not in {"none", "quick", "visual", "full"}:
+        raise ValueError(f"unsupported acceptance_mode: {acceptance}")
+    timings = _TimingCollector()
 
     render_root = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "render"
     render_root.mkdir(parents=True, exist_ok=True)
@@ -62,14 +96,15 @@ def run_final_video_pipeline(
     target_mp4 = _absolute_path(output_path) if output_path else package_path.with_suffix(".mp4")
 
     product_images: dict[str, Any] | None = None
-    if product_image_mode != "skip":
-        product_images = workflow.regenerate_product_card_images(
-            project_id,
-            account_label=account,
-            mode=product_image_mode,
-            product_uid="",
-            product_card_template_id=product_card_template_id,
-        )
+    with timings.measure("product_images_ms"):
+        if product_image_mode != "skip":
+            product_images = workflow.regenerate_product_card_images(
+                project_id,
+                account_label=account,
+                mode=product_image_mode,
+                product_uid="",
+                product_card_template_id=product_card_template_id,
+            )
         if product_images.get("ok") is False:
             return {
                 "ok": False,
@@ -77,19 +112,20 @@ def run_final_video_pipeline(
                 "product_images": product_images,
             }
 
-    package_result = workflow.prepare_product_recommendation_output(
-        project_id,
-        account_label=account,
-        output_mode="final_mp4",
-        product_media_mode=product_media_mode,
-        product_order_strategy=product_order_strategy,
-        stale_product_image_policy=stale_product_image_policy,
-        mode=mode,
-        top_uids=top_uids,
-        product_card_template_id=product_card_template_id,
-        package_output_path=str(package_path),
-        subtitle_alignment=subtitle_mode,
-    )
+    with timings.measure("render_package_ms"):
+        package_result = workflow.prepare_product_recommendation_output(
+            project_id,
+            account_label=account,
+            output_mode="final_mp4",
+            product_media_mode=product_media_mode,
+            product_order_strategy=product_order_strategy,
+            stale_product_image_policy=stale_product_image_policy,
+            mode=mode,
+            top_uids=top_uids,
+            product_card_template_id=product_card_template_id,
+            package_output_path=str(package_path),
+            subtitle_alignment=subtitle_mode,
+        )
     if package_result.get("ok") is not True:
         return {
             "ok": False,
@@ -103,29 +139,31 @@ def run_final_video_pipeline(
     target_mp4.parent.mkdir(parents=True, exist_ok=True)
 
     command_runner = runner or _run_command
-    build = command_runner(
-        ["python", "-m", "cutme", "--package", str(package_path), "--build-render-job"],
-        cwd=Path(cutme_root),
-        timeout=600,
-    )
+    with timings.measure("build_job_ms"):
+        build = command_runner(
+            ["python", "-m", "cutme", "--package", str(package_path), "--build-render-job"],
+            cwd=Path(cutme_root),
+            timeout=600,
+        )
     job_package_path = _parse_job_package_path(_command_stdout(build))
 
-    render = command_runner(
-        [
-            "python",
-            "-m",
-            "cutme",
-            "--package",
-            str(job_package_path),
-            "--render-fast-final",
-            "--output",
-            str(target_mp4),
-            "--cache-dir",
-            str(clip_cache_dir),
-        ],
-        cwd=Path(cutme_root),
-        timeout=7200,
-    )
+    with timings.measure("cutme_render_ms"):
+        render = command_runner(
+            [
+                "python",
+                "-m",
+                "cutme",
+                "--package",
+                str(job_package_path),
+                "--render-fast-final",
+                "--output",
+                str(target_mp4),
+                "--cache-dir",
+                str(clip_cache_dir),
+            ],
+            cwd=Path(cutme_root),
+            timeout=7200,
+        )
 
     full_target_mp4: Path | None = None
     concat_result: Any | None = None
@@ -165,27 +203,41 @@ def run_final_video_pipeline(
             raise ValueError(
                 "intro subtitle blocked: intro video was provided, but neither source plan nor fallback text was provided."
             )
-        concat_result = _concat_intro_and_product_video(
-            intro_mp4,
-            target_mp4,
-            full_target_mp4,
-            intro_subtitle_ass_path=intro_subtitle_ass_path,
-            cwd=Path(cutme_root),
-            runner=command_runner,
-        )
+        with timings.measure("concat_intro_ms"):
+            concat_result = _concat_intro_and_product_video(
+                intro_mp4,
+                target_mp4,
+                full_target_mp4,
+                intro_subtitle_ass_path=intro_subtitle_ass_path,
+                cwd=Path(cutme_root),
+                runner=command_runner,
+            )
+    else:
+        timings.set_zero("concat_intro_ms")
 
     verification_target = full_target_mp4 or target_mp4
-    ffprobe_result = (probe_video or _probe_video)(verification_target)
-    loudnorm_result = None if acceptance_mode == "quick" else (measure_loudness or _measure_loudness)(verification_target)
-    frames = _extract_acceptance_frames(
-        verification_target,
-        package_path,
-        cwd=Path(cutme_root),
-        runner=command_runner,
-        intro_offset=_video_duration_seconds(_absolute_path(intro_video_path), probe_video or _probe_video)
-        if full_target_mp4 and intro_video_path
-        else 0.0,
-    )
+    with timings.measure("ffprobe_ms"):
+        ffprobe_result = (probe_video or _probe_video)(verification_target)
+    loudnorm_result = None
+    if acceptance == "full":
+        with timings.measure("loudnorm_ms"):
+            loudnorm_result = (measure_loudness or _measure_loudness)(verification_target)
+    else:
+        timings.set_zero("loudnorm_ms")
+    frames: list[dict[str, Any]] = []
+    if acceptance in {"visual", "full"}:
+        with timings.measure("acceptance_frames_ms"):
+            frames = _extract_acceptance_frames(
+                verification_target,
+                package_path,
+                cwd=Path(cutme_root),
+                runner=command_runner,
+                intro_offset=_video_duration_seconds(_absolute_path(intro_video_path), probe_video or _probe_video)
+                if full_target_mp4 and intro_video_path
+                else 0.0,
+            )
+    else:
+        timings.set_zero("acceptance_frames_ms")
     package_payload = json.loads(package_path.read_text(encoding="utf-8-sig"))
     price_transition_report = _price_transition_report(package_payload, mode=mode, top_uids=top_uids)
     clip_cache_manifest = _find_clip_cache_manifest(clip_cache_manifest_path)
@@ -209,7 +261,7 @@ def run_final_video_pipeline(
         "intro_subtitle_ass_path": str(intro_subtitle_ass_path) if intro_subtitle_ass_path else None,
         "intro_subtitle_source_plan_path": str(_absolute_path(intro_video_source_plan_path)) if intro_video_source_plan_path else None,
         "intro_subtitles": intro_subtitle_report,
-        "acceptance_mode": acceptance_mode,
+        "acceptance_mode": acceptance,
         "product_images": product_images,
         "render_package": package_result,
         "cutme": {
@@ -228,6 +280,7 @@ def run_final_video_pipeline(
         "price_transition_report": price_transition_report,
         "frames": frames,
     }
+    result["timings"] = timings.finish()
     run_manifest_path = _write_final_video_run_manifest(
         project_id=project_id,
         timestamp=timestamp,
@@ -240,6 +293,14 @@ def run_final_video_pipeline(
     )
     result["run_manifest_path"] = str(run_manifest_path)
     result["run_manifest_link"] = _markdown_link("打开本次生成记录", run_manifest_path)
+    if pipeline_path:
+        _record_final_video_pipeline(
+            pipeline_path=_absolute_path(pipeline_path),
+            result=result,
+            run_manifest_path=run_manifest_path,
+            target_mp4=target_mp4,
+            full_target_mp4=full_target_mp4,
+        )
     return result
 
 
@@ -683,6 +744,70 @@ def _write_final_video_run_manifest(
     return manifest_path
 
 
+def _record_final_video_pipeline(
+    *,
+    pipeline_path: Path,
+    result: dict[str, Any],
+    run_manifest_path: Path,
+    target_mp4: Path,
+    full_target_mp4: Path | None,
+) -> None:
+    try:
+        payload = json.loads(pipeline_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    phases = payload.get("phases") if isinstance(payload.get("phases"), dict) else {}
+    assembly = phases.get("assembly") if isinstance(phases.get("assembly"), dict) else {}
+    price_report = result.get("price_transition_report") if isinstance(result.get("price_transition_report"), dict) else {}
+    now = datetime.now().isoformat(timespec="seconds")
+    final_mp4_path = str(full_target_mp4 or target_mp4)
+    assembly.update(
+        {
+            "status": "done",
+            "account": result.get("account"),
+            "product_card_template_id": result.get("product_card_template_id"),
+            "product_media_mode": result.get("product_media_mode"),
+            "mode": _safe_text_or_default(price_report.get("mode"), result.get("mode")),
+            "top_uids": price_report.get("top_uids") or [],
+            "product_order_strategy": result.get("product_order_strategy"),
+            "final_mp4_path": final_mp4_path,
+            "product_only_mp4_path": str(target_mp4),
+            "run_manifest_path": str(run_manifest_path),
+            "package_path": result.get("package_path"),
+            "job_package_path": result.get("job_package_path"),
+            "acceptance_frames": result.get("frames") or [],
+            "verification": result.get("verification") or {},
+            "price_transition_report": price_report,
+            "clip_cache": result.get("cutme", {}).get("clip_cache"),
+            "timings": result.get("timings") or {},
+            "updated_at": now,
+        }
+    )
+    phases["assembly"] = assembly
+    payload["phases"] = phases
+
+    paths = payload.get("paths") if isinstance(payload.get("paths"), dict) else {}
+    paths.update(
+        {
+            "manifest": str(run_manifest_path),
+            "final_mp4": final_mp4_path,
+            "render_package": result.get("package_path"),
+            "job_package": result.get("job_package_path"),
+        }
+    )
+    payload["paths"] = paths
+    payload["current_phase"] = "assembly"
+    payload["next_action"] = (
+        "完整 MP4 已生成；下一步进入发布准备：标题、封面文案、简介、投票、评论区材料。"
+    )
+    payload["updated_at"] = now
+    pipeline_path.parent.mkdir(parents=True, exist_ok=True)
+    pipeline_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+
 def _final_video_run_manifest_payload(
     *,
     package: dict[str, Any],
@@ -752,6 +877,7 @@ def _final_video_run_manifest_payload(
             "price_transition_report": result.get("price_transition_report"),
             "clip_cache": result.get("cutme", {}).get("clip_cache"),
             "verification": result.get("verification"),
+            "timings": result.get("timings"),
         },
     }
 

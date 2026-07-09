@@ -391,6 +391,8 @@ def test_render_final_video_parser_registers_command():
             "source-intro-plan.json",
             "--full-output",
             "full.mp4",
+            "--pipeline",
+            ".pipeline.json",
             "--subtitle-alignment",
             "asr",
             "--acceptance-mode",
@@ -414,8 +416,26 @@ def test_render_final_video_parser_registers_command():
     assert args.intro_video_text_file == "intro.txt"
     assert args.intro_video_source_plan == "source-intro-plan.json"
     assert args.full_output == "full.mp4"
+    assert args.pipeline == ".pipeline.json"
     assert args.subtitle_alignment == "asr"
     assert args.acceptance_mode == "quick"
+
+
+def test_render_final_video_parser_accepts_visual_acceptance_mode():
+    parser = cli.build_parser()
+
+    args = parser.parse_args(
+        [
+            "render-final-video",
+            "3",
+            "--account",
+            "小博",
+            "--acceptance-mode",
+            "visual",
+        ]
+    )
+
+    assert args.acceptance_mode == "visual"
 
 
 def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):
