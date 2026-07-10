@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import wave
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ DEFAULT_SUBTITLE_ASR_BEAM_SIZE = 2
 DEFAULT_SUBTITLE_ASR_WORKERS = 3
 DEFAULT_SUBTITLE_SPEECH_SNAP_WINDOW_SEC = 0.5
 DEFAULT_SUBTITLE_OVERLAP_GAP_SEC = 0.02
+DEFAULT_SUBTITLE_ASR_MIN_COVERAGE = 0.6
 DEFAULT_SUBTITLE_ASR_PYTHON = DEFAULT_ASR_PYTHON
 DEFAULT_SUBTITLE_ASR_WORKER = DEFAULT_ASR_WORKER
 
@@ -268,33 +270,65 @@ def align_subtitle_text_with_units(
     if not units:
         raise ValueError(f"ASR 未识别到可对齐语音：{audio_path}")
 
-    normalized_lengths = [len(normalize_subtitle_alignment_text(chunk)) for chunk in chunks]
-    if sum(normalized_lengths) <= 0:
+    normalized_chunks = [normalize_subtitle_alignment_text(chunk) for chunk in chunks]
+    normalized_lengths = [len(chunk) for chunk in normalized_chunks]
+    expected_text = "".join(normalized_chunks)
+    if not expected_text:
         return []
 
-    unit_index = 0
+    expanded_units = [
+        char_unit
+        for unit in units
+        for char_unit in _expand_asr_unit(
+            float(unit.get("start") or 0.0),
+            float(unit.get("end") or 0.0),
+            safe_text(unit.get("text")),
+        )
+    ]
+    recognized_text = "".join(safe_text(unit.get("text")) for unit in expanded_units)
+    if not recognized_text:
+        raise ValueError(f"ASR 未识别到可对齐文字：{audio_path}")
+
+    matcher = SequenceMatcher(None, expected_text, recognized_text, autojunk=False)
+    expected_to_unit: dict[int, int] = {}
+    matched_chars = 0
+    for block in matcher.get_matching_blocks():
+        if block.size <= 0:
+            continue
+        matched_chars += block.size
+        for delta in range(block.size):
+            expected_to_unit[block.a + delta] = block.b + delta
+
+    coverage = matched_chars / len(expected_text)
+    if coverage < DEFAULT_SUBTITLE_ASR_MIN_COVERAGE:
+        raise ValueError(
+            "ASR 对齐质量不达标："
+            f"文案覆盖率 {coverage:.1%}，最低要求 {DEFAULT_SUBTITLE_ASR_MIN_COVERAGE:.0%}；"
+            f"文案 {len(expected_text)} 字，识别 {len(recognized_text)} 字，匹配 {matched_chars} 字。"
+        )
+
     offset = max(0.0, float(offset_sec or 0.0))
     aligned: list[tuple[float, float, str]] = []
-    for index, chunk in enumerate(chunks):
-        remaining_chunks = len(chunks) - index - 1
-        available = len(units) - unit_index
-        if available <= 0:
-            start = aligned[-1][1] if aligned else offset
-            aligned.append((start, start + 0.1, chunk))
-            continue
-        if index == len(chunks) - 1:
-            take = available
-        else:
-            target_len = max(normalized_lengths[index], 1)
-            take = min(target_len, max(1, available - remaining_chunks))
-        start_unit = units[unit_index]
-        end_unit = units[min(len(units) - 1, unit_index + take - 1)]
+    expected_cursor = 0
+    for index, (chunk, chunk_length) in enumerate(zip(chunks, normalized_lengths)):
+        chunk_end = expected_cursor + chunk_length
+        matched_unit_indexes = [
+            expected_to_unit[position]
+            for position in range(expected_cursor, chunk_end)
+            if position in expected_to_unit
+        ]
+        if not matched_unit_indexes:
+            raise ValueError(
+                f"ASR 对齐质量不达标：第 {index + 1} 条字幕没有可信文字锚点（{chunk}）。"
+            )
+        start_unit = expanded_units[min(matched_unit_indexes)]
+        end_unit = expanded_units[max(matched_unit_indexes)]
         start = offset + float(start_unit["start"])
         end = offset + float(end_unit["end"])
         if end <= start:
             end = start + 0.1
         aligned.append((start, end, chunk))
-        unit_index += take
+        expected_cursor = chunk_end
     return snap_subtitle_segments_to_speech(audio_path, aligned, offset)
 
 
