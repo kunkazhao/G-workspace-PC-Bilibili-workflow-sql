@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0.0",
+  "packageType": "bilibili_video",
+  "project": {
+    "category": "contract-canary",
+    "account": "contract-canary",
+    "bworkflowProjectId": 0
+  },
+  "output": {
+    "mode": "final_mp4",
+    "fps": 30,
+    "width": 1920,
+    "height": 1080
+  },
+  "audio": {
+    "loudnessTarget": {
+      "integrated": -11,
+      "truePeak": -1.0,
+      "lra": 11
+    }
+  },
+  "segments": [],
+  "assets": {},
+  "approval": {}
+}
