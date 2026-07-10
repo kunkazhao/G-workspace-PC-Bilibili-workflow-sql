@@ -10,6 +10,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable
 
+from .cutme_adapter import CutMeAdapter
 from .cutme_intro import intro_subtitle_events_from_plan
 from .settings import CUTME_ROOT, INTERNAL_WORKSPACE_ROOT
 from .subtitle_helpers import align_subtitle_text_with_asr, distribute_subtitle_text
@@ -72,6 +73,7 @@ def run_final_video_pipeline(
     acceptance_mode: str = "full",
     subtitle_alignment: str = "proportional",
     cutme_root: str | Path = CUTME_ROOT,
+    cutme_adapter: CutMeAdapter | None = None,
     runner: Runner | None = None,
     probe_video: ProbeVideo | None = None,
     measure_loudness: MeasureLoudness | None = None,
@@ -145,31 +147,16 @@ def run_final_video_pipeline(
     target_mp4.parent.mkdir(parents=True, exist_ok=True)
 
     command_runner = runner or _run_command
-    with timings.measure("build_job_ms"):
-        build = command_runner(
-            ["python", "-m", "cutme", "--package", str(package_path), "--build-render-job"],
-            cwd=Path(cutme_root),
-            timeout=600,
-        )
-    job_package_path = _parse_job_package_path(_command_stdout(build))
-
+    adapter = cutme_adapter or CutMeAdapter(cutme_root=cutme_root)
     with timings.measure("cutme_render_ms"):
-        render = command_runner(
-            [
-                "python",
-                "-m",
-                "cutme",
-                "--package",
-                str(job_package_path),
-                "--render-fast-final",
-                "--output",
-                str(target_mp4),
-                "--cache-dir",
-                str(clip_cache_dir),
-            ],
-            cwd=Path(cutme_root),
-            timeout=7200,
+        cutme_result = adapter.render_final(
+            package_path,
+            output_path=target_mp4,
+            cache_dir=clip_cache_dir,
         )
+    cutme_artifacts = cutme_result["artifacts"]
+    job_package_path = _absolute_path(cutme_artifacts["job_package_path"])
+    target_mp4 = _absolute_path(cutme_artifacts["output_path"])
 
     full_target_mp4: Path | None = None
     concat_result: Any | None = None
@@ -251,7 +238,15 @@ def run_final_video_pipeline(
         timings.set_zero("acceptance_frames_ms")
     package_payload = json.loads(package_path.read_text(encoding="utf-8-sig"))
     price_transition_report = _price_transition_report(package_payload, mode=mode, top_uids=top_uids)
-    clip_cache_manifest = _find_clip_cache_manifest(clip_cache_manifest_path)
+    returned_cache_manifest = safe_text(cutme_artifacts.get("cache_manifest_path"))
+    clip_cache_manifest = (
+        _find_clip_cache_manifest(_absolute_path(returned_cache_manifest))
+        if returned_cache_manifest
+        else _find_clip_cache_manifest(clip_cache_manifest_path)
+    )
+    cutme_cache = cutme_result.get("cache")
+    if not isinstance(cutme_cache, dict):
+        cutme_cache = _read_clip_cache_summary(clip_cache_manifest) if clip_cache_manifest else None
 
     result = {
         "ok": True,
@@ -276,12 +271,12 @@ def run_final_video_pipeline(
         "product_images": product_images,
         "render_package": package_result,
         "cutme": {
-            "build": _command_summary(build),
-            "render": _command_summary(render),
+            "result": cutme_result,
+            "timings": cutme_result.get("timings") or {},
             "concat_intro": _command_summary(concat_result) if concat_result is not None else None,
             "clip_cache_dir": str(clip_cache_dir),
             "clip_cache_manifest": str(clip_cache_manifest) if clip_cache_manifest else None,
-            "clip_cache": _read_clip_cache_summary(clip_cache_manifest) if clip_cache_manifest else None,
+            "clip_cache": cutme_cache,
         },
         "verification": {
             "ffprobe": ffprobe_result,
@@ -388,13 +383,6 @@ def _decode_process_bytes(value: bytes | str | None) -> str:
         except UnicodeDecodeError:
             continue
     return value.decode("utf-8", errors="replace")
-
-
-def _parse_job_package_path(stdout: str) -> Path:
-    match = re.search(r"RenderPackage:\s*(.+)", stdout)
-    if not match:
-        raise ValueError("CutMe build-render-job 没有输出 RenderPackage 路径。")
-    return Path(match.group(1).strip())
 
 
 def _probe_video(path: Path) -> dict[str, Any]:
@@ -829,6 +817,7 @@ def _record_final_video_pipeline(
             "verification": result.get("verification") or {},
             "price_transition_report": price_report,
             "clip_cache": result.get("cutme", {}).get("clip_cache"),
+            "cutme_timings": result.get("cutme", {}).get("timings") or {},
             "timings": result.get("timings") or {},
             "updated_at": now,
         }
@@ -924,6 +913,7 @@ def _final_video_run_manifest_payload(
         "reports": {
             "price_transition_report": result.get("price_transition_report"),
             "clip_cache": result.get("cutme", {}).get("clip_cache"),
+            "cutme_timings": result.get("cutme", {}).get("timings") or {},
             "verification": result.get("verification"),
             "timings": result.get("timings"),
         },
@@ -1056,12 +1046,6 @@ def _price_transition_summary(items: list[dict[str, Any]], *, mode: str, top_uid
     if mode == "top" and top_uids:
         return f"本次价格过渡共 {len(items)} 段；因启用置顶，第一段价格过渡在 {len(top_uids)} 个置顶商品之后出现。"
     return f"本次价格过渡共 {len(items)} 段；第一段在第 {first['position']} 个片段出现。"
-
-
-def _command_stdout(result: Any) -> str:
-    if isinstance(result, dict):
-        return safe_text(result.get("stdout"))
-    return safe_text(getattr(result, "stdout", ""))
 
 
 def _command_summary(result: Any) -> dict[str, Any]:

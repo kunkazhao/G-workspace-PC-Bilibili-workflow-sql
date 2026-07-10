@@ -5,10 +5,294 @@ from pathlib import Path
 
 import pytest
 
+from bworkflow_sql.cutme_adapter import CutMeAdapterError
 from bworkflow_sql.final_video_pipeline import _run_command, run_final_video_pipeline
 
 
 pytestmark = pytest.mark.usefixtures("isolated_final_video_workspace")
+
+
+@pytest.fixture(autouse=True)
+def fake_cutme_boundary(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    calls: list[tuple[Path, Path, Path]] = []
+
+    class FakeCutMeAdapter:
+        def __init__(self, *, cutme_root):
+            self.cutme_root = Path(cutme_root)
+
+        def render_final(self, package_path, *, output_path, cache_dir):
+            source = Path(package_path).resolve()
+            output = Path(output_path).resolve()
+            cache = Path(cache_dir).resolve()
+            calls.append((source, output, cache))
+            job_package = (tmp_path / "job" / "render-package.json").resolve()
+            job_package.parent.mkdir(parents=True, exist_ok=True)
+            job_package.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"mp4")
+            cache_manifest = cache / "clip-cache-manifest.json"
+            cache_manifest.parent.mkdir(parents=True, exist_ok=True)
+            cache_summary = {"segments_total": 1, "cache_hits": 1, "rendered": 0}
+            cache_manifest.write_text(json.dumps({"summary": cache_summary}), encoding="utf-8")
+            return {
+                "schema_version": "1.0.0",
+                "kind": "cutme.render_result",
+                "operation": "render_final",
+                "ok": True,
+                "status": "succeeded",
+                "artifacts": {
+                    "source_package_path": str(source),
+                    "job_package_path": str(job_package),
+                    "output_path": str(output),
+                    "cache_manifest_path": str(cache_manifest),
+                },
+                "cache": cache_summary,
+                "timings": {"prepare_job_ms": 2, "render_ms": 8, "total_ms": 10},
+                "error": None,
+            }
+
+    monkeypatch.setattr(pipeline_module, "CutMeAdapter", FakeCutMeAdapter)
+    return calls
+
+
+def test_run_final_video_pipeline_uses_one_adapter_call_and_preserves_cutme_result(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    package_path = tmp_path / "render-package.json"
+    job_package_path = tmp_path / "job" / "render-package.json"
+    output_mp4 = tmp_path / "final.mp4"
+    cache_manifest = tmp_path / "cache" / "clip-cache-manifest.json"
+    pipeline_path = tmp_path / ".pipeline.json"
+    package_path.write_text(
+        json.dumps({"schemaVersion": "1.0.0", "segments": []}),
+        encoding="utf-8",
+    )
+    pipeline_path.write_text("{}", encoding="utf-8")
+
+    class FakeWorkflow:
+        def regenerate_product_card_images(self, *args, **kwargs):
+            return {"ok": True, "regenerated": [], "skipped": []}
+
+        def prepare_product_recommendation_output(self, *args, **kwargs):
+            return {
+                "ok": True,
+                "package_path": str(package_path),
+                "next": {"target_mp4": str(output_mp4)},
+            }
+
+    class FakeCutMeAdapter:
+        def __init__(self):
+            self.calls: list[tuple[Path, Path, Path]] = []
+
+        def render_final(self, package, *, output_path, cache_dir):
+            self.calls.append((Path(package), Path(output_path), Path(cache_dir)))
+            job_package_path.parent.mkdir(parents=True, exist_ok=True)
+            job_package_path.write_text(package_path.read_text(encoding="utf-8"), encoding="utf-8")
+            output_mp4.write_bytes(b"mp4")
+            cache_manifest.parent.mkdir(parents=True, exist_ok=True)
+            cache_manifest.write_text("{}", encoding="utf-8")
+            return {
+                "schema_version": "1.0.0",
+                "kind": "cutme.render_result",
+                "operation": "render_final",
+                "ok": True,
+                "status": "succeeded",
+                "artifacts": {
+                    "source_package_path": str(package_path),
+                    "job_package_path": str(job_package_path),
+                    "output_path": str(output_mp4),
+                    "cache_manifest_path": str(cache_manifest),
+                },
+                "cache": {"segments_total": 3, "cache_hits": 2, "rendered": 1},
+                "timings": {
+                    "validate_source_ms": 5,
+                    "prepare_job_ms": 20,
+                    "render_ms": 4300,
+                    "total_ms": 4325,
+                },
+                "error": None,
+            }
+
+    adapter = FakeCutMeAdapter()
+    result = run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=23,
+        account_label="小博",
+        package_output_path=package_path,
+        output_path=output_mp4,
+        pipeline_path=pipeline_path,
+        acceptance_mode="none",
+        cutme_root=tmp_path,
+        cutme_adapter=adapter,
+        runner=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("B-Workflow command runner must not invoke CutMe")
+        ),
+        probe_video=lambda path: {"duration": 1.0},
+    )
+
+    expected_cache_dir = tmp_path / "workspace" / "project-23" / "render" / "final-video-cache"
+    assert adapter.calls == [(package_path.resolve(), output_mp4.resolve(), expected_cache_dir)]
+    assert result["job_package_path"] == str(job_package_path)
+    assert result["output_mp4"] == str(output_mp4)
+    assert result["cutme"]["clip_cache_manifest"] == str(cache_manifest)
+    assert result["cutme"]["clip_cache"] == {
+        "segments_total": 3,
+        "cache_hits": 2,
+        "rendered": 1,
+    }
+    assert result["cutme"]["result"]["operation"] == "render_final"
+    assert result["cutme"]["timings"]["render_ms"] == 4300
+    assert result["timings"]["total_ms"] != result["cutme"]["timings"]["total_ms"]
+    manifest = json.loads(Path(result["run_manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["inputs"]["cutme_job_package_path"] == str(job_package_path)
+    assert manifest["reports"]["clip_cache"]["cache_hits"] == 2
+    assert manifest["reports"]["cutme_timings"]["prepare_job_ms"] == 20
+    saved_pipeline = json.loads(pipeline_path.read_text(encoding="utf-8"))
+    assert saved_pipeline["paths"]["job_package"] == str(job_package_path)
+    assert saved_pipeline["phases"]["assembly"]["clip_cache"]["rendered"] == 1
+    assert saved_pipeline["phases"]["assembly"]["cutme_timings"]["render_ms"] == 4300
+
+
+def test_run_final_video_pipeline_cutme_failure_stops_before_post_processing_or_writeback(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    workspace = tmp_path / "workspace"
+    monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", workspace)
+    package_path = tmp_path / "render-package.json"
+    output_mp4 = tmp_path / "final.mp4"
+    pipeline_path = tmp_path / ".pipeline.json"
+    package_path.write_text(
+        json.dumps({"schemaVersion": "1.0.0", "segments": []}),
+        encoding="utf-8",
+    )
+    original_pipeline = '{"current_phase":"intro_video"}'
+    pipeline_path.write_text(original_pipeline, encoding="utf-8")
+
+    class FakeWorkflow:
+        def regenerate_product_card_images(self, *args, **kwargs):
+            return {"ok": True, "regenerated": [], "skipped": []}
+
+        def prepare_product_recommendation_output(self, *args, **kwargs):
+            return {"ok": True, "package_path": str(package_path), "next": {}}
+
+    class FailingCutMeAdapter:
+        def __init__(self):
+            self.calls = 0
+
+        def render_final(self, *args, **kwargs):
+            self.calls += 1
+            raise CutMeAdapterError("cutme_render_failed", "render failed")
+
+    adapter = FailingCutMeAdapter()
+    with pytest.raises(CutMeAdapterError, match="render failed"):
+        run_final_video_pipeline(
+            FakeWorkflow(),
+            project_id=23,
+            account_label="小博",
+            package_output_path=package_path,
+            output_path=output_mp4,
+            pipeline_path=pipeline_path,
+            acceptance_mode="full",
+            cutme_root=tmp_path,
+            cutme_adapter=adapter,
+            runner=lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("post-processing must not run")
+            ),
+            probe_video=lambda path: (_ for _ in ()).throw(
+                AssertionError("ffprobe must not run")
+            ),
+            measure_loudness=lambda path: (_ for _ in ()).throw(
+                AssertionError("loudness verification must not run")
+            ),
+        )
+
+    assert adapter.calls == 1
+    assert not output_mp4.exists()
+    assert pipeline_path.read_text(encoding="utf-8") == original_pipeline
+    assert not (workspace / "project-23" / "runs").exists()
+
+
+def test_run_final_video_pipeline_concat_failure_does_not_rerun_cutme(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    package_path = tmp_path / "render-package.json"
+    job_package_path = tmp_path / "job" / "render-package.json"
+    product_mp4 = tmp_path / "product.mp4"
+    intro_mp4 = tmp_path / "intro.mp4"
+    full_mp4 = tmp_path / "full.mp4"
+    package_path.write_text(
+        json.dumps({"schemaVersion": "1.0.0", "segments": []}),
+        encoding="utf-8",
+    )
+    intro_mp4.write_bytes(b"intro")
+
+    class FakeWorkflow:
+        def regenerate_product_card_images(self, *args, **kwargs):
+            return {"ok": True, "regenerated": [], "skipped": []}
+
+        def prepare_product_recommendation_output(self, *args, **kwargs):
+            return {"ok": True, "package_path": str(package_path), "next": {}}
+
+    class FakeCutMeAdapter:
+        def __init__(self):
+            self.calls = 0
+
+        def render_final(self, package, *, output_path, cache_dir):
+            self.calls += 1
+            job_package_path.parent.mkdir(parents=True, exist_ok=True)
+            job_package_path.write_text("{}", encoding="utf-8")
+            product_mp4.write_bytes(b"product")
+            return {
+                "ok": True,
+                "artifacts": {
+                    "source_package_path": str(package_path),
+                    "job_package_path": str(job_package_path),
+                    "output_path": str(product_mp4),
+                },
+                "cache": None,
+                "timings": {"total_ms": 10},
+            }
+
+    adapter = FakeCutMeAdapter()
+
+    def fail_concat(command, *, cwd, timeout):
+        if "-filter_complex" in command:
+            raise RuntimeError("concat failed")
+        raise AssertionError(f"unexpected command: {command}")
+
+    with pytest.raises(RuntimeError, match="concat failed"):
+        run_final_video_pipeline(
+            FakeWorkflow(),
+            project_id=23,
+            account_label="小博",
+            package_output_path=package_path,
+            output_path=product_mp4,
+            intro_video_path=intro_mp4,
+            intro_video_text="引言字幕",
+            full_output_path=full_mp4,
+            acceptance_mode="none",
+            cutme_root=tmp_path,
+            cutme_adapter=adapter,
+            runner=fail_concat,
+            probe_video=lambda path: {"duration": 1.0},
+        )
+
+    assert adapter.calls == 1
+    assert product_mp4.is_file()
+    assert not full_mp4.exists()
 
 
 def test_run_final_video_pipeline_rejects_unknown_subtitle_alignment(tmp_path: Path):
@@ -91,11 +375,6 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
 
     def fake_runner(command, *, cwd, timeout):
         calls.append(("run", command, str(cwd), timeout))
-        if command[-1] == "--build-render-job":
-            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
-        if "--render-fast-final" in command:
-            output_mp4.write_bytes(b"mp4")
-            return {"stdout": "rendered\n", "stderr": "", "returncode": 0}
         if "-frames:v" in command:
             Path(command[-1]).write_bytes(b"png")
             return {"stdout": "", "stderr": "", "returncode": 0}
@@ -217,11 +496,6 @@ def test_run_final_video_pipeline_concats_intro_video_into_full_mp4_with_quick_a
 
     def fake_runner(command, *, cwd, timeout):
         calls.append(("run", command, str(cwd), timeout))
-        if command[-1] == "--build-render-job":
-            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
-        if "--render-fast-final" in command:
-            product_mp4.write_bytes(b"product")
-            return {"stdout": "rendered\n", "stderr": "", "returncode": 0}
         if "-filter_complex" in command and str(full_mp4) in command:
             full_mp4.write_bytes(b"full")
             return {"stdout": "concat\n", "stderr": "", "returncode": 0}
@@ -321,12 +595,6 @@ def test_run_final_video_pipeline_delivery_dir_keeps_mp4s_at_root_and_evidence_i
             }
 
     def fake_runner(command, *, cwd, timeout):
-        if command[-1] == "--build-render-job":
-            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
-        if "--render-fast-final" in command:
-            assert command[command.index("--output") + 1] == str(captured["product_mp4"])
-            captured["product_mp4"].write_bytes(b"product")
-            return {"stdout": "", "stderr": "", "returncode": 0}
         if "-filter_complex" in command and str(captured["full_mp4"]) in command:
             captured["full_mp4"].write_bytes(b"full")
             return {"stdout": "", "stderr": "", "returncode": 0}
@@ -383,11 +651,6 @@ def test_run_final_video_pipeline_passes_asr_subtitle_alignment_to_package_build
             return {"ok": True, "package_path": str(package_path), "next": {"target_mp4": str(output_mp4)}}
 
     def fake_runner(command, *, cwd, timeout):
-        if command[-1] == "--build-render-job":
-            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
-        if "--render-fast-final" in command:
-            output_mp4.write_bytes(b"mp4")
-            return {"stdout": "", "stderr": "", "returncode": 0}
         if "-frames:v" in command:
             Path(command[-1]).write_bytes(b"png")
             return {"stdout": "", "stderr": "", "returncode": 0}
@@ -428,11 +691,6 @@ def test_run_final_video_pipeline_burns_intro_subtitles_before_concat(tmp_path: 
 
     def fake_runner(command, *, cwd, timeout):
         calls.append(command)
-        if command[-1] == "--build-render-job":
-            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
-        if "--render-fast-final" in command:
-            product_mp4.write_bytes(b"product")
-            return {"stdout": "", "stderr": "", "returncode": 0}
         if "-filter_complex" in command and str(full_mp4) in command:
             full_mp4.write_bytes(b"full")
             return {"stdout": "", "stderr": "", "returncode": 0}
@@ -503,11 +761,6 @@ def test_run_final_video_pipeline_uses_intro_source_plan_for_subtitle_splitting(
 
     def fake_runner(command, *, cwd, timeout):
         calls.append(command)
-        if command[-1] == "--build-render-job":
-            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
-        if "--render-fast-final" in command:
-            product_mp4.write_bytes(b"product")
-            return {"stdout": "", "stderr": "", "returncode": 0}
         if "-filter_complex" in command and str(full_mp4) in command:
             full_mp4.write_bytes(b"full")
             return {"stdout": "", "stderr": "", "returncode": 0}
@@ -577,11 +830,6 @@ def test_run_final_video_pipeline_blocks_intro_source_plan_without_timing_or_fal
             return {"ok": True, "package_path": str(package_path), "next": {"target_mp4": str(product_mp4)}}
 
     def fake_runner(command, *, cwd, timeout):
-        if command[-1] == "--build-render-job":
-            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
-        if "--render-fast-final" in command:
-            product_mp4.write_bytes(b"product")
-            return {"stdout": "", "stderr": "", "returncode": 0}
         if "-filter_complex" in command and str(full_mp4) in command:
             raise AssertionError("should not concat an intro with zero subtitle events")
         if "-frames:v" in command:
@@ -628,11 +876,6 @@ def test_run_final_video_pipeline_blocks_intro_video_without_subtitle_source(tmp
             return {"ok": True, "package_path": str(package_path), "next": {"target_mp4": str(product_mp4)}}
 
     def fake_runner(command, *, cwd, timeout):
-        if command[-1] == "--build-render-job":
-            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
-        if "--render-fast-final" in command:
-            product_mp4.write_bytes(b"product")
-            return {"stdout": "", "stderr": "", "returncode": 0}
         if "-filter_complex" in command and str(full_mp4) in command:
             raise AssertionError("should not concat an intro without a subtitle source")
         if "-frames:v" in command:
@@ -661,11 +904,14 @@ def test_run_final_video_pipeline_blocks_intro_video_without_subtitle_source(tmp
         raise AssertionError("expected missing intro subtitle source to block final MP4 generation")
 
 
-def test_run_final_video_pipeline_passes_absolute_paths_to_cutme(tmp_path: Path, monkeypatch):
+def test_run_final_video_pipeline_passes_absolute_paths_to_cutme(
+    tmp_path: Path,
+    monkeypatch,
+    fake_cutme_boundary,
+):
     monkeypatch.chdir(tmp_path)
     package_path = tmp_path / "relative-package.json"
     output_mp4 = tmp_path / "relative-final.mp4"
-    job_package_path = tmp_path / "job" / "render-package.json"
     package_path.write_text(
         json.dumps(
             {
@@ -675,7 +921,6 @@ def test_run_final_video_pipeline_passes_absolute_paths_to_cutme(tmp_path: Path,
         ),
         encoding="utf-8",
     )
-    commands: list[list[str]] = []
 
     class FakeWorkflow:
         def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):
@@ -684,42 +929,27 @@ def test_run_final_video_pipeline_passes_absolute_paths_to_cutme(tmp_path: Path,
         def prepare_product_recommendation_output(self, project_id, **kwargs):
             return {"ok": True, "package_path": "relative-package.json", "next": {"target_mp4": "relative-final.mp4"}}
 
-    def fake_runner(command, *, cwd, timeout):
-        commands.append(command)
-        if command[-1] == "--build-render-job":
-            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
-        if "--render-fast-final" in command:
-            output_mp4.write_bytes(b"mp4")
-            return {"stdout": "", "stderr": "", "returncode": 0}
-        Path(command[-1]).write_bytes(b"png")
-        return {"stdout": "", "stderr": "", "returncode": 0}
-
     run_final_video_pipeline(
         FakeWorkflow(),
         project_id=3,
         account_label="小燃",
         package_output_path="relative-package.json",
         output_path="relative-final.mp4",
+        acceptance_mode="none",
         cutme_root=tmp_path,
-        runner=fake_runner,
         probe_video=lambda path: {"duration": 1.0},
-        measure_loudness=lambda path: {"output_i": "-11.0"},
     )
 
-    assert commands[0] == [
-        "python",
-        "-m",
-        "cutme",
-        "--package",
-        str(package_path.resolve()),
-        "--build-render-job",
-    ]
-    assert str(output_mp4.resolve()) in commands[1]
+    assert len(fake_cutme_boundary) == 1
+    source, output, _cache = fake_cutme_boundary[0]
+    assert source == package_path.resolve()
+    assert output == output_mp4.resolve()
 
 
 def test_run_final_video_pipeline_passes_project_level_cache_dir_to_cutme(
     tmp_path: Path,
     monkeypatch,
+    fake_cutme_boundary,
 ):
     import bworkflow_sql.final_video_pipeline as pipeline_module
 
@@ -727,7 +957,6 @@ def test_run_final_video_pipeline_passes_project_level_cache_dir_to_cutme(
     monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
     package_path = tmp_path / "render-package.json"
     output_mp4 = tmp_path / "exports" / "final.mp4"
-    job_package_path = tmp_path / "job" / "render-package.json"
     cache_dir = tmp_path / "workspace" / "project-23" / "render" / "final-video-cache"
     clip_cache_manifest = cache_dir / "clip-cache-manifest.json"
     package_path.write_text(
@@ -739,7 +968,6 @@ def test_run_final_video_pipeline_passes_project_level_cache_dir_to_cutme(
         ),
         encoding="utf-8",
     )
-    commands: list[list[str]] = []
 
     class FakeWorkflow:
         def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):
@@ -748,45 +976,19 @@ def test_run_final_video_pipeline_passes_project_level_cache_dir_to_cutme(
         def prepare_product_recommendation_output(self, project_id, **kwargs):
             return {"ok": True, "package_path": str(package_path), "next": {"target_mp4": str(output_mp4)}}
 
-    def fake_runner(command, *, cwd, timeout):
-        commands.append(command)
-        if command[-1] == "--build-render-job":
-            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
-        if "--render-fast-final" in command:
-            output_mp4.parent.mkdir(parents=True, exist_ok=True)
-            output_mp4.write_bytes(b"mp4")
-            clip_cache_manifest.parent.mkdir(parents=True, exist_ok=True)
-            clip_cache_manifest.write_text(
-                json.dumps(
-                    {
-                        "summary": {
-                            "segments_total": 1,
-                            "cache_hits": 1,
-                            "rendered": 0,
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
-            return {"stdout": "", "stderr": "", "returncode": 0}
-        Path(command[-1]).write_bytes(b"png")
-        return {"stdout": "", "stderr": "", "returncode": 0}
-
     result = run_final_video_pipeline(
         FakeWorkflow(),
         project_id=23,
         account_label="灏忓崥",
         package_output_path=package_path,
         output_path=output_mp4,
+        acceptance_mode="none",
         cutme_root=tmp_path,
-        runner=fake_runner,
         probe_video=lambda path: {"duration": 1.0},
-        measure_loudness=lambda path: {"output_i": "-11.0"},
     )
 
-    render_command = commands[1]
-    assert "--cache-dir" in render_command
-    assert render_command[render_command.index("--cache-dir") + 1] == str(cache_dir)
+    assert len(fake_cutme_boundary) == 1
+    assert fake_cutme_boundary[0][2] == cache_dir
     assert result["cutme"]["clip_cache_dir"] == str(cache_dir)
     assert result["cutme"]["clip_cache_manifest"] == str(clip_cache_manifest)
     assert result["cutme"]["clip_cache"]["cache_hits"] == 1
@@ -841,11 +1043,6 @@ def test_run_final_video_pipeline_records_latest_run_in_pipeline(tmp_path: Path,
             return {"ok": True, "package_path": str(package_path), "next": {"target_mp4": str(product_mp4)}}
 
     def fake_runner(command, *, cwd, timeout):
-        if command[-1] == "--build-render-job":
-            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
-        if "--render-fast-final" in command:
-            product_mp4.write_bytes(b"product")
-            return {"stdout": "", "stderr": "", "returncode": 0}
         if "-filter_complex" in command and str(full_mp4) in command:
             full_mp4.write_bytes(b"full")
             return {"stdout": "", "stderr": "", "returncode": 0}
@@ -918,11 +1115,6 @@ def test_run_final_video_pipeline_quick_acceptance_skips_visual_frames_and_recor
 
     def fake_runner(command, *, cwd, timeout):
         commands.append(command)
-        if command[-1] == "--build-render-job":
-            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
-        if "--render-fast-final" in command:
-            output_mp4.write_bytes(b"mp4")
-            return {"stdout": "", "stderr": "", "returncode": 0}
         if "-frames:v" in command:
             raise AssertionError("quick acceptance should not extract visual frames")
         raise AssertionError(f"unexpected command: {command}")
@@ -983,11 +1175,6 @@ def test_run_final_video_pipeline_visual_acceptance_extracts_frames_without_loud
 
     def fake_runner(command, *, cwd, timeout):
         nonlocal frame_commands
-        if command[-1] == "--build-render-job":
-            return {"stdout": f"RenderPackage: {job_package_path}\n", "stderr": "", "returncode": 0}
-        if "--render-fast-final" in command:
-            output_mp4.write_bytes(b"mp4")
-            return {"stdout": "", "stderr": "", "returncode": 0}
         if "-frames:v" in command:
             frame_commands += 1
             Path(command[-1]).write_bytes(b"png")

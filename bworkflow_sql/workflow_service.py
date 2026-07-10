@@ -2887,12 +2887,9 @@ def render_package_next_step(
         target_mp4 = package_path.with_suffix(".mp4")
         return {
             "mode": "final_mp4",
+            "status": "ready",
+            "action": "render_final_video",
             "target_mp4": str(target_mp4),
-            "command": f"python -m cutme --package {package_path} --build-render-job",
-            "render_command_after_job": (
-                "python -m cutme --package <job-render-package.json> "
-                f"--render-fast-final --output {target_mp4}"
-            ),
         }
     manifest_path = jianying_manifest_path or package_path.with_suffix(".jianying.manifest.json")
     return {

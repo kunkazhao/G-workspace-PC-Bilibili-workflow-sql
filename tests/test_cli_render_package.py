@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 from argparse import Namespace
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import bworkflow_sql.workflow_service as workflow_service
 from bworkflow_sql import cli
+from bworkflow_sql.workflow_service import WorkflowService
 from bworkflow_sql.workflow_errors import (
     AmbiguousProjectReferenceError,
     InvalidWorkflowRequestError,
@@ -1182,6 +1186,41 @@ def test_cmd_render_package_reports_missing_without_writing_package(
     assert payload["ok"] is False
     assert payload["missing"] == missing
     assert not output.exists()
+
+
+def test_cmd_render_package_keeps_final_mp4_next_step_structured(tmp_path, capsys, monkeypatch):
+    def fake_build(db, **kwargs):
+        return SimpleNamespace(
+            package={"schemaVersion": "1.0.0", "segments": []},
+            missing=[],
+            stale_product_images=[],
+        )
+
+    service = WorkflowService.__new__(WorkflowService)
+    service.db = "db"
+    monkeypatch.setattr(workflow_service, "build_product_recommendation_package", fake_build)
+    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, service))
+    output = tmp_path / "render-package.json"
+
+    cli.cmd_render_package(
+        Namespace(
+            project_id=3,
+            account="xiaobo",
+            output_mode="final_mp4",
+            product_media_mode="video_preferred",
+            product_order_strategy="price_segment_shuffle",
+            stale_product_image_policy="block",
+            mode="standard",
+            top_uids="",
+            product_card_template_id="muban-xiaobo-1",
+            output=str(output),
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["next"]["action"] == "render_final_video"
+    assert "command" not in payload["next"]
+    assert "cutme" not in json.dumps(payload["next"], ensure_ascii=False).lower()
 
 
 def test_cmd_product_card_preflight_writes_gate_json(capsys, monkeypatch):

@@ -55,17 +55,21 @@ def test_fake_final_video_run_does_not_write_real_project_workspace(tmp_path: Pa
                 "next": {"target_mp4": str(output_mp4)},
             }
 
-    def fake_runner(command, *, cwd, timeout):
-        if command[-1] == "--build-render-job":
-            return {
-                "stdout": f"RenderPackage: {job_package_path}\n",
-                "stderr": "",
-                "returncode": 0,
-            }
-        if "--render-fast-final" in command:
+    class FakeCutMeAdapter:
+        def render_final(self, package, *, output_path, cache_dir):
+            job_package_path.parent.mkdir(parents=True, exist_ok=True)
+            job_package_path.write_text(package_path.read_text(encoding="utf-8"), encoding="utf-8")
             output_mp4.write_bytes(b"mp4")
-            return {"stdout": "rendered\n", "stderr": "", "returncode": 0}
-        raise AssertionError(f"unexpected command: {command}")
+            return {
+                "ok": True,
+                "artifacts": {
+                    "source_package_path": str(package_path),
+                    "job_package_path": str(job_package_path),
+                    "output_path": str(output_mp4),
+                },
+                "cache": None,
+                "timings": {"total_ms": 1},
+            }
 
     before = _tree_snapshot(REAL_GUARDED_ROOTS)
 
@@ -78,7 +82,7 @@ def test_fake_final_video_run_does_not_write_real_project_workspace(tmp_path: Pa
         output_path=output_mp4,
         acceptance_mode="none",
         cutme_root=tmp_path,
-        runner=fake_runner,
+        cutme_adapter=FakeCutMeAdapter(),
         probe_video=lambda path: {"duration": 1.0, "video": "h264", "audio": "aac"},
     )
 

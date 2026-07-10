@@ -89,7 +89,7 @@ def test_prepare_product_recommendation_output_writes_draft_package(
     ]
 
 
-def test_prepare_product_recommendation_output_returns_final_mp4_next_command(
+def test_prepare_product_recommendation_output_returns_structured_final_mp4_readiness(
     tmp_path,
     monkeypatch,
 ):
@@ -109,14 +109,13 @@ def test_prepare_product_recommendation_output_returns_final_mp4_next_command(
     )
 
     assert result["ok"] is True
-    assert result["next"]["mode"] == "final_mp4"
-    assert result["next"]["target_mp4"].endswith(".mp4")
-    assert "python -m cutme --package" in result["next"]["command"]
-    assert "--build-render-job" in result["next"]["command"]
-    assert "--render-fast-final" in result["next"]["render_command_after_job"]
-    assert "<job-render-package.json>" in result["next"]["render_command_after_job"]
-    assert "BilibiliFullVideo" not in result["next"]["render_command_after_job"]
-    assert "npm --prefix" not in result["next"]["render_command_after_job"]
+    assert result["next"] == {
+        "mode": "final_mp4",
+        "status": "ready",
+        "action": "render_final_video",
+        "target_mp4": str(output.with_suffix(".mp4")),
+    }
+    assert "cutme" not in json.dumps(result["next"], ensure_ascii=False).lower()
 
 
 def test_prepare_product_recommendation_output_can_pass_stable_product_order(
