@@ -11,7 +11,13 @@
     "productMediaMode": "cover_only",
     "fps": 30,
     "width": 1920,
-    "height": 1080
+    "height": 1080,
+    "subtitles": {
+      "enabled": true,
+      "styleId": "classic_white",
+      "styleScope": "global",
+      "alignment": "asr"
+    }
   },
   "audio": {
     "loudnessTarget": {
@@ -21,6 +27,16 @@
     }
   },
   "segments": [
+    {
+      "type": "intro",
+      "id": "intro-raw",
+      "spokenText": "Representative raw intro payload.",
+      "videoAsset": "cutme-render-package-v1/assets/intro.fixture",
+      "duration": 1.0,
+      "subtitles": [
+        {"start": 0.0, "end": 0.9, "text": "Representative raw intro payload."}
+      ]
+    },
     {
       "type": "product_recommendation",
       "id": "product-CONTRACT-001",
@@ -42,7 +58,21 @@
         "slots": [],
         "coverAsset": "cutme-render-package-v1/assets/product-card.fixture"
       },
-      "subtitles": []
+      "subtitles": [
+        {"start": 0.0, "end": 0.9, "text": "Representative producer payload."}
+      ]
+    },
+    {
+      "type": "outro",
+      "id": "outro-fixed",
+      "spokenText": "Thanks for watching and leave a comment.",
+      "voiceAsset": "cutme-render-package-v1/audio/outro.fixture",
+      "duration": 1.0,
+      "templateId": "outro-centered",
+      "seed": "contract-fixture-seed",
+      "subtitles": [
+        {"start": 0.0, "end": 0.9, "text": "Thanks for watching and leave a comment."}
+      ]
     }
   ],
   "assets": {},
