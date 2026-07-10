@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from bworkflow_sql.final_video_pipeline import _run_command, run_final_video_pipeline
+
+
+pytestmark = pytest.mark.usefixtures("isolated_final_video_workspace")
 
 
 def test_run_final_video_pipeline_rejects_unknown_subtitle_alignment(tmp_path: Path):
