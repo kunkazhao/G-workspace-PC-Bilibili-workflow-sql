@@ -52,7 +52,15 @@ DEFAULT_SPOKEN_MD_ROOT = Path(r"G:\WriteSpace\B站-文案脚本\10_b站文案\1.
 DEFAULT_JIANYING_DRAFT_ROOT = Path(r"E:\剪辑-剪映\草稿\JianyingPro Drafts")
 INTERNAL_WORKSPACE_ROOT = DATA_DIR / "workspace"
 
-CUTME_ROOT = Path(r"G:\workspace\赵二-工具-CutMe")
+DEFAULT_CUTME_ROOT = Path(r"G:\workspace\赵二-工具-CutMe")
+
+
+def resolve_cutme_root() -> Path:
+    override = os.environ.get("BWORKFLOW_CUTME_ROOT", "").strip()
+    return Path(override) if override else DEFAULT_CUTME_ROOT
+
+
+CUTME_ROOT = resolve_cutme_root()
 CUTME_OUTPUT_ROOT = CUTME_ROOT / "cutme" / "output"
 
 
