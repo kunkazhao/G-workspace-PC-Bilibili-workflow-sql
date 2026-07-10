@@ -1,6 +1,6 @@
 # B-Workflow-SQL 重构 TODO
 
-> 最后更新：2026-06-24
+> 最后更新：2026-07-10
 
 ## 第一阶段：基础设施
 
@@ -51,11 +51,12 @@
 
 ### 8. 去旧项目运行时依赖
 - [x] 8.1 梳理 `try_import("core.master_schemes")` 实际调用（旧模块只是 HTTP 客户端调 localhost:8000）
-- [x] 8.2 确认 Master HTTP API 已覆盖（/api/workspaces, /api/sourcing/categories, /api/schemes, /api/schemes/{id}/summary）
-- [x] 8.3 `master_data.py` 改用 `requests` 直连 Master HTTP API，含内存缓存、重试、workspace header
-- [x] 8.4 `sync_service.py` 改用 `MasterDataService.fetch_scheme_summary()`，删除 legacy_bridge 导入
-- [x] 8.5 删除 `legacy_bridge.py`（`install_legacy_paths()` / `try_import()` 已无调用方）
-- [x] 8.6 `LEGACY_PROJECT_ROOT` 保留（`legacy_import.py` 数据迁移仍需要）；`legacy_import.py` 保留（一次性导入旧数据用）
+- [x] 8.2 Master 提供 `/api/contracts/v1/*` 工作空间、分类、方案目录与方案快照契约
+- [x] 8.3 新增唯一 `MasterContractAdapter`：typed consumer projection、稳定错误、主版本检查、工作区缓存
+- [x] 8.4 `sync_service.py` 改为 snapshot preview -> pure diff -> transactional apply，UI apply 校验 preview snapshot id
+- [x] 8.5 删除旧 raw Master 客户端和所有生产引用，不保留兼容类或开关
+- [x] 8.6 `LEGACY_PROJECT_ROOT` 只保留给一次性文件迁移；`legacy_import.py` 与项目页复用同一个 adapter
+- [x] 8.7 SQLite v4 只保存 `master_snapshot_id` / `master_snapshot_applied_at` provenance，不复制快照 JSON
 
 ## 第四阶段：UI 体验提升
 

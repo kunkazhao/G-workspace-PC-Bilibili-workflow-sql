@@ -7,7 +7,12 @@ from typing import Any
 
 from .asset_paths import legacy_voice_user_dir, voice_user_dir
 from .db import Database
-from .master_data import MasterDataService, display_name
+from .master_contracts import (
+    MasterCategory,
+    MasterContractAdapter,
+    MasterSchemeHeader,
+    MasterWorkspace,
+)
 from .repositories import Repository
 from .settings import DEFAULT_IMAGE_ROOT, DEFAULT_VIDEO_ROOT, DEFAULT_VOICE_ROOT, INTERNAL_WORKSPACE_ROOT, LEGACY_PROJECT_ROOT
 from .sync_service import SyncService
@@ -21,11 +26,16 @@ UID_BOUNDARY_PATTERN = r"(?<![A-Za-z0-9])({uid})(?![A-Za-z0-9])"
 
 
 class LegacyImportService:
-    def __init__(self, db: Database):
+    def __init__(
+        self,
+        db: Database,
+        *,
+        master_contracts: MasterContractAdapter | None = None,
+    ):
         self.db = db
         self.repo = Repository(db)
-        self.sync = SyncService(db)
-        self.master = MasterDataService()
+        self.master_contracts = master_contracts or MasterContractAdapter()
+        self.sync = SyncService(db, master_contracts=self.master_contracts)
 
     def import_accounts(self) -> int:
         if not OLD_ACCOUNTS_PATH.exists():
@@ -109,8 +119,16 @@ class LegacyImportService:
         account_count = self.import_accounts()
         voice_count = self.import_voice_profiles()
         workspace = self._zhaoer_workspace()
-        parent, child = self._find_category(workspace_id=safe_text(workspace.get("id")), parent_name=parent_category, child_name=category)
-        schemes, _source = self.master.fetch_schemes(workspace_id=safe_text(workspace.get("id")), category_id=safe_text(child.get("id")))
+        parent, child = self._find_category(
+            workspace_id=workspace.id,
+            parent_name=parent_category,
+            child_name=category,
+        )
+        scheme_catalog = self.master_contracts.fetch_schemes(
+            workspace.id,
+            child.id,
+        )
+        schemes = list(scheme_catalog.schemes)
         if not schemes:
             raise ValueError(f"Master 中“{category}”没有可用方案。")
         scheme = schemes[0]
@@ -141,39 +159,54 @@ class LegacyImportService:
             "voices": voice_asset_count,
         }
 
-    def _zhaoer_workspace(self) -> dict[str, Any]:
-        for workspace in self.master.fetch_workspaces():
-            if safe_text(workspace.get("name")) == "赵二" or safe_text(workspace.get("slug")) == "zhaoer":
+    def _zhaoer_workspace(self) -> MasterWorkspace:
+        catalog = self.master_contracts.fetch_workspaces()
+        for workspace in catalog.workspaces:
+            if workspace.name == "赵二" or workspace.slug == "zhaoer":
                 return workspace
         raise ValueError("Master 中没有找到赵二工作空间。")
 
-    def _find_category(self, *, workspace_id: str, parent_name: str, child_name: str) -> tuple[dict[str, Any], dict[str, Any]]:
-        _workspace, tree, _source = self.master.fetch_category_tree(workspace_id)
-        for parent in tree:
-            if safe_text(parent.get("name")) != parent_name:
+    def _find_category(
+        self,
+        *,
+        workspace_id: str,
+        parent_name: str,
+        child_name: str,
+    ) -> tuple[MasterCategory, MasterCategory]:
+        catalog = self.master_contracts.fetch_categories(workspace_id)
+        for parent in catalog.categories:
+            if parent.name != parent_name:
                 continue
-            for child in parent.get("children") or []:
-                if safe_text(child.get("name")) == child_name:
+            for child in parent.children:
+                if child.name == child_name:
                     return parent, child
         raise ValueError(f"Master 中没有找到品类：{parent_name}-{child_name}")
 
-    def _upsert_project(self, *, workspace: dict[str, Any], parent: dict[str, Any], child: dict[str, Any], scheme: dict[str, Any], md_path: Path) -> int:
+    def _upsert_project(
+        self,
+        *,
+        workspace: MasterWorkspace,
+        parent: MasterCategory,
+        child: MasterCategory,
+        scheme: MasterSchemeHeader,
+        md_path: Path,
+    ) -> int:
         existing = self.db.fetchone(
             "SELECT id FROM projects WHERE workspace_id=? AND category_id=? AND scheme_id=? ORDER BY id DESC LIMIT 1",
-            (safe_text(workspace.get("id")), safe_text(child.get("id")), safe_text(scheme.get("id"))),
+            (workspace.id, child.id, scheme.id),
         )
         return self.db.upsert_project(
             {
                 "id": int(existing["id"]) if existing else 0,
-                "name": f"{safe_text(parent.get('name'))}-{safe_text(child.get('name'))}",
-                "workspace_id": safe_text(workspace.get("id")),
-                "workspace_name": display_name(workspace),
-                "category_parent_id": safe_text(parent.get("id")),
-                "category_parent_name": safe_text(parent.get("name")),
-                "category_id": safe_text(child.get("id")),
-                "category_name": safe_text(child.get("name")),
-                "scheme_id": safe_text(scheme.get("id")),
-                "scheme_name": display_name(scheme, safe_text(scheme.get("id"))),
+                "name": f"{parent.name}-{child.name}",
+                "workspace_id": workspace.id,
+                "workspace_name": workspace.name,
+                "category_parent_id": parent.id,
+                "category_parent_name": parent.name,
+                "category_id": child.id,
+                "category_name": child.name,
+                "scheme_id": scheme.id,
+                "scheme_name": scheme.name,
                 "md_path": str(md_path),
                 "image_root": str(DEFAULT_IMAGE_ROOT),
                 "video_root": str(DEFAULT_VIDEO_ROOT),

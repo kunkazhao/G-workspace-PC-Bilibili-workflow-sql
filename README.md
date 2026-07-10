@@ -88,6 +88,25 @@ Legacy migration helpers are available in `资产中心` and `用户管理`:
 
 Operational notes for voice changes, closing audio, dialog placement, and subtitle checks are maintained in `docs/operator-runbook.md`.
 
+## Master v1 Contract Boundary
+
+All Master reads go through `bworkflow_sql.master_contracts.MasterContractAdapter`
+and the versioned `/api/contracts/v1/*` family. Catalog pages consume typed
+workspace/category/scheme values; product sync and outline generation consume one
+typed scheme snapshot. The removed raw client has no compatibility class or runtime
+flag.
+
+Master owns the contract payload. B-Workflow validates only fields it consumes,
+plans the complete local diff before writing, then applies products, soft removals,
+project snapshot provenance and sync evidence in one SQLite transaction. Preview is
+read-only; UI apply must present the preview `snapshot_id`, refetch, and reject a
+changed snapshot as `stale_master_preview`. A matching snapshot id does not skip the
+diff, so local drift is still repaired.
+
+Only `master_unavailable` may trigger local Master autostart or outline price-range
+fallback. Contract-integrity errors, unsupported versions and incomplete snapshots
+remain visible and are never converted into defaults.
+
 ## Workflow Doctor Public Contract
 
 `python -m bworkflow_sql workflow-doctor ...` has one public output contract:
@@ -129,7 +148,7 @@ Project and sync rules:
 - Project names are unique. Creating or saving a project with an existing name shows a warning instead of silently creating a duplicate.
 - Project dropdowns show the Chinese project name only, without the numeric database id. The internal selector map still resolves the selected name back to the correct project id.
 - Project dropdowns are sorted by project name.
-- Master sync previews changes first. If the local Master API is unavailable, the sync page asks whether to start the local Master backend from `G:\workspace\bilibili-newTools-next-master` and then retries the preview.
+- Master sync previews a v1 snapshot first and applies only the confirmed snapshot id. If the local Master contract service is unavailable, the sync page asks whether to start `G:\workspace\bilibili-newTools-next-master` and retries; integrity or version errors do not trigger autostart.
 - The sync center voice check reports both missing voice files and expired voice mappings. For either case, `手动映射音频` can bind a local audio file directly to the selected script block for the current user.
 - Manual voice mapping writes a ready `asset_bindings` row with `source_kind='manual'`, stores the current script hash, and marks older mismatched voice rows for the same script block as expired. Later asset resync keeps manual voice bindings.
 

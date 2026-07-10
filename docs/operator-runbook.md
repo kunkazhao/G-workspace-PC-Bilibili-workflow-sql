@@ -73,28 +73,24 @@ Remotion-first 商品图模板从 CutMe 元数据进入账号模板列表，显�
 
 | 步骤 | 脚本 | 说明 |
 |---|---|---|
-| 1. 获取标签分组 | 手动查 Master API | scheme summary 的 `tags` 字段为空是已知 bug（`SCHEME_SUMMARY_ITEM_SELECT` 没有 `tags`）；必须逐个查 `/api/sourcing/items/{source_id}` 才能拿到 `tags` |
+| 1. 同步标签分组 | B-Workflow 同步中心 | 先预览并应用 Master v1 scheme snapshot；规范化标签会随商品卡数据写入本地 `product_card_json.tags`，禁止再逐商品拼 raw API 请求 |
 | 2. 批量 MiniMax 配音 | `scripts/batch_tts_chongdianbao.py` | 为商品正文 + 过渡文案调用 MiniMax T2A |
 | 3. 生成 manifest | `scripts/gen_manifest_chongdianbao.py` | 按标签分组组织 entry 顺序：引言 → [过渡 → 该分组商品] × N → 结尾 |
 | 4. 生成剪映草稿 | `scripts/jianying_engine/generate_jianying_draft.py` | 项目内剪映引擎优先；`BWORKFLOW_JIANYING_ENGINE_DIR` 可覆盖；旧 b-workflow skill 只作迁移兜底 |
 
 ### 步骤详解
 
-#### 1. 获取标签分组
+#### 1. 同步标签分组
 
-Master API `GET /api/schemes/{scheme_id}/summary` 返回的 items 里 `tags` 字段为空，这是因为 `backend/api/schemes.py` 的 `SCHEME_SUMMARY_ITEM_SELECT` 没有包含 `tags`。
+在“同步中心”先预览 Master 变化。预览只读，并展示 snapshot id、商品新增/更新/
+恢复/移除以及 `product_card_json`、顺序等变化；确认后应用会重新抓取一次快照，
+只有 id 与预览一致才写库。标签来自快照的 canonical `products[].tags`，应用后
+位于本地 `products.product_card_json` 的 `tags` 数组。
 
-**解决方法**：先从 summary 拿到每个 item 的 `source_id`，再逐个调 `GET /api/sourcing/items/{source_id}` 获取 `tags`。
-
-**注意**：Master 的 HTTP 头 `X-Workspace-Id` 需要传中文（"赵二"），Python 的 `http.client` 会因 latin-1 编码报错。解决方案：
-- 用 `socket` 直接发 UTF-8 raw HTTP 请求
-- 或把查询逻辑写进 `.py` 文件执行（避免 shell 管道编码问题）
-
-工作空间 UUID 映射（可通过 `GET /api/workspaces` 获取）：
-
-| 名称 | UUID |
-|---|---|
-| 赵二 | `de90965d-29e4-4ac3-9730-0ce1fc85b67c` |
+不要手工读取页面接口、拼 workspace header 或逐商品补查。
+`MasterContractAdapter` 是唯一读入口；只有 `master_unavailable` 可以启动本地 Master
+后重试。`invalid_master_contract`、`unsupported_contract_version`、
+`scheme_snapshot_incomplete` 必须先修数据或版本问题。
 
 #### 2. 批量 MiniMax 配音
 
@@ -282,8 +278,9 @@ python -m cutme --preview-subtitle-styles --output G:\workspace\赵二-工具-Cu
 
 | 问题 | 原因 | 解决 |
 |---|---|---|
-| Master API 拿不到 tags | `SCHEME_SUMMARY_ITEM_SELECT` 没有 `tags` 列 | 逐个查 `/api/sourcing/items/{source_id}` |
-| `X-Workspace-Id` 中文报错 | Python `http.client` 强制 latin-1 编码 | 用 raw socket 发 UTF-8 请求 |
+| Master 暂不可用 | `master_unavailable` | 在同步中心确认启动本地 Master 服务并重试预览 |
+| Master 契约或版本错误 | `invalid_master_contract` / `unsupported_contract_version` | 不允许默认值或旧接口兜底；先修 owner 数据/版本再同步 |
+| 预览后方案变化 | `stale_master_preview` | 重新预览，核对新的 snapshot id 后再应用 |
 | 品类过渡文案不入库 | MD parser 只识别 `## 价格过渡文案` | 过渡文本硬编码在脚本里 |
 | shell 环境中文乱码 | Git Bash 的 stdin 编码 | 业务逻辑写 `.py` 文件，不走 shell 管道 |
 
@@ -297,6 +294,7 @@ python -m cutme --preview-subtitle-styles --output G:\workspace\赵二-工具-Cu
 | 模板校准回归 | `python -m pytest -q tests/test_render_package_jianying.py tests/test_cli_render_package.py tests/test_jianying_engine_display_video.py` |
 | 引言场景 ASR 对齐回归 | `python -m pytest -q tests/test_cutme_intro.py tests/test_intro_timeline.py` |
 | 常用服务回归 | `python -m pytest -q tests/test_workflow_service.py tests/test_ui_helpers.py tests/test_repositories.py tests/test_sync_service.py` |
+| Master 契约边界 | `python -m pytest -q tests/test_master_contracts.py tests/test_master_snapshot_sync.py tests/test_master_snapshot_repository.py tests/test_master_snapshot_cutover.py tests/test_master_catalog_cutover.py tests/test_master_raw_client_forbidden.py` |
 
 ## CutMe 引言场景时间轴
 

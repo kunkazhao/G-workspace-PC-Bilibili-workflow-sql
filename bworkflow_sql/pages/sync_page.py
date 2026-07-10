@@ -29,7 +29,6 @@ from ..components import (
 from ..copy_writer import preview_copy_write, write_copy_blocks_to_markdown
 from ..db import Database
 from ..legacy_import import LegacyImportService
-from ..master_data import MasterDataService, display_name
 from ..master_service import MasterServiceManager, is_master_connection_error
 from ..outline_service import OutlineService
 from ..repositories import Repository

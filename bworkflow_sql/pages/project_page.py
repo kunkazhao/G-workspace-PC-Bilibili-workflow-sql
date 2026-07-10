@@ -28,7 +28,7 @@ from ..components import (
 from ..copy_writer import preview_copy_write, write_copy_blocks_to_markdown
 from ..db import Database
 from ..legacy_import import LegacyImportService
-from ..master_data import MasterDataService, display_name
+from ..master_contracts import MasterCategory, MasterSchemeHeader, MasterWorkspace
 from ..master_service import MasterServiceManager, is_master_connection_error
 from ..outline_service import OutlineService
 from ..repositories import Repository
@@ -129,9 +129,9 @@ class ProjectPageDialog(BasePage):
     def __init__(self, master, app: App):
         super().__init__(master, "品类项目", app, scrollable=True)
         self.project_var = app.project_selector_var
-        self.workspaces: list[dict[str, Any]] = []
-        self.category_tree: list[dict[str, Any]] = []
-        self.schemes: list[dict[str, Any]] = []
+        self.workspaces: list[MasterWorkspace] = []
+        self.category_tree: list[MasterCategory] = []
+        self.schemes: list[MasterSchemeHeader] = []
         self._editor_state: ProjectEditorState | None = None
         self.fields: dict[str, ctk.StringVar] = {key: ctk.StringVar() for key in [
             "name", "workspace_id", "workspace_name",
@@ -344,9 +344,9 @@ class ProjectPageDialog(BasePage):
     def _hydrate_editor_master_state(self, state: ProjectEditorState) -> None:
         workspace = self._default_workspace()
         if workspace:
-            state.workspace_var.set(display_name(workspace))
-            state.fields["workspace_id"].set(safe_text(workspace.get("id")))
-            state.fields["workspace_name"].set(display_name(workspace))
+            state.workspace_var.set(workspace.name)
+            state.fields["workspace_id"].set(workspace.id)
+            state.fields["workspace_name"].set(workspace.name)
         else:
             state.workspace_var.set("赵二（默认）")
         if self.category_tree:
@@ -519,12 +519,31 @@ class ProjectPageDialog(BasePage):
         self._workspaces_loading = True
 
         def work() -> dict[str, Any]:
-            workspaces = self.master_data.fetch_workspaces(force_refresh=force_refresh)
-            workspace = next((w for w in workspaces if safe_text(w.get("name")) == "赵二" or safe_text(w.get("slug")) == "zhaoer"), workspaces[0] if workspaces else None)
-            tree, source = [], ""
+            workspace_catalog = self.master_contracts.fetch_workspaces(
+                force_refresh=force_refresh
+            )
+            workspaces = list(workspace_catalog.workspaces)
+            workspace = next(
+                (
+                    item
+                    for item in workspaces
+                    if item.name == "赵二" or item.slug == "zhaoer"
+                ),
+                workspaces[0] if workspaces else None,
+            )
+            tree: list[MasterCategory] = []
             if workspace:
-                _w, tree, source = self.master_data.fetch_category_tree(safe_text(workspace.get("id")), force_refresh=force_refresh)
-            return {"workspaces": workspaces, "workspace": workspace, "tree": tree, "source": source}
+                category_catalog = self.master_contracts.fetch_categories(
+                    workspace.id,
+                    force_refresh=force_refresh,
+                )
+                tree = list(category_catalog.categories)
+            return {
+                "workspaces": workspaces,
+                "workspace": workspace,
+                "tree": tree,
+                "source": "contract-v1",
+            }
 
         def on_success(result: dict[str, Any]) -> None:
             self.workspaces = result["workspaces"]
@@ -532,9 +551,13 @@ class ProjectPageDialog(BasePage):
             workspace = result["workspace"]
             if editor_state and self._editor_alive(editor_state):
                 if workspace:
-                    editor_state.workspace_var.set(display_name(workspace))
-                    editor_state.fields["workspace_id"].set(safe_text(workspace.get("id")))
-                    editor_state.fields["workspace_name"].set(display_name(workspace))
+                    editor_state.workspace_var.set(workspace.name)
+                    editor_state.fields["workspace_id"].set(workspace.id)
+                    editor_state.fields["workspace_name"].set(workspace.name)
+                else:
+                    editor_state.workspace_var.set("")
+                    editor_state.fields["workspace_id"].set("")
+                    editor_state.fields["workspace_name"].set("")
                 self._apply_category_tree_to_editor(
                     editor_state,
                     result["tree"],
@@ -542,7 +565,9 @@ class ProjectPageDialog(BasePage):
                     keep_existing=bool(editor_state.fields["category_name"].get().strip()),
                 )
             if not quiet:
-                self.log(f"已读取 Master 工作空间，当前固定使用：{display_name(workspace) if workspace else '赵二'}。")
+                self.log(
+                    f"已读取 Master 工作空间，当前使用：{workspace.name if workspace else '无可用空间'}。"
+                )
 
         def on_error(exc: Exception, _tb: str) -> None:
             if not quiet:
@@ -561,11 +586,11 @@ class ProjectPageDialog(BasePage):
     def _editor_alive(self, state: ProjectEditorState) -> bool:
         return bool(state and state.dialog and state.dialog.winfo_exists())
 
-    def _default_workspace(self) -> dict[str, Any] | None:
+    def _default_workspace(self) -> MasterWorkspace | None:
         if not self.workspaces:
             return None
         for workspace in self.workspaces:
-            if safe_text(workspace.get("name")) == "赵二" or safe_text(workspace.get("slug")) == "zhaoer":
+            if workspace.name == "赵二" or workspace.slug == "zhaoer":
                 return workspace
         return self.workspaces[0]
 
@@ -605,7 +630,7 @@ class ProjectPageDialog(BasePage):
         return result["value"]
 
     def _choose_parent(self, state: ProjectEditorState) -> None:
-        options = [safe_text(parent.get("name")) for parent in self.category_tree if safe_text(parent.get("name"))]
+        options = [parent.name for parent in self.category_tree]
         chosen = self._choose_from_options(state.dialog, title="选择一级品类", options=options, current=state.parent_category_var.get())
         if not chosen:
             return
@@ -617,7 +642,7 @@ class ProjectPageDialog(BasePage):
         if not parent:
             messagebox.showinfo("需要一级品类", "请先选择一级品类。", parent=state.dialog)
             return
-        options = [safe_text(child.get("name")) for child in parent.get("children") or [] if safe_text(child.get("name"))]
+        options = [child.name for child in parent.children]
         chosen = self._choose_from_options(state.dialog, title="选择二级品类", options=options, current=state.child_category_var.get())
         if not chosen:
             return
@@ -628,17 +653,17 @@ class ProjectPageDialog(BasePage):
         if not self.schemes:
             messagebox.showinfo("需要方案列表", "请先选择二级品类并等待方案加载完成。", parent=state.dialog)
             return
-        options = [display_name(scheme, safe_text(scheme.get("id"))) for scheme in self.schemes]
+        options = [scheme.name for scheme in self.schemes]
         chosen = self._choose_from_options(state.dialog, title="选择 Master 方案", options=options, current=state.scheme_var.get())
         if not chosen:
             return
         state.scheme_var.set(chosen)
         self._editor_on_scheme_selected(state)
 
-    def _apply_category_tree_to_editor(self, state: ProjectEditorState, tree: list[dict[str, Any]], *, source: str, keep_existing: bool) -> None:
+    def _apply_category_tree_to_editor(self, state: ProjectEditorState, tree: list[MasterCategory], *, source: str, keep_existing: bool) -> None:
         if not self._editor_alive(state):
             return
-        parent_names = [safe_text(parent.get("name")) for parent in tree]
+        parent_names = [parent.name for parent in tree]
         if state.parent_combo is not None:
             state.parent_combo.configure(values=parent_names)
         state.parent_category_var.set("")
@@ -660,10 +685,10 @@ class ProjectPageDialog(BasePage):
         parent = self._selected_parent(state)
         if not parent:
             return
-        state.fields["category_parent_id"].set(safe_text(parent.get("id")))
-        state.fields["category_parent_name"].set(safe_text(parent.get("name")))
-        children = parent.get("children") or []
-        child_names = [safe_text(child.get("name")) for child in children if safe_text(child.get("name"))]
+        state.fields["category_parent_id"].set(parent.id)
+        state.fields["category_parent_name"].set(parent.name)
+        children = parent.children
+        child_names = [child.name for child in children]
         if state.child_combo is not None:
             state.child_combo.configure(values=child_names)
         state.child_category_var.set(preferred_child if preferred_child in child_names else (child_names[0] if child_names else ""))
@@ -678,26 +703,32 @@ class ProjectPageDialog(BasePage):
         child = self._selected_child(state)
         if not workspace or not child:
             return
-        state.fields["category_id"].set(safe_text(child.get("id")))
-        state.fields["category_name"].set(safe_text(child.get("name")))
+        state.fields["category_id"].set(child.id)
+        state.fields["category_name"].set(child.name)
         if state.scheme_combo is not None:
             state.scheme_combo.configure(values=[])
         state.scheme_var.set("读取中...")
 
-        def work() -> tuple[list[dict[str, Any]], str]:
-            return self.master_data.fetch_schemes(workspace_id=safe_text(workspace.get("id")), category_id=safe_text(child.get("id")))
+        def work() -> tuple[list[MasterSchemeHeader], str]:
+            catalog = self.master_contracts.fetch_schemes(
+                workspace.id,
+                child.id,
+            )
+            return list(catalog.schemes), "contract-v1"
 
-        def on_success(result: tuple[list[dict[str, Any]], str]) -> None:
+        def on_success(result: tuple[list[MasterSchemeHeader], str]) -> None:
             if not self._editor_alive(state):
                 return
             self.schemes, source = result
-            names = [display_name(scheme, safe_text(scheme.get("id"))) for scheme in self.schemes]
+            names = [scheme.name for scheme in self.schemes]
             if state.scheme_combo is not None:
                 state.scheme_combo.configure(values=names)
             if names:
                 state.scheme_var.set(preferred_scheme if preferred_scheme in names else names[0])
                 self._editor_on_scheme_selected(state)
-            self.log(f"已读取“{safe_text(child.get('name'))}”方案：{len(names)} 个（来源：{source}）。")
+            else:
+                state.scheme_var.set("")
+            self.log(f"已读取“{child.name}”方案：{len(names)} 个（来源：{source}）。")
 
         def on_error(exc: Exception, _tb: str) -> None:
             if not self._editor_alive(state):
@@ -710,9 +741,9 @@ class ProjectPageDialog(BasePage):
     def _editor_on_scheme_selected(self, state: ProjectEditorState, _=None) -> None:
         name = state.scheme_var.get()
         for scheme in self.schemes:
-            if display_name(scheme, safe_text(scheme.get("id"))) != name:
+            if scheme.name != name:
                 continue
-            state.fields["scheme_id"].set(safe_text(scheme.get("id")))
+            state.fields["scheme_id"].set(scheme.id)
             state.fields["scheme_name"].set(name)
             if not state.fields["name"].get().strip():
                 parent = state.fields["category_parent_name"].get().strip()
@@ -720,26 +751,26 @@ class ProjectPageDialog(BasePage):
                 state.fields["name"].set(f"{parent}-{child}" if parent and child else name)
             return
 
-    def _selected_workspace(self, state: ProjectEditorState) -> dict[str, Any] | None:
+    def _selected_workspace(self, state: ProjectEditorState) -> MasterWorkspace | None:
         name = state.workspace_var.get()
         for workspace in self.workspaces:
-            if display_name(workspace) == name:
+            if workspace.name == name:
                 return workspace
         return None
 
-    def _selected_parent(self, state: ProjectEditorState) -> dict[str, Any] | None:
+    def _selected_parent(self, state: ProjectEditorState) -> MasterCategory | None:
         name = state.parent_category_var.get()
         for parent in self.category_tree:
-            if safe_text(parent.get("name")) == name:
+            if parent.name == name:
                 return parent
         return None
 
-    def _selected_child(self, state: ProjectEditorState) -> dict[str, Any] | None:
+    def _selected_child(self, state: ProjectEditorState) -> MasterCategory | None:
         parent = self._selected_parent(state)
         if not parent:
             return None
         name = state.child_category_var.get()
-        for child in parent.get("children") or []:
-            if safe_text(child.get("name")) == name:
+        for child in parent.children:
+            if child.name == name:
                 return child
         return None

@@ -402,7 +402,7 @@ class BasePage(ctk.CTkFrame):
         self.workflow = app.workflow
         self.outline = app.outline
         self.legacy_import = app.legacy_import
-        self.master_data = app.master_data
+        self.master_contracts = app.master_contracts
 
         # 标题栏
         self.header_frame = ctk.CTkFrame(self, fg_color="transparent", height=32)

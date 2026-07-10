@@ -15,7 +15,7 @@ from .components import (
     set_button_loading,
 )
 from .db import Database
-from .master_data import MasterDataService
+from .master_contracts import MasterContractAdapter
 from .master_service import MasterServiceManager
 from .repositories import Repository
 from .style_config import UIStyle
@@ -50,12 +50,12 @@ class App(ctk.CTk):
 
         self.db = Database()
         self.repo = Repository(self.db)
-        self.sync = SyncService(self.db)
+        self.master_contracts = MasterContractAdapter()
+        self.sync = SyncService(self.db, master_contracts=self.master_contracts)
         self._workflow = None
         self.master_service = MasterServiceManager()
         self._outline = None
         self._legacy_import = None
-        self.master_data = MasterDataService()
 
         self.current_project_id: int | None = self.db.latest_project_id()
         self.pages: dict[str, ctk.CTkFrame] = {}
@@ -79,14 +79,20 @@ class App(ctk.CTk):
     def outline(self):
         if self._outline is None:
             from .outline_service import OutlineService
-            self._outline = OutlineService(self.db)
+            self._outline = OutlineService(
+                self.db,
+                master_contracts=self.master_contracts,
+            )
         return self._outline
 
     @property
     def legacy_import(self):
         if self._legacy_import is None:
             from .legacy_import import LegacyImportService
-            self._legacy_import = LegacyImportService(self.db)
+            self._legacy_import = LegacyImportService(
+                self.db,
+                master_contracts=self.master_contracts,
+            )
         return self._legacy_import
 
     def _build_shell(self) -> None:

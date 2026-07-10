@@ -1,6 +1,7 @@
 import json
 from types import SimpleNamespace
 
+from bworkflow_sql import master_contracts as contracts
 from bworkflow_sql.db import Database
 from bworkflow_sql.md_parser import parse_markdown_text
 from bworkflow_sql.repositories import Repository
@@ -180,8 +181,14 @@ def test_windows_filename_validation_accepts_default_srt_names():
 def test_project_dialog_master_combos_receive_candidate_values(monkeypatch):
     page = ProjectPageDialog.__new__(ProjectPageDialog)
     page.category_tree = [
-        {"id": "p1", "name": "Digital", "children": [{"id": "c1", "name": "Mouse"}, {"id": "c2", "name": "Keyboard"}]},
-        {"id": "p2", "name": "Home", "children": []},
+        contracts.MasterCategory(
+            id="p1", name="Digital", parent_id=None, parent_name=None, sort_order=1,
+            children=(
+                contracts.MasterCategory(id="c1", name="Mouse", parent_id="p1", parent_name="Digital", sort_order=1, children=()),
+                contracts.MasterCategory(id="c2", name="Keyboard", parent_id="p1", parent_name="Digital", sort_order=2, children=()),
+            ),
+        ),
+        contracts.MasterCategory(id="p2", name="Home", parent_id=None, parent_name=None, sort_order=2, children=()),
     ]
     page.log = lambda _text: None
     state = _editor_state()
@@ -200,17 +207,32 @@ def test_project_dialog_scheme_combo_receives_loaded_values():
             if on_success:
                 on_success(work())
 
-    class FakeMasterData:
-        def fetch_schemes(self, *, workspace_id, category_id):
+    class FakeMasterContracts:
+        def fetch_schemes(self, workspace_id, category_id, *, force_refresh=False):
             assert workspace_id == "w1"
             assert category_id == "c1"
-            return ([{"id": "s1", "name": "Main"}, {"id": "s2", "name": "Backup"}], "test")
+            assert force_refresh is False
+            return contracts.MasterSchemeCatalog(
+                schema_version="1.0.0",
+                generated_at_utc="2026-07-10T12:00:00Z",
+                workspace=contracts.MasterWorkspace(id="w1", name="Zhaoer", slug="zhaoer"),
+                category=contracts.MasterCategoryIdentity(id="c1", name="Mouse"),
+                schemes=(
+                    contracts.MasterSchemeHeader(id="s1", name="Main", category_id="c1", category_name="Mouse", updated_at=None, item_count=0),
+                    contracts.MasterSchemeHeader(id="s2", name="Backup", category_id="c1", category_name="Mouse", updated_at=None, item_count=0),
+                ),
+            )
 
     page = ProjectPageDialog.__new__(ProjectPageDialog)
     page.app = FakeApp()
-    page.master_data = FakeMasterData()
-    page.workspaces = [{"id": "w1", "name": "Zhaoer"}]
-    page.category_tree = [{"id": "p1", "name": "Digital", "children": [{"id": "c1", "name": "Mouse"}]}]
+    page.master_contracts = FakeMasterContracts()
+    page.workspaces = [contracts.MasterWorkspace(id="w1", name="Zhaoer", slug="zhaoer")]
+    page.category_tree = [
+        contracts.MasterCategory(
+            id="p1", name="Digital", parent_id=None, parent_name=None, sort_order=1,
+            children=(contracts.MasterCategory(id="c1", name="Mouse", parent_id="p1", parent_name="Digital", sort_order=1, children=()),),
+        )
+    ]
     page.schemes = []
     page.log = lambda _text: None
     state = _editor_state()
