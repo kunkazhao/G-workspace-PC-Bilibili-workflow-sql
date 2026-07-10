@@ -195,18 +195,23 @@ python -m venv "G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/.v
 `--mode top --top-uids UID1,UID2`，置顶 UID 必须保持用户给定顺序排在最前面；只有剩余商品
 参与段内随机或稳定排序。没有可匹配价格段时保持正常稳定顺序，不打乱整批商品。
 
-### 完整 MP4、快速验收与片段缓存
+### 统一完整 MP4、快速验收与片段缓存
 
-如果已经有用户确认 OK 的引言 MP4，不要手写 ffmpeg 拼接。直接在
-`render-final-video` 上加：
+正常流程只产生一个完整 MP4。B-Workflow 把无字幕引言原片、价格/商品推荐段、
+账号 `accounts.closing_audio_path` 固定结尾组成同一个 RenderPackage，再只调用一次 CutMe：
 
 ```powershell
-python -m bworkflow_sql render-final-video <project_id> --account <账号> --intro-video <intro.mp4> --full-output <完整.mp4> --acceptance-mode quick
+python -m bworkflow_sql render-final-video <project_id> --account <账号> --intro-video <无字幕引言.mp4> --intro-video-source-plan <source-intro-plan.json> --full-output <完整.mp4> --acceptance-mode quick
 ```
 
-`--output` 仍然表示商品推荐段 MP4；`--full-output` 表示“引言 + 商品推荐段”
-的完整 MP4。拼接阶段固定输出 H.264 1920x1080/30fps、AAC 48kHz，并使用
-`loudnorm=I=-11:TP=-1:LRA=11,aresample=48000`。
+`render-final-video` 默认 `--subtitle-alignment asr`。所有段落在一个 ASR worker 中批量识别，
+按原稿与识别文本的序列匹配定位；文案覆盖率低于 60% 直接阻断，不回退到按字数均分。
+`--intro-video-source-plan` 只提供引言原稿，不复用旧 timing；也可用 `--intro-video-text-file`
+显式提供原稿。无引言原稿时必须阻断。
+
+CutMe 使用同一 `output.subtitles.styleId` 烧录引言、商品和结尾字幕；合并前每段都按
+`audio.loudnessTarget` 归一化，成片再执行母带响度处理。结尾从
+`outro-centered` / `outro-comment-card` / `outro-split` 随机选一个，选择结果和 seed 写入包内便于复现。
 
 标准交付目录优先使用 `--delivery-dir <dir>`，不要让 Agent 临时拼多个输出路径：
 
@@ -214,8 +219,7 @@ python -m bworkflow_sql render-final-video <project_id> --account <账号> --int
 python -m bworkflow_sql render-final-video <project_id> --account <账号> --intro-video <intro.mp4> --delivery-dir <交付目录> --acceptance-mode quick
 ```
 
-传入 `--delivery-dir` 后，完整成片 MP4 和商品推荐段 MP4 直接写在交付目录一级，
-文件名固定为 `完整成片-<timestamp>.mp4` 和 `商品推荐段-<timestamp>.mp4`。
+传入 `--delivery-dir` 后，只把 `完整成片-<timestamp>.mp4` 写到交付目录一级。
 不要再创建 `01_最终成片` 二级目录，也不要把目录名、账号名塞进文件名。验收截图写入
 `02_验收证据\<timestamp>\frames\`，RenderPackage、片头字幕 ASS 等过程文件写入
 `03_过程记录\<timestamp>\`。项目级片段缓存仍在
@@ -224,11 +228,11 @@ python -m bworkflow_sql render-final-video <project_id> --account <账号> --int
 `--acceptance-mode` 分四档：`none` 只保留文件/ffprobe 级验证；`quick`
 用于常规生产快验，不跑 loudnorm、不抽验收帧；`visual` 会抽关键帧但不跑
 完整 loudnorm；`full` 同时跑关键帧和完整 loudnorm，适合最终归档验收。命令
-返回和 run manifest 会记录 `timings`，用于复盘 package、CutMe 渲染、拼接、
+返回和 run manifest 会记录 `timings`，用于复盘 package、CutMe 渲染、
 ffprobe、抽帧、loudnorm 各阶段耗时。
 
 CutMe fast-final 会在输出目录旁写
-`fast-final-work\clip-cache-manifest.json`，用于复用未变化的商品段和价格过渡
+`fast-final-work\clip-cache-manifest.json`，用于复用未变化的引言、价格、商品和结尾
 段。这个缓存是加速项，不是前置条件：如果用户移动或删除了指定输出目录，或某个
 clip 文件缺失，系统必须自动重渲染对应片段，不能因此阻断生成。
 

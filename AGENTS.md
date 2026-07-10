@@ -29,5 +29,6 @@
 | 弹窗居中 | 新建 `CTkToplevel` 后统一调用 `_center_dialog(dialog)`；该函数按父窗口/主窗口居中，只有父窗口几何不可用时才兜底按屏幕居中。不要新写 `winfo_screenwidth()` 居中逻辑。 |
 | 模板视频位置校准 | 商品视频位置、`display_video_slot`、封面区域对齐、新增/修改商品图模板、剪映坐标/X/Y/缩放问题，先用 `zhaoer-flow-templatepreset` skill；再运行 `python -m bworkflow_sql template-calibrate <project_id> --account <账号> --product-uid <UID> --draft-name 模板校准-<账号>-<UID>` 生成单商品校准草稿，不要跑整批草稿调一个位置。 |
 | 字幕断行 | 统一维护在 `bworkflow_sql/subtitle_rules.py::split_subtitle_text(...)`；SRT 导出和剪映文本字幕轨都复用它。对超长分句做语义断行，保留数字+单位、英文型号、小数和 `的/地/得` 结构，优先在连词前断。 |
+| 完整 MP4 | `render-final-video` 默认 ASR，生成一个包含无字幕引言、价格/商品段和账号固定结尾的 RenderPackage；一次 CutMe 渲染、一份全局 ASS、一个完整 MP4。不要恢复 B-Workflow 外层引言 concat 或单独商品段交付。 |
 | 剪映字幕轨 | `bworkflow_sql jianying` 默认仍跳过字幕；显式加 `--with-subtitles` 才生成可编辑文本轨。当前机器如遇 onnxruntime/VAD 初始化失败，再加 `--subtitle-no-vad`。 |
 | 验证命令 | 从仓库根目录运行 `python -m pytest`，不要用裸 `pytest`。最小回归常用：`python -m pytest -q tests/test_workflow_service.py tests/test_ui_helpers.py tests/test_repositories.py tests/test_sync_service.py`。 |
