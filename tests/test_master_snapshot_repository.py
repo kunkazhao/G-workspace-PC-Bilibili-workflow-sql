@@ -127,7 +127,7 @@ def test_apply_writes_products_provenance_event_and_items_atomically(tmp_path: P
     db.close()
 
 
-def test_noop_apply_updates_provenance_and_event_but_not_product_row(tmp_path: Path):
+def test_repeated_snapshot_noop_preserves_rows_provenance_and_events(tmp_path: Path):
     db = Database(tmp_path / "noop.db")
     repo = Repository(db)
     project_id = db.upsert_project(_project_payload())
@@ -136,7 +136,11 @@ def test_noop_apply_updates_provenance_and_event_but_not_product_row(tmp_path: P
         _plan(repo, project_id, snapshot),
         applied_at="2026-07-10T12:00:00Z",
     )
-    before = repo.products(project_id)[0]
+    before_products = repo.products(project_id)
+    before_project = repo.project(project_id)
+    before_events = db.fetchall(
+        "SELECT * FROM sync_events WHERE project_id=? ORDER BY id", (project_id,)
+    )
 
     plan = _plan(repo, project_id, snapshot)
     result = repo.apply_master_snapshot_plan(
@@ -144,19 +148,16 @@ def test_noop_apply_updates_provenance_and_event_but_not_product_row(tmp_path: P
         applied_at="2026-07-10T13:00:00Z",
     )
 
-    after = repo.products(project_id)[0]
-    project = repo.project(project_id)
-    events = db.fetchall("SELECT id FROM sync_events WHERE project_id=?", (project_id,))
-    latest_items = db.fetchall(
-        "SELECT * FROM sync_event_items WHERE sync_event_id=?",
-        (events[-1]["id"],),
+    after_events = db.fetchall(
+        "SELECT * FROM sync_events WHERE project_id=? ORDER BY id", (project_id,)
     )
     assert not plan.has_changes
     assert result["change_count"] == 0
-    assert before["updated_at"] == after["updated_at"]
-    assert project["master_snapshot_applied_at"] == "2026-07-10T13:00:00Z"
-    assert len(events) == 2
-    assert latest_items == []
+    assert result["event_id"] is None
+    assert result["applied_at"] == "2026-07-10T12:00:00Z"
+    assert repo.products(project_id) == before_products
+    assert repo.project(project_id) == before_project
+    assert after_events == before_events
     db.close()
 
 

@@ -114,7 +114,8 @@ class Repository:
         with self.db.connect() as conn:
             project = conn.execute(
                 """
-                SELECT id, workspace_id, category_id, scheme_id
+                SELECT id, workspace_id, category_id, scheme_id,
+                       master_snapshot_id, master_snapshot_applied_at
                 FROM projects
                 WHERE id=?
                 """,
@@ -130,6 +131,24 @@ class Repository:
             for field, expected in expected_identity.items():
                 if safe_text(project[field]) != expected:
                     raise ValueError(f"project identity changed before apply: {field}")
+
+            previous_applied_at = safe_text(project["master_snapshot_applied_at"])
+            if (
+                not plan.has_changes
+                and safe_text(project["master_snapshot_id"]) == plan.snapshot_id
+                and previous_applied_at
+            ):
+                return {
+                    "snapshot_id": plan.snapshot_id,
+                    "applied_at": previous_applied_at,
+                    "event_id": None,
+                    "change_count": 0,
+                    "unchanged_count": len(plan.unchanged),
+                    "added": [],
+                    "updated": [],
+                    "removed": [],
+                    "reactivated": [],
+                }
 
             for change in plan.changes:
                 self._apply_snapshot_change(conn, change, ts)
