@@ -11,6 +11,7 @@ from bworkflow_sql.repositories import Repository
 from bworkflow_sql.settings import INTERNAL_WORKSPACE_ROOT, JIANYING_ENGINE_DIR
 from bworkflow_sql.sync_service import SyncService
 from bworkflow_sql.utils import now_iso, text_hash
+from bworkflow_sql.workflow_errors import AmbiguousProjectReferenceError
 import bworkflow_sql.workflow_service as workflow_service_module
 import bworkflow_sql.subtitle_helpers as subtitle_helpers_module
 import bworkflow_sql.tts_helpers as tts_helpers_module
@@ -636,7 +637,7 @@ def test_workflow_doctor_reports_ambiguous_project_name(tmp_path: Path):
 
     try:
         service.workflow_doctor(first_project["name"], account_label="灏忕噧")
-    except ValueError as exc:
+    except AmbiguousProjectReferenceError as exc:
         message = str(exc)
     else:
         raise AssertionError("ambiguous project name should be rejected")

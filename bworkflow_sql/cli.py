@@ -29,6 +29,12 @@ from pathlib import Path
 from typing import Any
 
 from .cutme_intro import preflight_intro_plan_for_cutme
+from .public_contracts import build_workflow_observation, build_workflow_observation_error
+from .workflow_errors import (
+    AmbiguousProjectReferenceError,
+    InvalidWorkflowRequestError,
+    ProjectNotFoundError,
+)
 from .template_calibration_runner import (
     load_template_calibration_targets,
     run_template_calibration_targets,
@@ -651,20 +657,49 @@ def cmd_script_doctor(args: argparse.Namespace) -> None:
 
 
 def cmd_workflow_doctor(args: argparse.Namespace) -> None:
-    _, _, _, wf = _init()
-    result = wf.workflow_doctor(
-        args.project_ref,
-        account_label=args.account or "",
-        scheme_name=args.scheme_name or "",
-        intro_label=args.intro_label or "",
-        intro_index=args.intro_index,
-        mode=args.mode,
-        top_uids=args.top_uids,
-        product_order_strategy=args.product_order_strategy,
-        product_card_template_id=args.product_card_template_id or "",
-        product_media_mode=args.product_media_mode,
-    )
-    _json_out(result)
+    exit_code = 0
+    try:
+        _, _, _, wf = _init()
+        result = wf.workflow_doctor(
+            args.project_ref,
+            account_label=args.account or "",
+            scheme_name=args.scheme_name or "",
+            intro_label=args.intro_label or "",
+            intro_index=args.intro_index,
+            mode=args.mode,
+            top_uids=args.top_uids,
+            product_order_strategy=args.product_order_strategy,
+            product_card_template_id=args.product_card_template_id or "",
+            product_media_mode=args.product_media_mode,
+        )
+        payload = build_workflow_observation(result)
+    except ProjectNotFoundError:
+        payload = build_workflow_observation_error(
+            "project_not_found",
+            "The requested project could not be resolved.",
+        )
+        exit_code = 1
+    except AmbiguousProjectReferenceError:
+        payload = build_workflow_observation_error(
+            "ambiguous_project_reference",
+            "The project reference matches multiple projects.",
+        )
+        exit_code = 1
+    except InvalidWorkflowRequestError:
+        payload = build_workflow_observation_error(
+            "workflow_doctor_invalid_request",
+            "The workflow diagnosis request is invalid.",
+        )
+        exit_code = 1
+    except Exception:
+        payload = build_workflow_observation_error(
+            "workflow_doctor_internal_error",
+            "Workflow diagnosis failed unexpectedly.",
+        )
+        exit_code = 1
+    _json_out(payload)
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
 def cmd_materialize_episode(args: argparse.Namespace) -> None:

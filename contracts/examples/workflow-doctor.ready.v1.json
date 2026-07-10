@@ -1,0 +1,24 @@
+{
+  "kind": "BWorkflowObservation",
+  "schema_version": 1,
+  "capability": "workflow_doctor",
+  "authoritative": false,
+  "ok": true,
+  "status": "ready",
+  "subject": {
+    "project_id": 23,
+    "project_name": "数码-桌面音响",
+    "account": "小博"
+  },
+  "blocked_by": [],
+  "checks": {
+    "script": {"status": "ready_for_downstream"},
+    "voice_and_assembly": {"status": "ready_to_assemble"}
+  },
+  "issues": [],
+  "suggestion": {
+    "action": "assemble",
+    "task": null
+  },
+  "error": null
+}

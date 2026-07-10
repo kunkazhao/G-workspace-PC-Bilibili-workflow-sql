@@ -1,0 +1,23 @@
+{
+  "kind": "BWorkflowObservation",
+  "schema_version": 1,
+  "capability": "workflow_doctor",
+  "authoritative": false,
+  "ok": false,
+  "status": "failed",
+  "subject": {
+    "project_id": null,
+    "project_name": null,
+    "account": null
+  },
+  "blocked_by": [],
+  "checks": {},
+  "issues": [],
+  "suggestion": null,
+  "error": {
+    "code": "project_not_found",
+    "message": "The requested project could not be resolved.",
+    "retryable": false,
+    "owner": "bworkflow"
+  }
+}

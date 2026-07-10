@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.zhaoer/contracts/bworkflow-observation.v1.schema.json",
+  "title": "BWorkflowObservation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema_version",
+    "capability",
+    "authoritative",
+    "ok",
+    "status",
+    "subject",
+    "blocked_by",
+    "checks",
+    "issues",
+    "suggestion",
+    "error"
+  ],
+  "properties": {
+    "kind": {"const": "BWorkflowObservation"},
+    "schema_version": {"const": 1},
+    "capability": {"const": "workflow_doctor"},
+    "authoritative": {"const": false},
+    "ok": {"type": "boolean"},
+    "status": {"enum": ["ready", "blocked", "failed"]},
+    "subject": {"$ref": "#/$defs/subject"},
+    "blocked_by": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "checks": {"$ref": "#/$defs/safeObject"},
+    "issues": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/safeObject"}
+    },
+    "suggestion": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/suggestion"}
+      ]
+    },
+    "error": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/error"}
+      ]
+    }
+  },
+  "$defs": {
+    "safePropertyName": {
+      "not": {
+        "pattern": "^(?:[Nn][Ee][Xx][Tt]|[Cc][Oo][Mm][Mm][Aa][Nn][Dd]|[Ff][Oo][Ll][Ll][Oo][Ww][_-]?[Uu][Pp][_-]?[Cc][Oo][Mm][Mm][Aa][Nn][Dd]|[Aa][Rr][Gg][Vv]|[Cc][Ww][Dd]|[Tt][Rr][Aa][Cc][Ee][Bb][Aa][Cc][Kk]|[Ss][Tt][Dd][Oo][Uu][Tt]|[Ss][Tt][Dd][Ee][Rr][Rr]|[Ee][Nn][Vv][Ii][Rr][Oo][Nn][Mm][Ee][Nn][Tt]|[Ee][Nn][Vv]|.*[Tt][Oo][Kk][Ee][Nn]|.*[Ss][Ee][Cc][Rr][Ee][Tt]|.*(?:[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]|[Aa][Cc][Cc][Ee][Ss][Ss][_-]?[Tt][Oo][Kk][Ee][Nn]|[Rr][Ee][Ff][Rr][Ee][Ss][Hh][_-]?[Tt][Oo][Kk][Ee][Nn]|[Aa][Uu][Tt][Hh][_-]?[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt][_-]?[Kk][Ee][Yy]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss][Ww][Dd]|[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]|[Cc][Oo][Oo][Kk][Ii][Ee]).*)$"
+      }
+    },
+    "safeValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {
+          "type": "array",
+          "items": {"$ref": "#/$defs/safeValue"}
+        },
+        {"$ref": "#/$defs/safeObject"}
+      ]
+    },
+    "safeObject": {
+      "type": "object",
+      "propertyNames": {"$ref": "#/$defs/safePropertyName"},
+      "additionalProperties": {"$ref": "#/$defs/safeValue"}
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "project_name", "account"],
+      "properties": {
+        "project_id": {"type": ["integer", "null"]},
+        "project_name": {"type": ["string", "null"]},
+        "account": {"type": ["string", "null"]}
+      }
+    },
+    "suggestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "task"],
+      "properties": {
+        "action": {"type": "string", "minLength": 1},
+        "task": {"type": ["string", "null"]}
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "owner"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "message": {"type": "string", "minLength": 1},
+        "retryable": {"type": "boolean"},
+        "owner": {"const": "bworkflow"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"status": {"const": "ready"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "ok": {"const": true},
+          "blocked_by": {"maxItems": 0},
+          "error": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"status": {"const": "blocked"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "ok": {"const": true},
+          "blocked_by": {"minItems": 1},
+          "error": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"status": {"const": "failed"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "ok": {"const": false},
+          "blocked_by": {"maxItems": 0},
+          "checks": {"maxProperties": 0},
+          "issues": {"maxItems": 0},
+          "suggestion": {"type": "null"},
+          "error": {"$ref": "#/$defs/error"}
+        }
+      }
+    }
+  ]
+}

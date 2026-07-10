@@ -1,5 +1,14 @@
 # B-Workflow SQL 运维手册
 
+## workflow-doctor 对外契约
+
+`workflow-doctor` 只输出 `BWorkflowObservation v1`，不再提供旧 raw JSON。
+`ready` 和 `blocked` 都表示命令成功完成检查；其中 `blocked` 使用
+`ok=true`、`status=blocked` 和逐项 `blocked_by`，不能按进程故障处理。
+项目不存在、参数歧义或内部异常会把结构化 failed observation 写到 stdout，
+同时返回非零退出码；调用方不要解析 stderr、traceback 或内部 `next/command`
+字段。Schema 与三种状态示例位于 `contracts/`。
+
 ## 模板校准标准入口
 
 模板位置校准不要临时猜商品、账号或模板。标准目标清单在

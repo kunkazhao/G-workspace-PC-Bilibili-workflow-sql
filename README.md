@@ -88,6 +88,16 @@ Legacy migration helpers are available in `资产中心` and `用户管理`:
 
 Operational notes for voice changes, closing audio, dialog placement, and subtitle checks are maintained in `docs/operator-runbook.md`.
 
+## Workflow Doctor Public Contract
+
+`python -m bworkflow_sql workflow-doctor ...` has one public output contract:
+`BWorkflowObservation` schema version 1. Ready and blocked checks both exit with
+a successful observation (`ok=true`); blocked work is represented by
+`status=blocked` and `blocked_by`. Command failures write one structured failed
+v1 observation to stdout and exit nonzero. The former raw JSON shape is removed
+and has no compatibility flag. The producer Schema and examples live under
+`contracts/schemas` and `contracts/examples`.
+
 ## ASR Provider Notes
 
 Subtitle export, intro-scene timing, Jianying subtitle alignment, and final MP4

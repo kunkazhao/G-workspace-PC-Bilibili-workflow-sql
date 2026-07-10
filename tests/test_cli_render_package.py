@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 from argparse import Namespace
 
+import pytest
+
 from bworkflow_sql import cli
+from bworkflow_sql.workflow_errors import (
+    AmbiguousProjectReferenceError,
+    InvalidWorkflowRequestError,
+    ProjectNotFoundError,
+)
 
 
 def test_render_package_parser_registers_command():
@@ -686,7 +693,36 @@ def test_cmd_materialize_episode_writes_result_json(capsys, monkeypatch):
     ]
 
 
-def test_cmd_workflow_doctor_writes_diagnostic_json(capsys, monkeypatch):
+def _workflow_doctor_args() -> Namespace:
+    return Namespace(
+        project_ref="数码-蓝牙音响",
+        account="xiaobo",
+        scheme_name="主方案",
+        intro_label="intro-1",
+        intro_index=2,
+        mode="top",
+        top_uids="P003,P001",
+        product_order_strategy="stable",
+        product_card_template_id="muban-xiaobo-2",
+        product_media_mode="cover_only",
+    )
+
+
+def _nested_keys(value) -> set[str]:
+    if isinstance(value, dict):
+        keys = set(value)
+        for item in value.values():
+            keys.update(_nested_keys(item))
+        return keys
+    if isinstance(value, list):
+        keys: set[str] = set()
+        for item in value:
+            keys.update(_nested_keys(item))
+        return keys
+    return set()
+
+
+def test_cmd_workflow_doctor_writes_blocked_v1_observation(capsys, monkeypatch):
     calls: list[dict[str, object]] = []
 
     class FakeWorkflow:
@@ -721,29 +757,39 @@ def test_cmd_workflow_doctor_writes_diagnostic_json(capsys, monkeypatch):
             return {
                 "ok": False,
                 "status": "blocked",
-                "next": {"action": "generate_voice"},
+                "blocked_by": "voice_and_assembly",
+                "project": {"id": 23, "name": "数码-蓝牙音响"},
+                "account": "xiaobo",
+                "checks": {
+                    "script": {"status": "ready", "next": {"command": "private"}},
+                    "voice_and_assembly": {"status": "voice_incomplete"},
+                },
+                "issues": [{"source": "assemble-plan", "code": "missing_voice_asset"}],
+                "next": {
+                    "action": "generate_voice",
+                    "task": "补齐当前文案对应的配音",
+                    "command": "private",
+                },
             }
 
     monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
 
-    cli.cmd_workflow_doctor(
-        Namespace(
-            project_ref="数码-蓝牙音响",
-            account="xiaobo",
-            scheme_name="主方案",
-            intro_label="intro-1",
-            intro_index=2,
-            mode="top",
-            top_uids="P003,P001",
-            product_order_strategy="stable",
-            product_card_template_id="muban-xiaobo-2",
-            product_media_mode="cover_only",
-        )
-    )
+    cli.cmd_workflow_doctor(_workflow_doctor_args())
 
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is False
-    assert payload["next"] == {"action": "generate_voice"}
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["kind"] == "BWorkflowObservation"
+    assert payload["schema_version"] == 1
+    assert payload["authoritative"] is False
+    assert payload["ok"] is True
+    assert payload["status"] == "blocked"
+    assert payload["blocked_by"] == ["voice_and_assembly"]
+    assert payload["suggestion"] == {
+        "action": "generate_voice",
+        "task": "补齐当前文案对应的配音",
+    }
+    assert _nested_keys(payload).isdisjoint({"next", "command", "follow_up_command", "argv", "cwd"})
+    assert captured.err == ""
     assert calls == [
         {
             "project_ref": "数码-蓝牙音响",
@@ -758,6 +804,76 @@ def test_cmd_workflow_doctor_writes_diagnostic_json(capsys, monkeypatch):
             "product_media_mode": "cover_only",
         }
     ]
+
+
+def test_cmd_workflow_doctor_writes_ready_v1_observation(capsys, monkeypatch):
+    class FakeWorkflow:
+        def workflow_doctor(self, *_args, **_kwargs):
+            return {
+                "ok": True,
+                "status": "ready",
+                "blocked_by": None,
+                "project": {"id": 23, "name": "数码-蓝牙音响"},
+                "account": "xiaobo",
+                "checks": {"script": {"status": "ready_for_downstream"}},
+                "issues": [],
+                "next": {"action": "assemble"},
+            }
+
+    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
+
+    cli.cmd_workflow_doctor(_workflow_doctor_args())
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["kind"] == "BWorkflowObservation"
+    assert payload["ok"] is True
+    assert payload["status"] == "ready"
+    assert payload["blocked_by"] == []
+    assert payload["error"] is None
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [
+        (ProjectNotFoundError("private path"), "project_not_found"),
+        (AmbiguousProjectReferenceError("private matches"), "ambiguous_project_reference"),
+        (InvalidWorkflowRequestError("private detail"), "workflow_doctor_invalid_request"),
+        (FileNotFoundError("private asset path"), "workflow_doctor_internal_error"),
+        (ValueError("private unexpected value"), "workflow_doctor_internal_error"),
+        (RuntimeError("SECRET TRACEBACK"), "workflow_doctor_internal_error"),
+    ],
+)
+def test_cmd_workflow_doctor_writes_safe_failed_v1_and_exits_nonzero(
+    capsys,
+    monkeypatch,
+    error,
+    expected_code: str,
+):
+    class FakeWorkflow:
+        def workflow_doctor(self, *_args, **_kwargs):
+            raise error
+
+    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.cmd_workflow_doctor(_workflow_doctor_args())
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_info.value.code == 1
+    assert payload["kind"] == "BWorkflowObservation"
+    assert payload["ok"] is False
+    assert payload["status"] == "failed"
+    assert payload["error"]["code"] == expected_code
+    assert payload["subject"] == {"project_id": None, "project_name": None, "account": None}
+    assert payload["checks"] == {}
+    assert payload["issues"] == []
+    assert payload["suggestion"] is None
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "private" not in serialized.lower()
+    assert "traceback" not in serialized.lower()
+    assert "SECRET" not in serialized
+    assert captured.err == ""
 
 
 def test_cmd_assemble_plan_writes_preview_json(capsys, monkeypatch):

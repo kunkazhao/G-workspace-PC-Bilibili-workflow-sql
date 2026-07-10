@@ -41,6 +41,11 @@ from .settings import (
     LEGACY_B_WORKFLOW_SKILL_SCRIPTS,
 )
 from .utils import file_metadata, now_iso, safe_text, text_hash
+from .workflow_errors import (
+    AmbiguousProjectReferenceError,
+    InvalidWorkflowRequestError,
+    ProjectNotFoundError,
+)
 from .asr import service as asr_service
 from .template_config import (
     display_template_from_image_path,
@@ -727,7 +732,7 @@ class WorkflowService:
             return project_ref
         ref_text = safe_text(project_ref)
         if not ref_text:
-            raise ValueError("project reference cannot be empty")
+            raise InvalidWorkflowRequestError("project reference cannot be empty")
         if ref_text.isdigit():
             return int(ref_text)
         normalized_ref = _normalize_project_lookup_text(ref_text)
@@ -747,12 +752,12 @@ class WorkflowService:
         if len(matches) == 1:
             return int(matches[0]["id"])
         if not matches:
-            raise ValueError(f"project reference not found: {ref_text}")
+            raise ProjectNotFoundError(f"project reference not found: {ref_text}")
         summary = "; ".join(
             f"id={item.get('id')} name={safe_text(item.get('name'))} scheme={safe_text(item.get('scheme_name'))}"
             for item in matches[:8]
         )
-        raise ValueError(
+        raise AmbiguousProjectReferenceError(
             f"ambiguous project reference: {ref_text}. "
             f"Pass --scheme-name or use a numeric project_id. Matches: {summary}"
         )
@@ -1612,7 +1617,7 @@ class WorkflowService:
     def _required_project(self, project_id: int) -> dict[str, Any]:
         project = self.repo.project(project_id)
         if not project:
-            raise ValueError("请先选择品类项目。")
+            raise ProjectNotFoundError("请先选择品类项目。")
         return project
 
     def _intro_block_for_label(self, project_id: int, intro_label: str) -> dict[str, Any]:

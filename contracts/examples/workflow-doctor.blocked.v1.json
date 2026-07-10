@@ -1,0 +1,26 @@
+{
+  "kind": "BWorkflowObservation",
+  "schema_version": 1,
+  "capability": "workflow_doctor",
+  "authoritative": false,
+  "ok": true,
+  "status": "blocked",
+  "subject": {
+    "project_id": 23,
+    "project_name": "数码-桌面音响",
+    "account": "小博"
+  },
+  "blocked_by": ["voice_and_assembly"],
+  "checks": {
+    "script": {"status": "ready_for_downstream"},
+    "voice_and_assembly": {"status": "voice_incomplete"}
+  },
+  "issues": [
+    {"source": "assemble-plan", "code": "missing_voice_asset"}
+  ],
+  "suggestion": {
+    "action": "generate_voice",
+    "task": "补齐当前文案对应的配音"
+  },
+  "error": null
+}
