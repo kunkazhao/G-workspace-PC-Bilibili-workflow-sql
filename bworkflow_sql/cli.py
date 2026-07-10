@@ -139,8 +139,11 @@ def cmd_create_project(args: argparse.Namespace) -> None:
             "project": project,
             "scheme_product_count": len(products),
             "master": {
+                "snapshot_id": master.get("snapshot_id", ""),
+                "change_count": master.get("change_count", 0),
                 "added": len(master.get("added", [])),
                 "updated": len(master.get("updated", [])),
+                "reactivated": len(master.get("reactivated", [])),
                 "removed": len(master.get("removed", [])),
             }
             if master
@@ -180,6 +183,8 @@ def cmd_status(args: argparse.Namespace) -> None:
             "workspace_id": project.get("workspace_id", ""),
             "scheme_id": project.get("scheme_id", ""),
             "scheme_name": project.get("scheme_name", ""),
+            "master_snapshot_id": project.get("master_snapshot_id"),
+            "master_snapshot_applied_at": project.get("master_snapshot_applied_at"),
             "scheme_product_count": len(products),
         },
         "counts": {
@@ -212,8 +217,11 @@ def cmd_sync(args: argparse.Namespace) -> None:
     if args.step in (None, "master"):
         r = sync.sync_master_scheme(args.project_id)
         results["master"] = {
+            "snapshot_id": r.get("snapshot_id", ""),
+            "change_count": r.get("change_count", 0),
             "added": len(r.get("added", [])),
             "updated": len(r.get("updated", [])),
+            "reactivated": len(r.get("reactivated", [])),
             "removed": len(r.get("removed", [])),
         }
 

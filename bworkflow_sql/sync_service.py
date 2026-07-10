@@ -6,7 +6,13 @@ from typing import Any
 
 from .asset_paths import legacy_voice_user_dir, path_is_under, voice_user_dir
 from .db import Database, _script_id_slug
-from .master_data import MasterDataService
+from .master_contracts import MasterContractAdapter
+from .master_snapshot_sync import (
+    MasterSnapshotPlanError,
+    MasterSnapshotSyncPlan,
+    ProductChange,
+    plan_master_snapshot_sync,
+)
 from .md_parser import H3_RE, H4_RE, SCRIPT_ID_RE, SECTION_RE, ParsedMarkdown, parse_markdown_file, parse_product_heading
 from .repositories import Repository
 from .settings import DEFAULT_IMAGE_ROOT, DEFAULT_VIDEO_ROOT, DEFAULT_VOICE_ROOT
@@ -47,22 +53,66 @@ def _voice_text_label(block: dict[str, Any], length: int = 2) -> str:
     return text[:length]
 
 
-def _master_preview_product(item: dict[str, Any]) -> dict[str, Any]:
+class MasterSyncError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = dict(details or {})
+
+
+def _master_change_item(change: ProductChange) -> dict[str, Any]:
+    state = change.after or change.before
+    if state is None:
+        raise ValueError(f"Master 变化缺少商品状态：{change.uid}")
     return {
-        "uid": safe_text(item.get("uid")),
-        "title": safe_text(item.get("title")),
-        "price_label": safe_text(item.get("price_label")),
-        "master_item_id": safe_text(item.get("master_item_id")),
-        "sort_order": int(item.get("sort_order") or 0),
+        "uid": state.uid,
+        "title": state.title,
+        "price_label": state.price_label,
+        "master_item_id": state.master_item_id,
+        "sort_order": state.sort_order,
+        "changed_fields": list(change.changed_fields),
+    }
+
+
+def _master_plan_result(plan: MasterSnapshotSyncPlan) -> dict[str, Any]:
+    return {
+        "snapshot_id": plan.snapshot_id,
+        "change_count": plan.change_count,
+        "unchanged_count": len(plan.unchanged),
+        "added": [_master_change_item(change) for change in plan.added],
+        "updated": [_master_change_item(change) for change in plan.updated],
+        "removed": [_master_change_item(change) for change in plan.removed],
+        "reactivated": [
+            _master_change_item(change) for change in plan.reactivated
+        ],
     }
 
 
 class SyncService:
-    def __init__(self, db: Database):
+    def __init__(
+        self,
+        db: Database,
+        *,
+        master_contracts: MasterContractAdapter | None = None,
+    ):
         self.db = db
         self.repo = Repository(db)
+        self.master_contracts = master_contracts or MasterContractAdapter()
 
-    def sync_master_scheme(self, project_id: int, *, apply_changes: bool = True, force_refresh: bool = True) -> dict[str, Any]:
+    def sync_master_scheme(
+        self,
+        project_id: int,
+        *,
+        apply_changes: bool = True,
+        force_refresh: bool = True,
+        expected_snapshot_id: str | None = None,
+    ) -> dict[str, Any]:
         project = self.repo.project(project_id)
         if not project:
             raise ValueError("请先创建或选择品类项目。")
@@ -71,56 +121,36 @@ class SyncService:
         if not workspace_id or not scheme_id:
             raise ValueError("当前项目缺少 Master workspace_id 或 scheme_id。")
 
-        summary = MasterDataService().fetch_scheme_summary(workspace_id=workspace_id, scheme_id=scheme_id, force_refresh=force_refresh)
-        self._validate_scheme_matches_project(project, summary)
-        raw_items = summary.get("items") or []
-        products = []
-        for index, item in enumerate(raw_items, start=1):
-            if not isinstance(item, dict):
-                continue
-            source = item.get("item") if isinstance(item.get("item"), dict) else item
-            product_payload = {**item, **source}
-            uid = safe_text(source.get("uid") or item.get("uid"))
-            if not uid:
-                continue
-            product_payload.update(
-                {
-                    "uid": uid,
-                    "title": safe_text(source.get("title") or source.get("name") or item.get("title")),
-                    "price_label": safe_text(source.get("price_label") or source.get("price") or item.get("price")),
-                    "master_item_id": safe_text(source.get("id") or item.get("item_id") or item.get("id")),
-                    "sort_order": index,
-                }
-            )
-            products.append(product_payload)
-        if not apply_changes:
-            existing = {item["uid"]: item for item in self.repo.products(project_id)}
-            incoming = {item["uid"]: _master_preview_product(item) for item in products}
-            return {
-                "added": [item for uid, item in incoming.items() if uid not in existing],
-                "updated": [item for uid, item in incoming.items() if uid in existing and (existing[uid]["title"] != item["title"] or existing[uid]["price_label"] != item["price_label"])],
-                "removed": [item for uid, item in existing.items() if uid not in incoming and not int(item["removed_from_master"])],
-            }
-        result = self.repo.upsert_products_from_master(project_id, products)
-        self.db.log_event(
-            project_id,
-            "master_scheme_sync",
-            "success",
-            f"Master 方案同步完成：新增 {len(result['added'])}，更新 {len(result['updated'])}，移除 {len(result['removed'])}",
-            [
-                {"item_kind": "product", "uid": item.get("uid"), "title": item.get("title"), "status": "added", "message": "Master 新增"}
-                for item in result["added"]
-            ]
-            + [
-                {"item_kind": "product", "uid": item.get("uid"), "title": item.get("title"), "status": "updated", "message": "Master 信息变更"}
-                for item in result["updated"]
-            ]
-            + [
-                {"item_kind": "product", "uid": item.get("uid"), "title": item.get("title"), "status": "removed", "message": "已从 Master 方案移除"}
-                for item in result["removed"]
-            ],
+        snapshot = self.master_contracts.fetch_scheme_snapshot(
+            workspace_id,
+            scheme_id,
+            force_refresh=force_refresh,
         )
-        return result
+        expected = safe_text(expected_snapshot_id)
+        if expected and snapshot.snapshot_id != expected:
+            raise MasterSyncError(
+                "stale_master_preview",
+                "Master 方案在预览后已变化，请重新预览再同步。",
+                details={
+                    "expected_snapshot_id": expected,
+                    "actual_snapshot_id": snapshot.snapshot_id,
+                },
+            )
+        try:
+            plan = plan_master_snapshot_sync(
+                project,
+                self.repo.products(project_id),
+                snapshot,
+            )
+        except MasterSnapshotPlanError as error:
+            raise MasterSyncError(
+                error.code,
+                str(error),
+                details=error.details,
+            ) from error
+        if not apply_changes:
+            return _master_plan_result(plan)
+        return self.repo.apply_master_snapshot_plan(plan)
 
     def _validate_scheme_matches_project(self, project: dict[str, Any], summary: dict[str, Any]) -> None:
         project_category_id = safe_text(project.get("category_id"))

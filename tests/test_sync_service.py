@@ -1,11 +1,81 @@
 import json
 from pathlib import Path
 
+from bworkflow_sql import master_contracts as contracts
 from bworkflow_sql.db import Database
 from bworkflow_sql.md_parser import parse_markdown_text
 from bworkflow_sql.repositories import Repository
 from bworkflow_sql.sync_service import SyncService
 from bworkflow_sql.utils import text_hash
+
+
+class _FakeMasterContracts:
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
+        self.calls = []
+
+    def fetch_scheme_snapshot(self, workspace_id, scheme_id, *, force_refresh=False):
+        self.calls.append(
+            {
+                "workspace_id": workspace_id,
+                "scheme_id": scheme_id,
+                "force_refresh": force_refresh,
+            }
+        )
+        return self.snapshot
+
+
+def _master_snapshot(
+    *,
+    uid,
+    title,
+    price,
+    category_id="category-1",
+    category_name="键盘",
+    cover_url=None,
+    remark=None,
+    slots=(),
+):
+    return contracts.MasterSchemeSnapshot(
+        schema_version="1.0.0",
+        generated_at_utc="2026-07-10T12:00:00Z",
+        snapshot_id="sha256:" + "a" * 64,
+        workspace=contracts.MasterWorkspace(
+            id="workspace-1", name="赵二", slug="zhaoer"
+        ),
+        scheme=contracts.MasterSchemeIdentity(
+            id="scheme-1",
+            name="主方案",
+            category=contracts.MasterCategoryIdentity(
+                id=category_id, name=category_name
+            ),
+            updated_at=None,
+        ),
+        price_ranges=(),
+        products=(
+            contracts.MasterSnapshotProduct(
+                master_item_id=f"item-{uid}",
+                uid=uid,
+                title=title,
+                sort_order=1,
+                price=contracts.MasterMoney(
+                    amount=price.rstrip("元"),
+                    currency="CNY",
+                    source="base",
+                    display=price,
+                ),
+                card=contracts.MasterProductCard(
+                    cover_url=cover_url,
+                    remark=remark,
+                    spec_slots=tuple(slots),
+                    template_id=None,
+                ),
+                tags=(),
+                featured=False,
+                source_updated_at=None,
+            ),
+        ),
+    )
 
 
 def test_markdown_sync_only_imports_master_products(tmp_path: Path):
@@ -184,62 +254,66 @@ def test_sync_markdown_writes_missing_script_id_comments(tmp_path: Path):
     assert "<!-- script_id: product:JP071:V001 -->" in md_path.read_text(encoding="utf-8")
 
 
-def test_master_sync_forces_fresh_scheme_summary(tmp_path: Path, monkeypatch):
+def test_master_sync_forces_fresh_scheme_summary(tmp_path: Path):
     db = Database(tmp_path / "test.db")
     project_id = db.upsert_project(
         {
             "name": "keyboard",
             "workspace_id": "workspace-1",
+            "category_id": "category-1",
             "scheme_id": "scheme-1",
         }
     )
-    calls = []
+    adapter = _FakeMasterContracts(
+        _master_snapshot(uid="JP096", title="狼蛛F75Max 客制化", price="279元")
+    )
 
-    def fake_fetch_summary(self, *, workspace_id, scheme_id, force_refresh=False):
-        calls.append(
-            {
-                "workspace_id": workspace_id,
-                "scheme_id": scheme_id,
-                "force_refresh": force_refresh,
-            }
+    result = SyncService(db, master_contracts=adapter).sync_master_scheme(
+        project_id, apply_changes=False
+    )
+
+    assert adapter.calls == [{"workspace_id": "workspace-1", "scheme_id": "scheme-1", "force_refresh": True}]
+    assert result["added"][0] == {
+        "uid": "JP096",
+        "title": "狼蛛F75Max 客制化",
+        "price_label": "279元",
+        "master_item_id": "item-JP096",
+        "sort_order": 1,
+        "changed_fields": [
+            "uid",
+            "title",
+            "price_label",
+            "master_item_id",
+            "product_card_json",
+            "sort_order",
+            "active",
+            "removed_from_master",
+        ],
+    }
+
+
+def test_master_sync_preserves_product_card_fields(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    project_id = db.upsert_project(
+        {
+            "name": "keyboard",
+            "workspace_id": "workspace-1",
+            "category_id": "category-1",
+            "scheme_id": "scheme-1",
+        }
+    )
+    adapter = _FakeMasterContracts(
+        _master_snapshot(
+            uid="JP096",
+            title="Alpha Keyboard",
+            price="279",
+            cover_url="https://img.example.com/JP096.jpg",
+            remark="Stable connection.",
+            slots=(contracts.MasterSpecSlot(label="switch", value="silver"),),
         )
-        return {"items": [{"uid": "JP096", "title": "狼蛛F75Max 客制化", "price": "279元"}]}
-
-    monkeypatch.setattr("bworkflow_sql.master_data.MasterDataService.fetch_scheme_summary", fake_fetch_summary)
-
-    result = SyncService(db).sync_master_scheme(project_id, apply_changes=False)
-
-    assert calls == [{"workspace_id": "workspace-1", "scheme_id": "scheme-1", "force_refresh": True}]
-    assert result["added"] == [{"uid": "JP096", "title": "狼蛛F75Max 客制化", "price_label": "279元", "master_item_id": "", "sort_order": 1}]
-
-
-def test_master_sync_preserves_product_card_fields(tmp_path: Path, monkeypatch):
-    db = Database(tmp_path / "test.db")
-    project_id = db.upsert_project(
-        {
-            "name": "keyboard",
-            "workspace_id": "workspace-1",
-            "scheme_id": "scheme-1",
-        }
     )
 
-    def fake_fetch_summary(self, *, workspace_id, scheme_id, force_refresh=False):
-        return {
-            "items": [
-                {
-                    "uid": "JP096",
-                    "title": "Alpha Keyboard",
-                    "price": "279",
-                    "cover_url": "https://img.example.com/JP096.jpg",
-                    "remark": "Stable connection.",
-                    "spec": {"switch": "silver", "_internal": "ignored"},
-                }
-            ]
-        }
-
-    monkeypatch.setattr("bworkflow_sql.master_data.MasterDataService.fetch_scheme_summary", fake_fetch_summary)
-
-    result = SyncService(db).sync_master_scheme(project_id)
+    result = SyncService(db, master_contracts=adapter).sync_master_scheme(project_id)
     product = Repository(db).products(project_id)[0]
     card = json.loads(product["product_card_json"])
 
@@ -249,7 +323,7 @@ def test_master_sync_preserves_product_card_fields(tmp_path: Path, monkeypatch):
     assert card["slots"] == [{"label": "switch", "value": "silver"}]
 
 
-def test_master_sync_trusts_matching_category_id_when_names_are_aliases(tmp_path: Path, monkeypatch):
+def test_master_sync_trusts_matching_category_id_when_names_are_aliases(tmp_path: Path):
     db = Database(tmp_path / "test.db")
     project_id = db.upsert_project(
         {
@@ -263,18 +337,22 @@ def test_master_sync_trusts_matching_category_id_when_names_are_aliases(tmp_path
         }
     )
 
-    def fake_fetch_summary(self, *, workspace_id, scheme_id, force_refresh=False):
-        return {
-            "category_id": "category-1",
-            "category_name": "耳机-入耳",
-            "items": [{"uid": "EJ001", "title": "示例耳机", "price": "99元"}],
-        }
+    adapter = _FakeMasterContracts(
+        _master_snapshot(
+            uid="EJ001",
+            title="示例耳机",
+            price="99元",
+            category_id="category-1",
+            category_name="耳机-入耳",
+        )
+    )
 
-    monkeypatch.setattr("bworkflow_sql.master_data.MasterDataService.fetch_scheme_summary", fake_fetch_summary)
+    result = SyncService(db, master_contracts=adapter).sync_master_scheme(
+        project_id, apply_changes=False
+    )
 
-    result = SyncService(db).sync_master_scheme(project_id, apply_changes=False)
-
-    assert result["added"] == [{"uid": "EJ001", "title": "示例耳机", "price_label": "99元", "master_item_id": "", "sort_order": 1}]
+    assert result["added"][0]["uid"] == "EJ001"
+    assert result["added"][0]["price_label"] == "99元"
 
 
 def test_asset_sync_ignores_extra_files_and_reports_missing_scheme_products(tmp_path: Path):

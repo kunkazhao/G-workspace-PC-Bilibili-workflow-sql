@@ -10,6 +10,9 @@ from .utils import safe_text
 
 
 def is_master_connection_error(exc: BaseException) -> bool:
+    contract_code = getattr(exc, "code", None)
+    if isinstance(contract_code, str):
+        return contract_code == "master_unavailable"
     text = safe_text(exc)
     if "[WinError 10061]" in text or "由于目标计算机积极拒绝" in text:
         return True

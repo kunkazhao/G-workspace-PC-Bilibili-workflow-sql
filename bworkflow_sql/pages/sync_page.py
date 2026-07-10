@@ -262,6 +262,8 @@ class SyncPage(BasePage):
         self.user_var = ctk.StringVar(value="小燃")
         self.template_var = ctk.StringVar(value="")
         self.asset_paths: dict[str, str] = {}
+        self._master_apply_in_progress = False
+        self._pending_master_snapshot_id = ""
         self._build()
 
     def _build(self) -> None:
@@ -526,27 +528,58 @@ class SyncPage(BasePage):
         )
 
     def _confirm_and_sync_master(self, pid: int, preview: dict[str, Any]) -> None:
+        if self._master_apply_in_progress:
+            self.toast("Master 预览正在应用，请勿重复提交。", kind="warning")
+            return
+        snapshot_id = safe_text(preview.get("snapshot_id"))
+        if not snapshot_id:
+            messagebox.showerror(
+                "Master 预览无效",
+                "本次预览缺少 snapshot_id，请重新预览。",
+                parent=self,
+            )
+            return
         sections = [
             DialogSection(
                 title="变更统计",
                 step="1",
                 tone="primary",
                 rows=[
+                    ("Snapshot", snapshot_id),
                     ("新增", f"{len(preview['added'])} 个"),
                     ("更新", f"{len(preview['updated'])} 个"),
+                    ("恢复", f"{len(preview.get('reactivated') or [])} 个"),
                     ("移除", f"{len(preview['removed'])} 个"),
                 ],
             ),
             DialogSection(title="新增项目", step="2", tone="success", items=preview_lines([f"{item.get('uid', '')} {item.get('title', '')} {item.get('price_label', '')}".strip() for item in preview.get("added") or []])),
-            DialogSection(title="更新项目", step="3", tone="info", items=preview_lines([f"{item.get('uid', '')} {item.get('title', '')} {item.get('price_label', '')}".strip() for item in preview.get("updated") or []])),
-            DialogSection(title="移除项目", step="4", tone="warning", items=preview_lines([f"{item.get('uid', '')} {item.get('title', '')} {item.get('price_label', '')}".strip() for item in preview.get("removed") or []])),
+            DialogSection(title="更新项目", step="3", tone="info", items=preview_lines([f"{item.get('uid', '')} {item.get('title', '')} {item.get('price_label', '')} [{' / '.join(item.get('changed_fields') or [])}]".strip() for item in preview.get("updated") or []])),
+            DialogSection(title="恢复项目", step="4", tone="success", items=preview_lines([f"{item.get('uid', '')} {item.get('title', '')} {item.get('price_label', '')}".strip() for item in preview.get("reactivated") or []])),
+            DialogSection(title="移除项目", step="5", tone="warning", items=preview_lines([f"{item.get('uid', '')} {item.get('title', '')} {item.get('price_label', '')}".strip() for item in preview.get("removed") or []])),
         ]
         if not show_confirmation_dialog(self, "确认同步 Master", "请核对本次 Master 同步变更，确认无误后再继续。", sections, confirm_text="确认同步"):
             return
-        self.app.run_background("同步 Master",
-            lambda: self.sync.sync_master_scheme(pid, apply_changes=True),
-            on_success=lambda r: (self.toast(f"Master 已同步：新增 {len(r['added'])}，更新 {len(r['updated'])}，移除 {len(r['removed'])}"), self.refresh()),
-            show_success_toast=False)
+        self._pending_master_snapshot_id = snapshot_id
+        self._master_apply_in_progress = True
+        started = self.app.run_background(
+            "同步 Master",
+            lambda: self.sync.sync_master_scheme(
+                pid,
+                apply_changes=True,
+                expected_snapshot_id=snapshot_id,
+            ),
+            on_success=lambda r: (
+                self.toast(
+                    f"Master 已同步：新增 {len(r['added'])}，更新 {len(r['updated'])}，"
+                    f"恢复 {len(r.get('reactivated') or [])}，移除 {len(r['removed'])}"
+                ),
+                self.refresh(),
+            ),
+            on_done=lambda: setattr(self, "_master_apply_in_progress", False),
+            show_success_toast=False,
+        )
+        if not started:
+            self._master_apply_in_progress = False
 
     def _sync_md(self, trigger=None) -> None:
         project = self._current_project_or_warn()

@@ -1,7 +1,9 @@
 import inspect
+from types import SimpleNamespace
 
 from bworkflow_sql.components import HoverTooltip, restore_button_loading, set_button_loading
-from bworkflow_sql.pages.sync_page import SyncStatusCard
+from bworkflow_sql.pages import sync_page
+from bworkflow_sql.pages.sync_page import SyncPage, SyncStatusCard
 
 
 class FakeButton:
@@ -61,3 +63,58 @@ def test_sync_asset_path_box_has_full_path_hover_tooltip():
     source = inspect.getsource(SyncStatusCard.set_asset_rows)
 
     assert "add_hover_tooltip((path_box, path_label), path)" in source
+
+
+def test_master_apply_uses_preview_snapshot_id_and_blocks_double_apply(monkeypatch):
+    tasks = []
+    toasts = []
+
+    class FakeApp:
+        def run_background(self, title, work, **kwargs):
+            tasks.append((title, work, kwargs))
+            return True
+
+    class FakeSync:
+        def __init__(self):
+            self.calls = []
+
+        def sync_master_scheme(self, project_id, **kwargs):
+            self.calls.append((project_id, kwargs))
+            return {
+                "snapshot_id": kwargs["expected_snapshot_id"],
+                "added": [],
+                "updated": [],
+                "reactivated": [],
+                "removed": [],
+            }
+
+    page = SimpleNamespace(
+        app=FakeApp(),
+        sync=FakeSync(),
+        _master_apply_in_progress=False,
+        _pending_master_snapshot_id="",
+        toast=lambda message, **kwargs: toasts.append((message, kwargs)),
+        refresh=lambda: None,
+    )
+    monkeypatch.setattr(sync_page, "show_confirmation_dialog", lambda *_a, **_k: True)
+    preview = {
+        "snapshot_id": "sha256:" + "a" * 64,
+        "added": [],
+        "updated": [],
+        "reactivated": [],
+        "removed": [],
+    }
+
+    SyncPage._confirm_and_sync_master(page, 23, preview)
+    SyncPage._confirm_and_sync_master(page, 23, preview)
+
+    assert len(tasks) == 1
+    assert page._master_apply_in_progress is True
+    assert page._pending_master_snapshot_id == preview["snapshot_id"]
+    tasks[0][1]()
+    assert page.sync.calls == [
+        (23, {"apply_changes": True, "expected_snapshot_id": preview["snapshot_id"]})
+    ]
+    tasks[0][2]["on_done"]()
+    assert page._master_apply_in_progress is False
+    assert any("正在应用" in message for message, _kwargs in toasts)

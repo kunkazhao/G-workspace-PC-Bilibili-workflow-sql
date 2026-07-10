@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database
+from .master_contracts import MasterContractAdapter, MasterContractError
 from .md_parser import ProductDoc, parse_markdown_text
 from .repositories import Repository
 from .settings import DEFAULT_MARKDOWN_ROOT
@@ -23,9 +24,17 @@ DEFAULT_PRICE_RANGES: list[dict[str, Any]] = [
 
 
 class OutlineService:
-    def __init__(self, db: Database):
+    DEFAULT_PRICE_RANGES = DEFAULT_PRICE_RANGES
+
+    def __init__(
+        self,
+        db: Database,
+        *,
+        master_contracts: MasterContractAdapter | None = None,
+    ):
         self.db = db
         self.repo = Repository(db)
+        self.master_contracts = master_contracts or MasterContractAdapter()
 
     def default_markdown_path(self, project_id: int) -> Path:
         project = self.repo.project(project_id)
@@ -39,38 +48,29 @@ class OutlineService:
     def fetch_scheme_price_ranges(self, project: dict[str, Any]) -> list[dict[str, Any]]:
         """从 Master scheme 读取价格段（真源）。
 
-        优先用 script_generation_config.transitions（已从 blue_link_price_ranges 派生），
-        其次直接用 blue_link_price_ranges。读取失败时回退到 DEFAULT_PRICE_RANGES，
-        保证建文档流程不因网络问题中断。
+        只读取 v1 snapshot.price_ranges。仅传输不可用时回退默认价格段；
+        契约损坏和版本不兼容必须显式报错。
         """
-        from .master_data import MasterDataService
-
         workspace_id = safe_text(project.get("workspace_id"))
         scheme_id = safe_text(project.get("scheme_id"))
         if not workspace_id or not scheme_id:
-            logger.warning("项目缺少 workspace_id/scheme_id，价格段使用缺省值")
-            return [dict(item) for item in DEFAULT_PRICE_RANGES]
+            raise ValueError("当前项目缺少 Master workspace_id 或 scheme_id。")
         try:
-            summary = MasterDataService().fetch_scheme_summary(
-                workspace_id=workspace_id, scheme_id=scheme_id, force_refresh=True
+            snapshot = self.master_contracts.fetch_scheme_snapshot(
+                workspace_id,
+                scheme_id,
+                force_refresh=True,
             )
-        except Exception as exc:  # noqa: BLE001 — 网络/接口异常都兜底，不阻断建文档
-            logger.warning("读取 Master 价格段失败，使用缺省值：%s", exc)
+        except MasterContractError as exc:
+            if exc.code != "master_unavailable":
+                raise
+            logger.warning("Master 暂不可用，价格段使用缺省值：%s", exc)
             return [dict(item) for item in DEFAULT_PRICE_RANGES]
 
-        config = summary.get("script_generation_config")
-        rows: list[Any] = []
-        if isinstance(config, dict) and isinstance(config.get("transitions"), list):
-            rows = config["transitions"]
-        if not rows and isinstance(summary.get("blue_link_price_ranges"), list):
-            rows = summary["blue_link_price_ranges"]
-
-        ranges = [
-            {"min": r.get("min"), "max": r.get("max")}
-            for r in rows
-            if isinstance(r, dict)
+        return [
+            {"min": item.min_amount, "max": item.max_amount}
+            for item in snapshot.price_ranges
         ]
-        return ranges or [dict(item) for item in DEFAULT_PRICE_RANGES]
 
     def init_or_update_outline(self, project_id: int, target_path: str | Path | None = None) -> dict[str, Any]:
         project = self.repo.project(project_id)
@@ -140,7 +140,11 @@ class OutlineService:
                 lines.extend(render_product_body(product))
                 lines.append("")
 
-        scheme_ranges = self.fetch_scheme_price_ranges(project)
+        scheme_ranges = (
+            None
+            if parsed and parsed.price_transitions
+            else self.fetch_scheme_price_ranges(project)
+        )
         lines += render_price_transitions(parsed.price_transitions if parsed else [], scheme_ranges)
         if parsed:
             for title, section_lines in parsed.extra_sections.items():
@@ -212,7 +216,11 @@ def render_price_transitions(transitions: list[Any], scheme_ranges: list[dict[st
                 lines += [f"#### {script.label}", script.body, ""]
         return lines
     # 新建：价格段从 Master scheme 派生，不再硬编码。
-    ranges = scheme_ranges or [dict(item) for item in DEFAULT_PRICE_RANGES]
+    ranges = (
+        [dict(item) for item in DEFAULT_PRICE_RANGES]
+        if scheme_ranges is None
+        else scheme_ranges
+    )
     for r in ranges:
         label = format_price_range_label(r.get("min"), r.get("max"))
         lines += [f"### {label}", "", "#### 正文1", "", ""]

@@ -1,5 +1,6 @@
 import subprocess
 
+from bworkflow_sql.master_contracts import MasterContractError
 from bworkflow_sql.master_service import MasterServiceManager, is_master_connection_error
 
 
@@ -7,6 +8,15 @@ def test_master_connection_error_detects_wrapped_winerror_message():
     exc = RuntimeError("无法连接 master 方案接口: <urlopen error [WinError 10061] 由于目标计算机积极拒绝，无法连接。>")
 
     assert is_master_connection_error(exc)
+
+
+def test_master_connection_error_only_accepts_typed_unavailable_contract_error():
+    assert is_master_connection_error(
+        MasterContractError("master_unavailable", "offline", retryable=True)
+    )
+    assert not is_master_connection_error(
+        MasterContractError("invalid_master_contract", "broken payload")
+    )
 
 
 def test_master_service_start_uses_backend_main(tmp_path, monkeypatch):
