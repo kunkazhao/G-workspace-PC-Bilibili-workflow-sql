@@ -387,6 +387,49 @@ def test_regenerate_product_card_images_creates_missing_account_binding(
     assert segment["productCard"]["templateId"] == "muban-xiaobo-1"
 
 
+def test_regenerate_product_card_images_uses_cutme_adapter_by_default(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.product_image_generation as product_images
+
+    db, project_id, image_path = _seed_project_with_stale_image(tmp_path)
+    monkeypatch.setattr(product_images, "PRODUCT_IMAGE_RENDER_JOB_ROOT", tmp_path / "jobs")
+    calls: list[tuple[Path, str, Path]] = []
+
+    class FakeCutMeAdapter:
+        def render_product_card(
+            self,
+            package_path: Path,
+            *,
+            product_uid: str,
+            output_path: Path,
+        ) -> dict:
+            calls.append((package_path, product_uid, output_path))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"adapter image")
+            return {"ok": True, "artifacts": {"output_path": str(output_path)}}
+
+    monkeypatch.setattr(product_images, "CutMeAdapter", FakeCutMeAdapter)
+
+    result = regenerate_product_card_images(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        mode="all",
+        product_uid="P001",
+        product_card_template_id="muban-xiaobo-1",
+    )
+
+    assert result["regenerated"][0]["path"] == str(image_path)
+    assert len(calls) == 1
+    package_path, product_uid, output_path = calls[0]
+    assert product_uid == "P001"
+    assert output_path == image_path
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    assert package["output"]["mode"] == "product_card_still"
+
+
 def test_product_card_fingerprint_changes_when_template_version_changes() -> None:
     product = {"uid": "P001", "title": "Demo", "price_label": "199"}
     product_card = {

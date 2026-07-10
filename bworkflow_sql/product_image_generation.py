@@ -1,28 +1,25 @@
 from __future__ import annotations
 
 import json
-import platform
 import re
 import shutil
-import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable
 
 from .asset_paths import project_category_folder
+from .cutme_adapter import CutMeAdapter
 from .db import Database
 from .render_package_builder import (
     product_card_content_fingerprint,
     product_card_payload_for_product,
 )
 from .repositories import Repository
-from .settings import CUTME_ROOT, DEFAULT_IMAGE_ROOT, INTERNAL_WORKSPACE_ROOT
+from .settings import DEFAULT_IMAGE_ROOT, INTERNAL_WORKSPACE_ROOT
 from .template_config import available_templates, image_set_for_template, resolve_product_card_template
 from .utils import file_metadata, now_iso, safe_text
 
 PRODUCT_IMAGE_RENDER_JOB_ROOT = INTERNAL_WORKSPACE_ROOT / "product-image-jobs"
-PRODUCT_IMAGE_RENDER_TIMEOUT = 180
-_NPM = "npm.cmd" if platform.system() == "Windows" else "npm"
 
 ProductCardStillRenderer = Callable[[Path, str, Path], Path]
 
@@ -47,7 +44,17 @@ def regenerate_product_card_images(
     if not project:
         raise ValueError(f"project does not exist: {project_id}")
 
-    renderer = render_product_card_still or render_product_card_still_via_cutme
+    renderer = render_product_card_still
+    if renderer is None:
+        cutme = CutMeAdapter()
+
+        def renderer(package_path: Path, product_uid: str, output_path: Path) -> Path:
+            cutme.render_product_card(
+                package_path,
+                product_uid=product_uid,
+                output_path=output_path,
+            )
+            return output_path
     selected_template = resolve_product_card_template(
         account_label,
         product_card_template_id,
@@ -173,48 +180,6 @@ def regenerate_product_card_images(
         "regenerated": regenerated,
         "skipped": skipped,
     }
-
-
-def render_product_card_still_via_cutme(
-    package_path: Path,
-    product_uid: str,
-    output_path: Path,
-) -> Path:
-    renderer_root = CUTME_ROOT / "remotion-renderer"
-    command = [
-        _NPM,
-        "run",
-        "product-card:job",
-        "--",
-        "--package-path",
-        str(package_path),
-        "--product-uid",
-        product_uid,
-        "--out",
-        str(output_path),
-    ]
-    try:
-        result = subprocess.run(
-            command,
-            cwd=str(renderer_root),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=PRODUCT_IMAGE_RENDER_TIMEOUT,
-        )
-    except FileNotFoundError:
-        raise FileNotFoundError("npm is not installed or not on PATH") from None
-    except subprocess.TimeoutExpired:
-        raise TimeoutError(f"product card still render timed out after {PRODUCT_IMAGE_RENDER_TIMEOUT}s") from None
-    if result.returncode != 0:
-        details = "\n".join(
-            item for item in [result.stdout.strip(), result.stderr.strip()] if item
-        )
-        raise RuntimeError(details or f"product card still render failed: {result.returncode}")
-    if not output_path.is_file():
-        raise RuntimeError(f"product card still render did not create output: {output_path}")
-    return output_path
 
 
 def _ready_image_asset(
