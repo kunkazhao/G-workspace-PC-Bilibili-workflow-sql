@@ -5,6 +5,8 @@ import re
 import struct
 import wave
 
+import pytest
+
 from bworkflow_sql.db import Database
 from bworkflow_sql.md_parser import parse_markdown_text
 from bworkflow_sql.repositories import Repository
@@ -1145,6 +1147,51 @@ def test_assembly_writes_reader_friendly_spoken_markdown_without_repeated_price_
     assert text.count(price_body) == 1
     assert second_body in text
     assert text.rstrip().endswith(DEFAULT_CLOSING_TEXT)
+
+
+def test_assembly_rejects_reusable_asset_markdown_as_output(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    asset_path = tmp_path / "product-copy-library.md"
+    asset_path.write_text("ASSET COPY SENTINEL\n", encoding="utf-8")
+    db.execute("UPDATE projects SET md_path=? WHERE id=?", (str(asset_path), project_id))
+
+    with pytest.raises(ValueError, match="reusable asset Markdown"):
+        service.assemble_spoken_script(
+            project_id,
+            account_label="小燃",
+            output_markdown_path=asset_path,
+        )
+
+    assert asset_path.read_text(encoding="utf-8") == "ASSET COPY SENTINEL\n"
+
+
+def test_explicit_product_uids_preserve_exact_assembly_order(tmp_path: Path, monkeypatch):
+    db, project_id = seed_project(tmp_path)
+    repo = Repository(db)
+    service = WorkflowService(db)
+    repo.upsert_products_from_master(
+        project_id,
+        [
+            {"uid": "YXEJ002", "title": "Product One", "price_label": "59元"},
+            {"uid": "YXEJ003", "title": "Product Two", "price_label": "79元"},
+        ],
+    )
+    monkeypatch.setattr(
+        service,
+        "_products_in_price_segment_shuffle_order",
+        lambda products, _price_blocks: list(reversed(products)),
+    )
+
+    products = service._ordered_products(
+        project_id,
+        mode="standard",
+        top_uids=[],
+        product_uids=["YXEJ002", "YXEJ003"],
+        product_order_strategy="price_segment_shuffle",
+    )
+
+    assert [product["uid"] for product in products] == ["YXEJ002", "YXEJ003"]
 
 
 def test_assembly_randomly_selects_one_product_and_price_version(tmp_path: Path, monkeypatch):

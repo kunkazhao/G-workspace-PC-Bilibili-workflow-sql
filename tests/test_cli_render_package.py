@@ -219,15 +219,12 @@ def test_materialize_episode_parser_registers_command():
             "3",
             "--library-path",
             "library.md",
-            "--episode-path",
-            "episode.md",
         ]
     )
 
     assert args.command == "materialize-episode"
     assert args.project_id == 3
     assert args.library_path == "library.md"
-    assert args.episode_path == "episode.md"
 
 
 def test_workflow_doctor_parser_registers_command():
@@ -300,6 +297,8 @@ def test_assemble_plan_parser_registers_ordering_options():
             "top",
             "--top-uids",
             "P003,P001",
+            "--product-uids",
+            "P003,P001,P002",
             "--product-order-strategy",
             "stable",
         ]
@@ -311,6 +310,7 @@ def test_assemble_plan_parser_registers_ordering_options():
     assert args.intro_index == 2
     assert args.mode == "top"
     assert args.top_uids == "P003,P001"
+    assert args.product_uids == "P003,P001,P002"
     assert args.product_order_strategy == "stable"
 
 
@@ -327,6 +327,8 @@ def test_assemble_parser_registers_ordering_options():
             "top",
             "--top-uids",
             "P003,P001",
+            "--product-uids",
+            "P003,P001,P002",
             "--product-order-strategy",
             "stable",
             "--output",
@@ -340,6 +342,7 @@ def test_assemble_parser_registers_ordering_options():
     assert args.intro_index == 2
     assert args.mode == "top"
     assert args.top_uids == "P003,P001"
+    assert args.product_uids == "P003,P001,P002"
     assert args.product_order_strategy == "stable"
     assert args.output == "spoken.md"
 
@@ -660,12 +663,11 @@ def test_cmd_materialize_episode_writes_result_json(capsys, monkeypatch):
     calls: list[dict[str, object]] = []
 
     class FakeWorkflow:
-        def materialize_episode_markdown(self, project_id, *, library_path, episode_path):
+        def materialize_episode_markdown(self, project_id, *, library_path):
             calls.append(
                 {
                     "project_id": project_id,
                     "library_path": library_path,
-                    "episode_path": episode_path,
                 }
             )
             return {
@@ -681,7 +683,6 @@ def test_cmd_materialize_episode_writes_result_json(capsys, monkeypatch):
         Namespace(
             project_id=3,
             library_path="library.md",
-            episode_path="episode.md",
         )
     )
 
@@ -692,7 +693,6 @@ def test_cmd_materialize_episode_writes_result_json(capsys, monkeypatch):
         {
             "project_id": 3,
             "library_path": "library.md",
-            "episode_path": "episode.md",
         }
     ]
 
@@ -892,6 +892,7 @@ def test_cmd_assemble_plan_writes_preview_json(capsys, monkeypatch):
             intro_index,
             mode,
             top_uids,
+            product_uids,
             product_order_strategy,
         ):
             calls.append(
@@ -916,6 +917,7 @@ def test_cmd_assemble_plan_writes_preview_json(capsys, monkeypatch):
             intro_index=2,
             mode="top",
             top_uids="P003,P001",
+            product_uids="P003,P001,P002",
             product_order_strategy="stable",
         )
     )

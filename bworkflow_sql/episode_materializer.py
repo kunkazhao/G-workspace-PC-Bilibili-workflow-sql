@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database
-from .markdown_paths import project_asset_markdown_path
+from .markdown_paths import ensure_markdown_write_target, project_asset_markdown_path
 from .md_parser import ParsedMarkdown, ProductDoc, ScriptVariant, parse_markdown_file
 from .outline_service import format_product_heading, render_price_transitions, render_product_body
 from .repositories import Repository
@@ -18,7 +18,6 @@ def materialize_episode_markdown(
     *,
     project_id: int,
     library_path: str | Path | None = None,
-    episode_path: str | Path | None = None,
 ) -> dict[str, Any]:
     repo = Repository(db)
     project = repo.project(project_id)
@@ -31,9 +30,10 @@ def materialize_episode_markdown(
     source_path = Path(library_path) if library_path else _product_copy_library_path(project)
     if not source_path.is_file():
         raise FileNotFoundError(f"product copy library does not exist: {source_path}")
-    target_path = Path(episode_path) if episode_path else project_asset_markdown_path(project)[0]
+    target_path = project_asset_markdown_path(project)[0]
     if not safe_text(str(target_path)):
-        raise ValueError("project has no episode Markdown path")
+        raise ValueError("project has no asset Markdown path")
+    target_path = ensure_markdown_write_target(project, target_path, artifact_kind="asset")
 
     library = parse_markdown_file(source_path)
     existing = parse_markdown_file(target_path) if target_path.is_file() else None

@@ -141,6 +141,7 @@ from .product_image_generation import regenerate_product_card_images
 from .template_doctor import diagnose_template_flow
 from .script_doctor import diagnose_script_flow
 from .episode_materializer import materialize_episode_markdown
+from .markdown_paths import ensure_markdown_write_target
 
 
 INTERNAL_PREFIX = "internal:"
@@ -767,13 +768,11 @@ class WorkflowService:
         project_id: int,
         *,
         library_path: str | Path | None = None,
-        episode_path: str | Path | None = None,
     ) -> dict[str, Any]:
         return materialize_episode_markdown(
             self.db,
             project_id=project_id,
             library_path=library_path,
-            episode_path=episode_path,
         )
 
     def template_calibration_probe(
@@ -1416,6 +1415,7 @@ class WorkflowService:
             intro_index=intro_index,
             mode=mode,
             top_uids=top_uid_list,
+            product_uids=product_uid_list,
             product_order_strategy=order_strategy,
         )
         return {
@@ -1973,6 +1973,7 @@ class WorkflowService:
         path = Path(path_text)
         if path.suffix.casefold() != ".md":
             raise ValueError("口播稿输出文件必须是 .md 文档。")
+        path = ensure_markdown_write_target(project, path, artifact_kind="spoken")
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -2475,11 +2476,14 @@ class WorkflowService:
         product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
     ) -> list[dict[str, Any]]:
         products = self.repo.products(project_id, include_removed=False)
-        selected = {uid.casefold() for uid in product_uids}
-        if selected:
-            products = [product for product in products if product["uid"].casefold() in selected]
+        explicit_rank = {uid.casefold(): index for index, uid in enumerate(product_uids)}
+        if explicit_rank:
+            products = sorted(
+                (product for product in products if product["uid"].casefold() in explicit_rank),
+                key=lambda product: explicit_rank[product["uid"].casefold()],
+            )
         order_strategy = self._validate_product_order_strategy(product_order_strategy)
-        if order_strategy == "price_segment_shuffle":
+        if order_strategy == "price_segment_shuffle" and not explicit_rank:
             price_blocks = [block for block in self.repo.script_blocks(project_id) if block["script_type"] == "price_transition"]
             if _has_matching_price_groups(products, price_blocks):
                 products = self._products_in_price_segment_shuffle_order(products, price_blocks)
@@ -2528,6 +2532,7 @@ class WorkflowService:
         intro_index: int,
         mode: str,
         top_uids: list[str],
+        product_uids: list[str],
         product_order_strategy: str,
     ) -> str:
         parts = [
@@ -2547,6 +2552,8 @@ class WorkflowService:
         ]
         if top_uids:
             parts.extend(["--top-uids", ",".join(top_uids)])
+        if product_uids:
+            parts.extend(["--product-uids", ",".join(product_uids)])
         return " ".join(parts)
 
     def _voice_scope_fragment(self, project: dict[str, Any], account_label: str) -> str:

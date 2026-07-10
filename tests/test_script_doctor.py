@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from bworkflow_sql.db import Database
 from bworkflow_sql.repositories import Repository
 from bworkflow_sql.script_doctor import diagnose_script_flow
@@ -341,6 +343,39 @@ Beta 复用文案。
     assert "## 商品文案" in text
     assert "## 价格过渡文案" in text
     assert db.fetchall("SELECT * FROM script_blocks WHERE project_id=?", (project_id,)) == []
+
+
+def test_materialize_episode_markdown_rejects_final_spoken_output_path(tmp_path: Path):
+    db, project_id, md_path = _seed_project(tmp_path)
+    spoken_path = tmp_path / "final-spoken.md"
+    spoken_path.write_text("FINAL SPOKEN SENTINEL\n", encoding="utf-8")
+    db.execute(
+        "UPDATE projects SET md_path=?, spoken_md_path=? WHERE id=?",
+        (str(spoken_path), str(spoken_path), project_id),
+    )
+    library_path = tmp_path / "library.md"
+    library_path.write_text(
+        """
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha 复用文案。
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="final spoken Markdown"):
+        materialize_episode_markdown(
+            db,
+            project_id=project_id,
+            library_path=library_path,
+        )
+
+    assert spoken_path.read_text(encoding="utf-8") == "FINAL SPOKEN SENTINEL\n"
+    assert not md_path.exists()
 
 
 def test_materialize_episode_markdown_copies_reusable_price_transitions(tmp_path: Path):

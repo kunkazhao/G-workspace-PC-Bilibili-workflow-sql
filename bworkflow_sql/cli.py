@@ -297,6 +297,7 @@ def cmd_assemble(args: argparse.Namespace) -> None:
         intro_index=args.intro_index,
         mode=args.mode,
         top_uids=args.top_uids,
+        product_uids=args.product_uids,
         product_order_strategy=args.product_order_strategy,
         output_markdown_path=args.output or None,
         display_template=args.display_template or "",
@@ -321,6 +322,7 @@ def cmd_assemble_plan(args: argparse.Namespace) -> None:
         intro_index=args.intro_index,
         mode=args.mode,
         top_uids=args.top_uids,
+        product_uids=args.product_uids,
         product_order_strategy=args.product_order_strategy,
     )
     _json_out(result)
@@ -715,7 +717,6 @@ def cmd_materialize_episode(args: argparse.Namespace) -> None:
     result = wf.materialize_episode_markdown(
         project_id=args.project_id,
         library_path=args.library_path or None,
-        episode_path=args.episode_path or None,
     )
     _json_out(result)
 
@@ -775,7 +776,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--category-name", required=True)
     p.add_argument("--scheme-id", required=True)
     p.add_argument("--scheme-name", required=True)
-    p.add_argument("--md-path", default="", help="绑定的口播 Markdown 路径")
+    p.add_argument("--md-path", default="", help="绑定的可复用商品文案资产 Markdown 路径")
     p.add_argument("--sync-master", action="store_true", help="创建后立即同步 Master 方案商品")
 
     # status
@@ -808,6 +809,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--display-template", default="")
     p.add_argument("--mode", choices=["standard", "top"], default="standard")
     p.add_argument("--top-uids", default="", help="comma-separated product UIDs pinned to the top")
+    p.add_argument("--product-uids", default="", help="comma-separated complete product order; disables reshuffling")
     p.add_argument("--product-order-strategy", choices=["price_segment_shuffle", "stable"], default="price_segment_shuffle")
 
     p = sub.add_parser("assemble-plan", help="Preview spoken-script assembly without writing files")
@@ -816,6 +818,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--intro-index", type=int, default=1, help="intro version index, 1-based")
     p.add_argument("--mode", choices=["standard", "top"], default="standard")
     p.add_argument("--top-uids", default="", help="comma-separated product UIDs pinned to the top")
+    p.add_argument("--product-uids", default="", help="comma-separated complete product order; disables reshuffling")
     p.add_argument("--product-order-strategy", choices=["price_segment_shuffle", "stable"], default="price_segment_shuffle")
 
     # jianying
@@ -1083,10 +1086,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="product media mode for template diagnostics",
     )
 
-    p = sub.add_parser("materialize-episode", help="Materialize reusable product copy into the current episode Markdown")
+    p = sub.add_parser("materialize-episode", help="Normalize reusable copy into the project's asset Markdown")
     p.add_argument("project_id", type=int)
     p.add_argument("--library-path", default="", help="override reusable product-copy library Markdown path")
-    p.add_argument("--episode-path", default="", help="override target episode Markdown path")
 
     return parser
 

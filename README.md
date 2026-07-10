@@ -156,6 +156,9 @@ Output rules:
 
 - `商品文案 MD` is the source copy document.
 - `口播稿输出 MD` is selected in the `组合口播稿` workflow. It is the final combined spoken script, and the assembly step overwrites the whole file.
+- The two Markdown roles have exclusive writers: `materialize-episode` may update only the reusable asset Markdown, while `assemble` may update only the final spoken-script Markdown. Either command rejects the other role's path.
+- `materialize-episode` has no target-path override. Its target comes from the project's canonical asset Markdown binding; `--episode-path` is not supported.
+- `assemble-plan` and `assemble` accept `--product-uids UID1,UID2,...` when an exact previously recorded product order must be reproduced. An explicit complete order disables price-segment reshuffling while retaining normal price-transition insertion and `--top-uids` semantics.
 - The spoken script manifest is an internal task file under `data/workspace/project-<id>/manifests/`.
 - Internal generated files are kept under `data/workspace`.
 - Jianying drafts are written to `E:\剪辑-剪映\草稿\JianyingPro Drafts`.
