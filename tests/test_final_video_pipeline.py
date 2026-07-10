@@ -221,7 +221,7 @@ def test_run_final_video_pipeline_cutme_failure_stops_before_post_processing_or_
     assert not (workspace / "project-23" / "runs").exists()
 
 
-def test_run_final_video_pipeline_concat_failure_does_not_rerun_cutme(
+def test_run_final_video_pipeline_puts_intro_in_package_without_outer_concat(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -239,11 +239,14 @@ def test_run_final_video_pipeline_concat_failure_does_not_rerun_cutme(
     )
     intro_mp4.write_bytes(b"intro")
 
+    prepared = {}
+
     class FakeWorkflow:
         def regenerate_product_card_images(self, *args, **kwargs):
             return {"ok": True, "regenerated": [], "skipped": []}
 
         def prepare_product_recommendation_output(self, *args, **kwargs):
+            prepared.update(kwargs)
             return {"ok": True, "package_path": str(package_path), "next": {}}
 
     class FakeCutMeAdapter:
@@ -269,28 +272,29 @@ def test_run_final_video_pipeline_concat_failure_does_not_rerun_cutme(
     adapter = FakeCutMeAdapter()
 
     def fail_concat(command, *, cwd, timeout):
-        if "-filter_complex" in command:
-            raise RuntimeError("concat failed")
         raise AssertionError(f"unexpected command: {command}")
 
-    with pytest.raises(RuntimeError, match="concat failed"):
-        run_final_video_pipeline(
-            FakeWorkflow(),
-            project_id=23,
-            account_label="小博",
-            package_output_path=package_path,
-            output_path=product_mp4,
-            intro_video_path=intro_mp4,
-            intro_video_text="引言字幕",
-            full_output_path=full_mp4,
-            acceptance_mode="none",
-            cutme_root=tmp_path,
-            cutme_adapter=adapter,
-            runner=fail_concat,
-            probe_video=lambda path: {"duration": 1.0},
-        )
+    result = run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=23,
+        account_label="小博",
+        package_output_path=package_path,
+        output_path=product_mp4,
+        intro_video_path=intro_mp4,
+        intro_video_text="引言字幕",
+        full_output_path=full_mp4,
+        acceptance_mode="none",
+        cutme_root=tmp_path,
+        cutme_adapter=adapter,
+        runner=fail_concat,
+        probe_video=lambda path: {"duration": 1.0},
+    )
 
     assert adapter.calls == 1
+    assert prepared["intro_video_path"] == str(intro_mp4)
+    assert prepared["intro_video_text"] == "引言字幕"
+    assert prepared["include_outro"] is True
+    assert result["cutme"]["concat_intro"] is None
     assert product_mp4.is_file()
     assert not full_mp4.exists()
 
@@ -349,6 +353,10 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             product_card_template_id,
             package_output_path,
             subtitle_alignment,
+            intro_video_path=None,
+            intro_video_text="",
+            include_outro=False,
+            closing_text="",
         ):
             calls.append(
                 (
@@ -431,7 +439,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             "",
             "muban-xiaobo-1",
             str(package_path),
-            "proportional",
+            "asr",
         ),
     ]
     assert result["verification"]["ffprobe"]["duration"] == 10.0
@@ -460,7 +468,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
     assert len(package_fingerprint["sha256"]) == 64
 
 
-def test_run_final_video_pipeline_concats_intro_video_into_full_mp4_with_quick_acceptance(tmp_path: Path):
+def test_run_final_video_pipeline_renders_intro_and_outro_in_one_mp4_with_quick_acceptance(tmp_path: Path):
     calls: list[object] = []
     package_path = tmp_path / "render-package.json"
     job_package_path = tmp_path / "job" / "render-package.json"
@@ -511,6 +519,7 @@ def test_run_final_video_pipeline_concats_intro_video_into_full_mp4_with_quick_a
         package_output_path=package_path,
         output_path=product_mp4,
         intro_video_path=intro_mp4,
+        intro_video_text="引言口播文字",
         full_output_path=full_mp4,
         acceptance_mode="quick",
         mode="top",
@@ -522,27 +531,24 @@ def test_run_final_video_pipeline_concats_intro_video_into_full_mp4_with_quick_a
     )
 
     assert result["ok"] is True
-    assert result["output_mp4"] == str(product_mp4)
+    assert result["output_mp4"] == str(full_mp4)
     assert result["full_output_mp4"] == str(full_mp4)
     assert result["full_output_mp4_link"] == f"[打开完整 MP4]({full_mp4.as_posix()})"
     assert result["acceptance_mode"] == "quick"
     assert result["verification"]["loudnorm"] is None
     assert result["verification"]["full_ffprobe"]["path"] == str(full_mp4)
     concat_commands = [item[1] for item in calls if item[0] == "run" and "-filter_complex" in item[1]]
-    assert len(concat_commands) == 1
-    concat_text = " ".join(concat_commands[0])
-    assert "loudnorm=I=-11:TP=-1:LRA=11,aresample=48000" in concat_text
-    assert "-ar 48000" in concat_text
+    assert concat_commands == []
     assert result["price_transition_report"]["count"] == 1
     assert result["price_transition_report"]["items"][0]["position"] == 2
     assert result["price_transition_report"]["items"][0]["after_top_products"] == 1
-    assert result["intro_subtitles"]["source"] == "embedded_intro_mp4"
+    assert result["intro_subtitles"]["source"] == "render_package_asr"
     manifest_path = Path(result["run_manifest_path"])
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["outputs"]["product_mp4"] == str(product_mp4)
+    assert manifest["outputs"]["product_mp4"] == str(full_mp4)
     assert manifest["outputs"]["full_mp4"] == str(full_mp4)
     assert manifest["inputs"]["intro_video_path"] == str(intro_mp4.resolve())
-    assert manifest["inputs"]["intro_subtitles"]["source"] == "embedded_intro_mp4"
+    assert manifest["inputs"]["intro_subtitles"]["source"] == "render_package_asr"
     assert manifest["selection"]["mode"] == "top"
     assert manifest["selection"]["top_uids"] == ["P001"]
     assert manifest["reports"]["price_transition_report"]["items"][0]["after_top_products"] == 1
@@ -611,6 +617,7 @@ def test_run_final_video_pipeline_delivery_dir_keeps_mp4s_at_root_and_evidence_i
         account_label="小博",
         delivery_dir=delivery_dir,
         intro_video_path=intro_mp4,
+        intro_video_text="引言口播文字",
         acceptance_mode="visual",
         cutme_root=tmp_path,
         runner=fake_runner,
@@ -618,18 +625,18 @@ def test_run_final_video_pipeline_delivery_dir_keeps_mp4s_at_root_and_evidence_i
         measure_loudness=lambda path: {"output_i": "-11.0"},
     )
 
-    assert result["output_mp4"] == str(captured["product_mp4"])
+    assert result["output_mp4"] == str(captured["full_mp4"])
     assert result["full_output_mp4"] == str(captured["full_mp4"])
     assert result["package_path"] == str(package_path)
     assert result["delivery"]["dir"] == str(delivery_dir)
     assert result["delivery"]["evidence_dir"] == str(captured["evidence_dir"])
     assert result["delivery"]["process_dir"] == str(captured["process_dir"])
     assert all(Path(frame["path"]).parent == captured["frames_dir"] for frame in result["frames"])
-    assert captured["product_mp4"].is_file()
+    assert not captured["product_mp4"].exists()
     assert captured["full_mp4"].is_file()
     assert not (delivery_dir / "01_最终成片").exists()
     manifest = json.loads(Path(result["run_manifest_path"]).read_text(encoding="utf-8"))
-    assert manifest["outputs"]["product_mp4"] == str(captured["product_mp4"])
+    assert manifest["outputs"]["product_mp4"] == str(captured["full_mp4"])
     assert manifest["outputs"]["full_mp4"] == str(captured["full_mp4"])
     assert manifest["delivery"]["dir"] == str(delivery_dir)
     assert manifest["delivery"]["evidence_dir"] == str(captured["evidence_dir"])
@@ -672,8 +679,9 @@ def test_run_final_video_pipeline_passes_asr_subtitle_alignment_to_package_build
     assert captured["subtitle_alignment"] == "asr"
 
 
-def test_run_final_video_pipeline_burns_intro_subtitles_before_concat(tmp_path: Path):
+def test_run_final_video_pipeline_routes_intro_text_into_render_package(tmp_path: Path):
     calls: list[list[str]] = []
+    prepared = {}
     package_path = tmp_path / "render-package.json"
     job_package_path = tmp_path / "job" / "render-package.json"
     product_mp4 = tmp_path / "product.mp4"
@@ -714,14 +722,11 @@ def test_run_final_video_pipeline_burns_intro_subtitles_before_concat(tmp_path: 
         measure_loudness=lambda path: {"output_i": "-11.0"},
     )
 
-    concat_command = next(command for command in calls if "-filter_complex" in command and str(full_mp4) in command)
-    filter_complex = concat_command[concat_command.index("-filter_complex") + 1]
-    assert "subtitles=" in filter_complex
-    assert "intro-subtitles" in filter_complex
-    assert (tmp_path / "intro-subtitles.ass").is_file()
+    assert not (tmp_path / "intro-subtitles.ass").exists()
+    assert not any("-filter_complex" in command for command in calls)
 
 
-def test_run_final_video_pipeline_uses_intro_source_plan_for_subtitle_splitting(tmp_path: Path):
+def test_run_final_video_pipeline_records_intro_source_plan_for_batch_asr(tmp_path: Path):
     calls: list[list[str]] = []
     package_path = tmp_path / "render-package.json"
     job_package_path = tmp_path / "job" / "render-package.json"
@@ -785,19 +790,16 @@ def test_run_final_video_pipeline_uses_intro_source_plan_for_subtitle_splitting(
         measure_loudness=lambda path: {"output_i": "-11.0"},
     )
 
-    ass_text = (tmp_path / "intro-subtitles.ass").read_text(encoding="utf-8")
-    assert "第一段按模板拆" in ass_text
-    assert "第二段继续按模板" in ass_text
-    assert "兜底文案" not in ass_text
-    assert "Dialogue: 0,0:00:00.40,0:00:02.00" in ass_text
+    assert not (tmp_path / "intro-subtitles.ass").exists()
     assert result["intro_subtitle_source_plan_path"] == str(source_plan)
     manifest = json.loads(Path(result["run_manifest_path"]).read_text(encoding="utf-8"))
     assert manifest["inputs"]["intro_subtitles"]["status"] == "ready"
-    assert manifest["inputs"]["intro_subtitles"]["source"] == "source_plan"
-    assert manifest["inputs"]["intro_subtitles"]["event_count"] == 2
+    assert manifest["inputs"]["intro_subtitles"]["source"] == "render_package_asr"
+    assert manifest["inputs"]["intro_subtitles"]["event_count"] is None
 
 
-def test_run_final_video_pipeline_blocks_intro_source_plan_without_timing_or_fallback_text(tmp_path: Path):
+def test_run_final_video_pipeline_uses_source_plan_text_and_retimes_with_asr(tmp_path: Path):
+    prepared = {}
     package_path = tmp_path / "render-package.json"
     job_package_path = tmp_path / "job" / "render-package.json"
     product_mp4 = tmp_path / "product.mp4"
@@ -827,6 +829,7 @@ def test_run_final_video_pipeline_blocks_intro_source_plan_without_timing_or_fal
             return {"ok": True, "regenerated": [], "skipped": []}
 
         def prepare_product_recommendation_output(self, project_id, **kwargs):
+            prepared.update(kwargs)
             return {"ok": True, "package_path": str(package_path), "next": {"target_mp4": str(product_mp4)}}
 
     def fake_runner(command, *, cwd, timeout):
@@ -837,29 +840,28 @@ def test_run_final_video_pipeline_blocks_intro_source_plan_without_timing_or_fal
             return {"stdout": "", "stderr": "", "returncode": 0}
         raise AssertionError(f"unexpected command: {command}")
 
-    try:
-        run_final_video_pipeline(
-            FakeWorkflow(),
-            project_id=23,
-            account_label="小博",
-            package_output_path=package_path,
-            output_path=product_mp4,
-            intro_video_path=intro_mp4,
-            intro_video_source_plan_path=source_plan,
-            full_output_path=full_mp4,
-            cutme_root=tmp_path,
-            runner=fake_runner,
-            probe_video=lambda path: {"duration": 5.0},
-            measure_loudness=lambda path: {"output_i": "-11.0"},
-        )
-    except ValueError as exc:
-        assert "intro subtitle" in str(exc)
-        assert "source plan" in str(exc)
-    else:
-        raise AssertionError("expected zero intro subtitle events to block final MP4 generation")
+    result = run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=23,
+        account_label="小博",
+        package_output_path=package_path,
+        output_path=product_mp4,
+        intro_video_path=intro_mp4,
+        intro_video_source_plan_path=source_plan,
+        full_output_path=full_mp4,
+        cutme_root=tmp_path,
+        runner=fake_runner,
+        probe_video=lambda path: {"duration": 5.0},
+        measure_loudness=lambda path: {"output_i": "-11.0"},
+    )
+
+    assert result["ok"] is True
+    assert prepared["intro_video_text"] == "这段有文案但是没有 timing"
+    assert prepared["subtitle_alignment"] == "asr"
 
 
 def test_run_final_video_pipeline_blocks_intro_video_without_subtitle_source(tmp_path: Path):
+    prepared = {}
     package_path = tmp_path / "render-package.json"
     job_package_path = tmp_path / "job" / "render-package.json"
     product_mp4 = tmp_path / "product.mp4"
@@ -873,6 +875,7 @@ def test_run_final_video_pipeline_blocks_intro_video_without_subtitle_source(tmp
             return {"ok": True, "regenerated": [], "skipped": []}
 
         def prepare_product_recommendation_output(self, project_id, **kwargs):
+            prepared.update(kwargs)
             return {"ok": True, "package_path": str(package_path), "next": {"target_mp4": str(product_mp4)}}
 
     def fake_runner(command, *, cwd, timeout):
@@ -899,7 +902,7 @@ def test_run_final_video_pipeline_blocks_intro_video_without_subtitle_source(tmp
         )
     except ValueError as exc:
         assert "intro subtitle blocked" in str(exc)
-        assert "neither source plan nor fallback text" in str(exc)
+        assert "requires transcript text or a source plan" in str(exc)
     else:
         raise AssertionError("expected missing intro subtitle source to block final MP4 generation")
 
@@ -1000,6 +1003,7 @@ def test_run_final_video_pipeline_passes_project_level_cache_dir_to_cutme(
 
 
 def test_run_final_video_pipeline_records_latest_run_in_pipeline(tmp_path: Path, monkeypatch):
+    prepared = {}
     import bworkflow_sql.final_video_pipeline as pipeline_module
 
     monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
@@ -1040,6 +1044,7 @@ def test_run_final_video_pipeline_records_latest_run_in_pipeline(tmp_path: Path,
             return {"ok": True, "regenerated": [], "skipped": []}
 
         def prepare_product_recommendation_output(self, project_id, **kwargs):
+            prepared.update(kwargs)
             return {"ok": True, "package_path": str(package_path), "next": {"target_mp4": str(product_mp4)}}
 
     def fake_runner(command, *, cwd, timeout):
@@ -1063,6 +1068,7 @@ def test_run_final_video_pipeline_records_latest_run_in_pipeline(tmp_path: Path,
         package_output_path=package_path,
         output_path=product_mp4,
         intro_video_path=intro_mp4,
+        intro_video_text="引言口播文字",
         full_output_path=full_mp4,
         pipeline_path=pipeline_path,
         acceptance_mode="quick",
@@ -1077,7 +1083,7 @@ def test_run_final_video_pipeline_records_latest_run_in_pipeline(tmp_path: Path,
     assert saved["phases"]["assembly"]["status"] == "done"
     assert saved["phases"]["assembly"]["run_manifest_path"] == result["run_manifest_path"]
     assert saved["phases"]["assembly"]["final_mp4_path"] == str(full_mp4)
-    assert saved["phases"]["assembly"]["product_only_mp4_path"] == str(product_mp4)
+    assert "product_only_mp4_path" not in saved["phases"]["assembly"]
     assert saved["phases"]["assembly"]["product_card_template_id"] == "muban-xiaobo-3"
     assert saved["phases"]["assembly"]["mode"] == "top"
     assert saved["phases"]["assembly"]["top_uids"] == ["P001"]

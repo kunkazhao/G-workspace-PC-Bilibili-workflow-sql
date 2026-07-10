@@ -330,6 +330,72 @@ def test_build_product_recommendation_package_from_ready_assets(
     assert all(Path(segment["imageCardAsset"]).is_absolute() for segment in products)
 
 
+def test_final_mp4_builds_one_batch_for_intro_products_and_random_outro(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    intro = tmp_path / "raw-intro.mp4"
+    closing = tmp_path / "closing.mp3"
+    intro.write_bytes(b"intro")
+    closing.write_bytes(b"closing")
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO accounts
+                (label, account_id, voice_id, voice_name, media_identity, closing_audio_path, enabled, created_at, updated_at)
+            VALUES ('小博', 'xiaobo', '', '', '', ?, 1, 'now', 'now')
+            """,
+            (str(closing),),
+        )
+
+    captured_jobs = []
+
+    def fake_grouped(jobs, **kwargs):
+        captured_jobs.extend(jobs)
+        return [[(0.1, 0.9, job["text"])] for job in jobs]
+
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    monkeypatch.setattr(builder, "probe_media_duration_seconds", lambda _path: 4.0)
+    monkeypatch.setattr(builder, "align_subtitle_jobs_with_asr_grouped", fake_grouped)
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+        product_order_strategy="stable",
+        subtitle_alignment="asr",
+        intro_video_path=intro,
+        intro_video_text="这是无字幕引言。",
+        include_outro=True,
+        closing_text="感谢观看，评论区留言。",
+    )
+
+    assert result.missing == []
+    segment_types = [segment["type"] for segment in result.package["segments"]]
+    assert segment_types == [
+        "intro",
+        "price_transition",
+        "product_recommendation",
+        "product_recommendation",
+        "outro",
+    ]
+    assert [job["label"] for job in captured_jobs] == [
+        "intro-raw",
+        "price-1",
+        "product-P001",
+        "product-P002",
+        "outro-fixed",
+    ]
+    assert result.package["segments"][-1]["templateId"] in builder.OUTRO_TEMPLATE_IDS
+    assert result.package["segments"][-1]["seed"]
+    assert all(segment["subtitles"] for segment in result.package["segments"])
+    assert result.package["output"]["subtitles"]["styleScope"] == "global"
+
+
 def test_final_mp4_package_includes_subtitles_from_shared_split_rules(
     tmp_path: Path,
     monkeypatch,
@@ -399,14 +465,17 @@ def test_final_mp4_package_can_align_subtitles_with_asr(
         )
     monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 6.0)
 
-    def fake_align(audio_path, text_value, offset_sec):
-        assert offset_sec == 0.0
-        if Path(audio_path).name != "P001.wav":
-            return [(0.0, 1.0, text_value)]
-        assert text_value == text
-        return [(0.25, 1.2, "Alpha first."), (1.45, 2.8, "Beta second.")]
+    def fake_align_grouped(jobs, **_kwargs):
+        results = []
+        for job in jobs:
+            if Path(job["audio_path"]).name != "P001.wav":
+                results.append([(0.0, 1.0, job["text"])])
+                continue
+            assert job["text"] == text
+            results.append([(0.25, 1.2, "Alpha first."), (1.45, 2.8, "Beta second.")])
+        return results
 
-    monkeypatch.setattr(builder, "align_subtitle_text_with_asr", fake_align)
+    monkeypatch.setattr(builder, "align_subtitle_jobs_with_asr_grouped", fake_align_grouped)
 
     result = build_product_recommendation_package(
         db,

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .asset_paths import voice_user_dir
+from .content_constants import DEFAULT_CLOSING_TEXT
 from .cutme_intro import (
     default_intro_plan_workspace,
     find_intro_plan_for_text,
@@ -151,7 +152,6 @@ DEFAULT_DISPLAY_VIDEO_SLOT = {
     "width": 410,
     "height": 258,
 }
-DEFAULT_CLOSING_TEXT = "如果你看完这些还是拿不准该选哪款，或者不知道你的预算最适合哪个，按老规矩在评论区留预算和需求，我看到都会回复。"
 @dataclass
 class WorkflowRunResult:
     args: list[str]
@@ -364,6 +364,10 @@ class WorkflowService:
         product_card_template_id: str = "",
         package_output_path: str | Path | None = None,
         subtitle_alignment: str = "proportional",
+        intro_video_path: str | Path | None = None,
+        intro_video_text: str = "",
+        include_outro: bool = False,
+        closing_text: str = "",
     ) -> dict[str, Any]:
         output_mode_value = safe_text(output_mode) or "jianying_draft"
         if output_mode_value not in SUPPORTED_OUTPUT_MODES:
@@ -386,6 +390,14 @@ class WorkflowService:
             split_csv(product_uids) if isinstance(product_uids, str) else list(product_uids or [])
         )
 
+        build_kwargs: dict[str, Any] = {}
+        if intro_video_path:
+            build_kwargs["intro_video_path"] = intro_video_path
+            build_kwargs["intro_video_text"] = intro_video_text
+        if include_outro:
+            build_kwargs["include_outro"] = True
+            build_kwargs["closing_text"] = closing_text
+
         result = build_product_recommendation_package(
             self.db,
             project_id=project_id,
@@ -398,6 +410,7 @@ class WorkflowService:
             top_uids=top_uid_list,
             product_uids=product_uid_list,
             subtitle_alignment=subtitle_mode,
+            **build_kwargs,
         )
         output_path = (
             Path(package_output_path)

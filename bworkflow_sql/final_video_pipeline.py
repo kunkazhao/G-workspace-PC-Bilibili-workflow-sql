@@ -11,9 +11,8 @@ from time import perf_counter
 from typing import Any, Callable
 
 from .cutme_adapter import CutMeAdapter
-from .cutme_intro import intro_subtitle_events_from_plan
+from .content_constants import DEFAULT_CLOSING_TEXT
 from .settings import CUTME_ROOT, INTERNAL_WORKSPACE_ROOT
-from .subtitle_helpers import align_subtitle_text_with_asr, distribute_subtitle_text
 from .utils import safe_text
 from .workflow_service import safe_path_component
 
@@ -71,7 +70,7 @@ def run_final_video_pipeline(
     full_output_path: str | Path | None = None,
     pipeline_path: str | Path | None = None,
     acceptance_mode: str = "full",
-    subtitle_alignment: str = "proportional",
+    subtitle_alignment: str = "asr",
     cutme_root: str | Path = CUTME_ROOT,
     cutme_adapter: CutMeAdapter | None = None,
     runner: Runner | None = None,
@@ -102,6 +101,22 @@ def run_final_video_pipeline(
         full_output_path = full_output_path or delivery_layout["full_mp4"]
     package_path = _absolute_path(package_output_path) if package_output_path else render_root / f"{stem}.json"
     target_mp4 = _absolute_path(output_path) if output_path else package_path.with_suffix(".mp4")
+    intro_mp4 = _absolute_path(intro_video_path) if intro_video_path else None
+    intro_source_plan_path = _absolute_path(intro_video_source_plan_path) if intro_video_source_plan_path else None
+    resolved_intro_text = safe_text(intro_video_text).strip()
+    if intro_mp4:
+        if not intro_mp4.is_file():
+            raise FileNotFoundError(f"intro video does not exist: {intro_mp4}")
+        if not resolved_intro_text and intro_source_plan_path:
+            resolved_intro_text = _intro_text_from_source_plan(intro_source_plan_path)
+        if not resolved_intro_text:
+            raise ValueError(
+                "intro subtitle blocked: raw intro video requires transcript text or a source plan with full_script."
+            )
+        if full_output_path:
+            target_mp4 = _absolute_path(full_output_path)
+        elif delivery_layout:
+            target_mp4 = delivery_layout["full_mp4"]
 
     product_images: dict[str, Any] | None = None
     with timings.measure("product_images_ms"):
@@ -133,6 +148,10 @@ def run_final_video_pipeline(
             product_card_template_id=product_card_template_id,
             package_output_path=str(package_path),
             subtitle_alignment=subtitle_mode,
+            intro_video_path=str(intro_mp4) if intro_mp4 else None,
+            intro_video_text=resolved_intro_text,
+            include_outro=True,
+            closing_text=DEFAULT_CLOSING_TEXT,
         )
     if package_result.get("ok") is not True:
         return {
@@ -143,7 +162,12 @@ def run_final_video_pipeline(
         }
 
     package_path = _absolute_path(package_result["package_path"])
-    target_mp4 = _absolute_path(output_path) if output_path else _absolute_path(package_result.get("next", {}).get("target_mp4") or target_mp4)
+    if not intro_mp4:
+        target_mp4 = (
+            _absolute_path(output_path)
+            if output_path
+            else _absolute_path(package_result.get("next", {}).get("target_mp4") or target_mp4)
+        )
     target_mp4.parent.mkdir(parents=True, exist_ok=True)
 
     command_runner = runner or _run_command
@@ -158,61 +182,24 @@ def run_final_video_pipeline(
     job_package_path = _absolute_path(cutme_artifacts["job_package_path"])
     target_mp4 = _absolute_path(cutme_artifacts["output_path"])
 
-    full_target_mp4: Path | None = None
-    concat_result: Any | None = None
-    intro_subtitle_ass_path: Path | None = None
-    intro_subtitle_report: dict[str, Any] | None = None
-    if intro_video_path:
-        intro_mp4 = _absolute_path(intro_video_path)
-        if not intro_mp4.is_file():
-            raise FileNotFoundError(f"intro video does not exist: {intro_mp4}")
-        full_target_mp4 = (
-            _absolute_path(full_output_path)
-            if full_output_path
-            else target_mp4.with_name(f"{target_mp4.stem}-with-intro{target_mp4.suffix}")
-        )
-        intro_text = safe_text(intro_video_text).strip()
-        intro_source_plan_path = _absolute_path(intro_video_source_plan_path) if intro_video_source_plan_path else None
-        if intro_source_plan_path or intro_text:
-            intro_subtitle_ass_path = (
-                delivery_layout["process_dir"] / "intro-subtitles.ass"
-                if delivery_layout
-                else full_target_mp4.parent / "intro-subtitles.ass"
-            )
-            intro_subtitle_report = _write_intro_subtitles_ass(
-                intro_subtitle_ass_path,
-                intro_mp4,
-                intro_text,
-                intro_source_plan_path=intro_source_plan_path,
-                subtitle_alignment=subtitle_mode,
-                duration=_video_duration_seconds(intro_mp4, probe_video or _probe_video),
-            )
-        elif _looks_like_subtitled_intro_video(intro_mp4):
-            intro_subtitle_report = {
-                "required": True,
-                "status": "ready",
-                "source": "embedded_intro_mp4",
-                "event_count": None,
-                "ass_path": None,
-                "source_plan_path": None,
-            }
-        else:
-            raise ValueError(
-                "intro subtitle blocked: intro video was provided, but neither source plan nor fallback text was provided."
-            )
-        with timings.measure("concat_intro_ms"):
-            concat_result = _concat_intro_and_product_video(
-                intro_mp4,
-                target_mp4,
-                full_target_mp4,
-                intro_subtitle_ass_path=intro_subtitle_ass_path,
-                cwd=Path(cutme_root),
-                runner=command_runner,
-            )
-    else:
-        timings.set_zero("concat_intro_ms")
+    full_target_mp4 = target_mp4 if intro_mp4 else None
+    concat_result = None
+    intro_subtitle_ass_path = None
+    intro_subtitle_report = (
+        {
+            "required": True,
+            "status": "ready",
+            "source": "render_package_asr",
+            "event_count": None,
+            "ass_path": None,
+            "source_plan_path": str(intro_source_plan_path) if intro_source_plan_path else None,
+        }
+        if intro_mp4
+        else None
+    )
+    timings.set_zero("concat_intro_ms")
 
-    verification_target = full_target_mp4 or target_mp4
+    verification_target = target_mp4
     with timings.measure("ffprobe_ms"):
         ffprobe_result = (probe_video or _probe_video)(verification_target)
     loudnorm_result = None
@@ -230,9 +217,7 @@ def run_final_video_pipeline(
                 cwd=Path(cutme_root),
                 runner=command_runner,
                 frame_dir=delivery_layout["frames_dir"] if delivery_layout else None,
-                intro_offset=_video_duration_seconds(_absolute_path(intro_video_path), probe_video or _probe_video)
-                if full_target_mp4 and intro_video_path
-                else 0.0,
+                intro_offset=0.0,
             )
     else:
         timings.set_zero("acceptance_frames_ms")
@@ -263,7 +248,7 @@ def run_final_video_pipeline(
         "output_mp4_link": _markdown_link("打开完整 MP4", target_mp4),
         "full_output_mp4": str(full_target_mp4) if full_target_mp4 else None,
         "full_output_mp4_link": _markdown_link("打开完整 MP4", full_target_mp4) if full_target_mp4 else None,
-        "intro_video_path": str(_absolute_path(intro_video_path)) if intro_video_path else None,
+        "intro_video_path": str(intro_mp4) if intro_mp4 else None,
         "intro_subtitle_ass_path": str(intro_subtitle_ass_path) if intro_subtitle_ass_path else None,
         "intro_subtitle_source_plan_path": str(_absolute_path(intro_video_source_plan_path)) if intro_video_source_plan_path else None,
         "intro_subtitles": intro_subtitle_report,
@@ -563,175 +548,24 @@ def _audio_stream_summary(stream: dict[str, Any]) -> str:
     return f"{safe_text(stream.get('codec_name'))} {sample_rate}Hz"
 
 
-def _concat_intro_and_product_video(
-    intro_mp4: Path,
-    product_mp4: Path,
-    output_mp4: Path,
-    *,
-    intro_subtitle_ass_path: Path | None = None,
-    cwd: Path,
-    runner: Runner,
-) -> Any:
-    output_mp4.parent.mkdir(parents=True, exist_ok=True)
-    intro_video_filter = "[0:v]scale=1920:1080:flags=lanczos,setsar=1,fps=30,format=yuv420p"
-    if intro_subtitle_ass_path:
-        intro_video_filter += f",subtitles='{_ffmpeg_filter_path(intro_subtitle_ass_path)}'"
-    intro_video_filter += "[v0];"
-    filter_complex = (
-        intro_video_filter
-        + "[1:v]scale=1920:1080:flags=lanczos,setsar=1,fps=30,format=yuv420p[v1];"
-        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo[a0];"
-        "[1:a]aformat=sample_rates=48000:channel_layouts=stereo[a1];"
-        "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a];"
-        "[a]loudnorm=I=-11:TP=-1:LRA=11,aresample=48000[aout]"
+def _intro_text_from_source_plan(path: Path) -> str:
+    if not path.is_file():
+        raise FileNotFoundError(f"intro source plan does not exist: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"intro source plan must be a JSON object: {path}")
+    full_script = safe_text(payload.get("full_script")).strip()
+    if full_script:
+        return full_script
+    scenes = payload.get("scenes") if isinstance(payload.get("scenes"), list) else []
+    scene_text = "".join(
+        safe_text(scene.get("text")).strip()
+        for scene in scenes
+        if isinstance(scene, dict) and safe_text(scene.get("text")).strip()
     )
-    return runner(
-        [
-            "ffmpeg",
-            "-y",
-            "-hide_banner",
-            "-i",
-            str(intro_mp4),
-            "-i",
-            str(product_mp4),
-            "-filter_complex",
-            filter_complex,
-            "-map",
-            "[v]",
-            "-map",
-            "[aout]",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "18",
-            "-pix_fmt",
-            "yuv420p",
-            "-r",
-            "30",
-            "-c:a",
-            "aac",
-            "-ar",
-            "48000",
-            "-b:a",
-            "192k",
-            "-movflags",
-            "+faststart",
-            str(output_mp4),
-        ],
-        cwd=cwd,
-        timeout=7200,
-    )
-
-
-def _write_intro_subtitles_ass(
-    output_path: Path,
-    intro_mp4: Path,
-    text: str,
-    *,
-    intro_source_plan_path: Path | None = None,
-    subtitle_alignment: str,
-    duration: float,
-) -> dict[str, Any]:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    plan_events = _intro_subtitle_events_from_source_plan(intro_source_plan_path)
-    if plan_events:
-        events = plan_events
-        source = "source_plan"
-    elif safe_text(subtitle_alignment) == "asr":
-        events = align_subtitle_text_with_asr(intro_mp4, text, 0.0)
-        source = "asr"
-    else:
-        events = distribute_subtitle_text(text, 0.0, max(0.0, float(duration or 0.0)))
-        source = "fallback_text"
-    if not events:
-        source_plan_note = " source plan produced zero events." if intro_source_plan_path else ""
-        raise ValueError(
-            "intro subtitle blocked: no intro subtitle events were generated."
-            + source_plan_note
-            + " Provide a timed source plan or --intro-video-text-file."
-        )
-    output_path.write_text(_build_intro_ass(events), encoding="utf-8")
-    return {
-        "required": True,
-        "status": "ready",
-        "source": source,
-        "event_count": len(events),
-        "ass_path": str(output_path),
-        "source_plan_path": str(intro_source_plan_path) if intro_source_plan_path else None,
-    }
-
-
-def _intro_subtitle_events_from_source_plan(path: Path | None) -> list[tuple[float, float, str]]:
-    if path is None:
-        return []
-    events: list[tuple[float, float, str]] = []
-    for item in intro_subtitle_events_from_plan(path):
-        try:
-            start = float(item.get("start") or 0.0)
-            end = float(item.get("end") or 0.0)
-        except (AttributeError, TypeError, ValueError):
-            continue
-        text = safe_text(item.get("text") if isinstance(item, dict) else "")
-        if text and end > start:
-            events.append((start, end, text))
-    return events
-
-
-def _looks_like_subtitled_intro_video(path: Path) -> bool:
-    stem = path.stem.casefold()
-    return any(marker in stem for marker in ("subtitle", "subtitled", "字幕"))
-
-
-def _build_intro_ass(events: list[tuple[float, float, str]]) -> str:
-    lines = [
-        "[Script Info]",
-        "ScriptType: v4.00+",
-        "PlayResX: 1920",
-        "PlayResY: 1080",
-        "ScaledBorderAndShadow: yes",
-        "",
-        "[V4+ Styles]",
-        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        "Style: Default,Microsoft YaHei,54,&H00FFFFFF,&H00FFFFFF,&H00222222,&H99000000,0,0,0,0,100,100,0,0,1,4,1,2,110,110,78,1",
-        "",
-        "[Events]",
-        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
-    ]
-    for start, end, text in events:
-        if end <= start:
-            continue
-        lines.append(
-            "Dialogue: 0,"
-            f"{_ass_timestamp(start)},{_ass_timestamp(end)},Default,,0,0,0,,{_escape_ass_text(text)}"
-        )
-    return "\n".join(lines) + "\n"
-
-
-def _ass_timestamp(seconds: float) -> str:
-    centiseconds = max(0, int(round(float(seconds or 0.0) * 100)))
-    hours, rem = divmod(centiseconds, 360000)
-    minutes, rem = divmod(rem, 6000)
-    secs, centis = divmod(rem, 100)
-    return f"{hours}:{minutes:02}:{secs:02}.{centis:02}"
-
-
-def _escape_ass_text(text: object) -> str:
-    return safe_text(text).replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\n", "\\N")
-
-
-def _ffmpeg_filter_path(path: Path) -> str:
-    value = str(path.resolve()).replace("\\", "/")
-    return value.replace(":", "\\:").replace("'", "\\'")
-
-
-def _video_duration_seconds(path: Path, probe_video: ProbeVideo) -> float:
-    try:
-        result = probe_video(path)
-        return float(result.get("duration") or 0.0)
-    except Exception:
-        return 0.0
+    if not scene_text:
+        raise ValueError(f"intro source plan has no full_script or scene text: {path}")
+    return scene_text
 
 
 def _find_clip_cache_manifest(candidate: Path) -> Path | None:
@@ -809,7 +643,6 @@ def _record_final_video_pipeline(
             "top_uids": price_report.get("top_uids") or [],
             "product_order_strategy": result.get("product_order_strategy"),
             "final_mp4_path": final_mp4_path,
-            "product_only_mp4_path": str(target_mp4),
             "run_manifest_path": str(run_manifest_path),
             "package_path": result.get("package_path"),
             "job_package_path": result.get("job_package_path"),

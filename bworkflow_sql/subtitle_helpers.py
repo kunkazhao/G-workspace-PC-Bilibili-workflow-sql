@@ -341,6 +341,26 @@ def align_subtitle_jobs_with_asr(
     workers: int = DEFAULT_SUBTITLE_ASR_WORKERS,
     provider_name: str | None = None,
 ) -> list[tuple[float, float, str]]:
+    grouped = align_subtitle_jobs_with_asr_grouped(
+        jobs,
+        model_name=model_name,
+        language=language,
+        beam_size=beam_size,
+        workers=workers,
+        provider_name=provider_name,
+    )
+    return [item for group in grouped for item in group]
+
+
+def align_subtitle_jobs_with_asr_grouped(
+    jobs: list[dict[str, Any]],
+    *,
+    model_name: str = DEFAULT_SUBTITLE_ASR_MODEL,
+    language: str = DEFAULT_SUBTITLE_ASR_LANGUAGE,
+    beam_size: int = DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
+    workers: int = DEFAULT_SUBTITLE_ASR_WORKERS,
+    provider_name: str | None = None,
+) -> list[list[tuple[float, float, str]]]:
     if not jobs:
         return []
     unit_results = run_subtitle_asr_worker(
@@ -351,12 +371,12 @@ def align_subtitle_jobs_with_asr(
         workers=workers,
         provider_name=provider_name,
     )
-    merged: list[tuple[float, float, str]] = []
+    grouped: list[list[tuple[float, float, str]]] = []
     for index, (job, units) in enumerate(zip(jobs, unit_results)):
         label = safe_text(job.get("label")) or f"字幕段 {index + 1}"
         chunks = split_subtitle_text(safe_text(job.get("text")))
         try:
-            merged.extend(
+            grouped.append(
                 align_subtitle_text_with_units(
                     safe_text(job.get("audio_path")),
                     chunks,
@@ -366,7 +386,7 @@ def align_subtitle_jobs_with_asr(
             )
         except Exception as exc:
             raise ValueError(f"{label} ASR 字幕对齐失败：{exc}") from exc
-    return merged
+    return grouped
 
 
 def format_srt_timestamp(seconds: float) -> str:

@@ -749,7 +749,7 @@ def cmd_render_final_video(args: argparse.Namespace) -> None:
         full_output_path=args.full_output or None,
         pipeline_path=getattr(args, "pipeline", "") or None,
         acceptance_mode=args.acceptance_mode,
-        subtitle_alignment=getattr(args, "subtitle_alignment", "proportional"),
+        subtitle_alignment=getattr(args, "subtitle_alignment", "asr"),
     )
     _json_out(result)
 
@@ -973,8 +973,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--subtitle-alignment",
         choices=["proportional", "asr"],
-        default="proportional",
-        help="subtitle timing: proportional is fast; asr aligns text to audio for accuracy",
+        default="asr",
+        help="subtitle timing: asr is the normal accurate path; proportional is an explicit fast fallback",
     )
     p.add_argument(
         "--acceptance-mode",

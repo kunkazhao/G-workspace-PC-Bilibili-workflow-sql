@@ -13,7 +13,12 @@ from typing import Any
 from .db import Database
 from .repositories import Repository
 from .settings import INTERNAL_WORKSPACE_ROOT
-from .subtitle_helpers import align_subtitle_text_with_asr, distribute_subtitle_text, probe_media_duration_seconds
+from .subtitle_helpers import (
+    align_subtitle_jobs_with_asr_grouped,
+    align_subtitle_text_with_asr,
+    distribute_subtitle_text,
+    probe_media_duration_seconds,
+)
 from .template_config import (
     display_template_from_image_path,
     get_remotion_template_metadata,
@@ -39,6 +44,11 @@ GLOBAL_SUBTITLE_STYLE_IDS = (
     "warm_cream",
     "tech_cyan",
     "orange_energy",
+)
+OUTRO_TEMPLATE_IDS = (
+    "outro-centered",
+    "outro-comment-card",
+    "outro-split",
 )
 PRODUCT_COVER_CACHE_ROOT = INTERNAL_WORKSPACE_ROOT / "product-covers"
 PRICE_TRANSITION_KEYWORDS = [
@@ -234,6 +244,10 @@ def build_product_recommendation_package(
     top_uids: list[str] | None = None,
     product_uids: list[str] | None = None,
     subtitle_alignment: str = "proportional",
+    intro_video_path: str | Path | None = None,
+    intro_video_text: str = "",
+    include_outro: bool = False,
+    closing_text: str = "",
 ) -> ProductRenderPackageResult:
     if output_mode not in SUPPORTED_OUTPUT_MODES:
         raise ValueError(f"unsupported output_mode: {output_mode}")
@@ -320,11 +334,10 @@ def build_product_recommendation_package(
             "sourceScriptBlockId": int(block.get("id") or 0),
         }
         if output_mode == "final_mp4":
-            price_segments[label]["subtitles"] = _segment_subtitles(
-                body,
-                duration,
-                audio_path=voice_path,
-                subtitle_alignment=subtitle_mode,
+            price_segments[label]["subtitles"] = (
+                []
+                if subtitle_mode == "asr"
+                else _segment_subtitles(body, duration, subtitle_alignment=subtitle_mode)
             )
 
     for product in products:
@@ -429,11 +442,14 @@ def build_product_recommendation_package(
                 "voice": int(voice.get("id") or 0),
                 "video": int(video.get("id") or 0) if video else None,
             },
-            "subtitles": _segment_subtitles(
-                safe_text(block.get("body")),
-                duration,
-                audio_path=voice_path,
-                subtitle_alignment=subtitle_mode,
+            "subtitles": (
+                []
+                if subtitle_mode == "asr"
+                else _segment_subtitles(
+                    safe_text(block.get("body")),
+                    duration,
+                    subtitle_alignment=subtitle_mode,
+                )
             )
             if output_mode == "final_mp4"
             else [],
@@ -473,6 +489,72 @@ def build_product_recommendation_package(
         top_uids=top_uids or [],
         product_order_strategy=order_strategy,
     )
+
+    if output_mode == "final_mp4" and intro_video_path:
+        intro_path = _absolute_file_path(intro_video_path)
+        intro_text = safe_text(intro_video_text).strip()
+        if not intro_path.is_file():
+            missing.append(
+                {"kind": "intro_video", "path": str(intro_path), "message": "intro video does not exist"}
+            )
+        elif not intro_text:
+            missing.append(
+                {"kind": "intro_text", "path": str(intro_path), "message": "intro transcript text is required"}
+            )
+        else:
+            intro_duration = probe_media_duration_seconds(intro_path)
+            intro_segment = {
+                "type": "intro",
+                "id": "intro-raw",
+                "spokenText": intro_text,
+                "videoAsset": str(intro_path),
+                "duration": intro_duration,
+                "subtitles": (
+                    []
+                    if subtitle_mode == "asr"
+                    else _segment_subtitles(intro_text, intro_duration, subtitle_alignment=subtitle_mode)
+                ),
+            }
+            segments.insert(0, intro_segment)
+
+    if output_mode == "final_mp4" and include_outro:
+        account_record = next(
+            (item for item in repo.accounts() if safe_text(item.get("label")) == account),
+            None,
+        )
+        closing_audio = _absolute_file_path(account_record.get("closing_audio_path")) if account_record else None
+        outro_text = safe_text(closing_text).strip()
+        if closing_audio is None or not closing_audio.is_file():
+            missing.append(
+                {"kind": "closing_audio", "account": account, "message": "account closing audio does not exist"}
+            )
+        elif not outro_text:
+            missing.append(
+                {"kind": "closing_text", "account": account, "message": "closing text is required"}
+            )
+        else:
+            outro_seed = f"{random.SystemRandom().getrandbits(64):016x}"
+            template_index = int(hashlib.sha1(outro_seed.encode("utf-8")).hexdigest()[:8], 16) % len(OUTRO_TEMPLATE_IDS)
+            outro_duration = get_audio_duration_seconds(closing_audio)
+            segments.append(
+                {
+                    "type": "outro",
+                    "id": "outro-fixed",
+                    "spokenText": outro_text,
+                    "voiceAsset": str(closing_audio),
+                    "duration": outro_duration,
+                    "templateId": OUTRO_TEMPLATE_IDS[template_index],
+                    "seed": outro_seed,
+                    "subtitles": (
+                        []
+                        if subtitle_mode == "asr"
+                        else _segment_subtitles(outro_text, outro_duration, subtitle_alignment=subtitle_mode)
+                    ),
+                }
+            )
+
+    if output_mode == "final_mp4" and subtitle_mode == "asr" and not missing:
+        _align_package_segments_with_asr(segments)
 
     package = {
         "schemaVersion": "1.0.0",
@@ -533,6 +615,42 @@ def build_product_recommendation_package(
         missing=missing,
         stale_product_images=stale_product_images,
     )
+
+
+def _align_package_segments_with_asr(segments: list[dict[str, Any]]) -> None:
+    jobs: list[dict[str, Any]] = []
+    aligned_segments: list[dict[str, Any]] = []
+    for segment in segments:
+        segment_type = safe_text(segment.get("type"))
+        if segment_type == "price_transition":
+            text = safe_text(segment.get("transitionText"))
+        else:
+            text = safe_text(segment.get("spokenText"))
+        audio_path = safe_text(segment.get("videoAsset" if segment_type == "intro" else "voiceAsset"))
+        if segment_type not in {"intro", "price_transition", "product_recommendation", "outro"}:
+            continue
+        if not text or not audio_path:
+            raise ValueError(f"{segment.get('id') or segment_type} ASR subtitle alignment is missing text or audio")
+        jobs.append(
+            {
+                "label": safe_text(segment.get("id")) or segment_type,
+                "audio_path": audio_path,
+                "text": text,
+                "offset_sec": 0.0,
+            }
+        )
+        aligned_segments.append(segment)
+
+    grouped = align_subtitle_jobs_with_asr_grouped(jobs)
+    if len(grouped) != len(aligned_segments):
+        raise ValueError(
+            f"ASR subtitle alignment returned {len(grouped)} groups for {len(aligned_segments)} segments"
+        )
+    for segment, items in zip(aligned_segments, grouped):
+        segment["subtitles"] = [
+            {"start": round(start, 3), "end": round(end, 3), "text": safe_text(text)}
+            for start, end, text in items
+        ]
 
 
 def _segment_subtitles(
