@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS projects (
     video_root TEXT DEFAULT '',
     voice_root TEXT DEFAULT '',
     output_root TEXT DEFAULT '',
+    master_snapshot_id TEXT,
+    master_snapshot_applied_at TEXT,
     status TEXT DEFAULT 'active',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -150,7 +152,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 """
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 def _script_id_slug(value: Any) -> str:
@@ -234,6 +236,7 @@ class Database:
             (1, self._migrate_v1),
             (2, self._migrate_v2),
             (3, self._migrate_v3),
+            (4, self._migrate_v4),
         ]
         for version, func in migrations:
             if current < version:
@@ -337,6 +340,16 @@ class Database:
         product_columns = {row[1] for row in conn.execute("PRAGMA table_info(products)").fetchall()}
         if "product_card_json" not in product_columns:
             conn.execute("ALTER TABLE products ADD COLUMN product_card_json TEXT NOT NULL DEFAULT ''")
+
+    def _migrate_v4(self, conn: sqlite3.Connection) -> None:
+        """Store applied Master snapshot identity without copying its payload."""
+        project_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()
+        }
+        if "master_snapshot_id" not in project_columns:
+            conn.execute("ALTER TABLE projects ADD COLUMN master_snapshot_id TEXT")
+        if "master_snapshot_applied_at" not in project_columns:
+            conn.execute("ALTER TABLE projects ADD COLUMN master_snapshot_applied_at TEXT")
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> None:
         with self.connect() as conn:

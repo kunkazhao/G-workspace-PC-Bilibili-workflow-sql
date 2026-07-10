@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any
 
 from .db import Database
+from .master_snapshot_sync import MasterSnapshotSyncPlan, ProductChange, ProductState
 from .utils import now_iso, safe_text
 
 
@@ -101,6 +103,185 @@ class Repository:
                     )
                     removed.append(dict(old))
         return {"added": added, "updated": updated, "removed": removed}
+
+    def apply_master_snapshot_plan(
+        self,
+        plan: MasterSnapshotSyncPlan,
+        *,
+        applied_at: str | None = None,
+    ) -> dict[str, Any]:
+        ts = safe_text(applied_at) or now_iso()
+        with self.db.connect() as conn:
+            project = conn.execute(
+                """
+                SELECT id, workspace_id, category_id, scheme_id
+                FROM projects
+                WHERE id=?
+                """,
+                (plan.project_id,),
+            ).fetchone()
+            if project is None:
+                raise ValueError(f"project not found: {plan.project_id}")
+            expected_identity = {
+                "workspace_id": plan.workspace_id,
+                "category_id": plan.category_id,
+                "scheme_id": plan.scheme_id,
+            }
+            for field, expected in expected_identity.items():
+                if safe_text(project[field]) != expected:
+                    raise ValueError(f"project identity changed before apply: {field}")
+
+            for change in plan.changes:
+                self._apply_snapshot_change(conn, change, ts)
+
+            cursor = conn.execute(
+                """
+                UPDATE projects
+                SET master_snapshot_id=?, master_snapshot_applied_at=?, updated_at=?
+                WHERE id=?
+                """,
+                (plan.snapshot_id, ts, ts, plan.project_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("failed to persist Master snapshot provenance")
+
+            event_id = self._insert_snapshot_event(conn, plan, ts)
+
+        return {
+            "snapshot_id": plan.snapshot_id,
+            "applied_at": ts,
+            "event_id": event_id,
+            "change_count": plan.change_count,
+            "unchanged_count": len(plan.unchanged),
+            "added": [_change_summary(change) for change in plan.added],
+            "updated": [_change_summary(change) for change in plan.updated],
+            "removed": [_change_summary(change) for change in plan.removed],
+            "reactivated": [
+                _change_summary(change) for change in plan.reactivated
+            ],
+        }
+
+    def _apply_snapshot_change(
+        self,
+        conn: sqlite3.Connection,
+        change: ProductChange,
+        applied_at: str,
+    ) -> None:
+        after = change.after
+        if after is None:
+            raise ValueError(f"snapshot change has no target state: {change.uid}")
+        if change.action == "add":
+            conn.execute(
+                """
+                INSERT INTO products (
+                    project_id, uid, title, price_label, sort_order,
+                    master_item_id, product_card_json, active,
+                    removed_from_master, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _product_params(after) + (applied_at, applied_at),
+            )
+            return
+        if change.action not in {"update", "remove", "reactivate"}:
+            raise ValueError(f"unsupported snapshot change action: {change.action}")
+        cursor = conn.execute(
+            """
+            UPDATE products
+            SET title=?, price_label=?, sort_order=?, master_item_id=?,
+                product_card_json=?, active=?, removed_from_master=?, updated_at=?
+            WHERE project_id=? AND uid=?
+            """,
+            (
+                after.title,
+                after.price_label,
+                after.sort_order,
+                after.master_item_id,
+                after.product_card_json,
+                after.active,
+                after.removed_from_master,
+                applied_at,
+                after.project_id,
+                after.uid,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError(f"snapshot product disappeared before apply: {after.uid}")
+
+    def _insert_snapshot_event(
+        self,
+        conn: sqlite3.Connection,
+        plan: MasterSnapshotSyncPlan,
+        applied_at: str,
+    ) -> int:
+        message = (
+            "Master 快照同步完成："
+            f"新增 {len(plan.added)}，更新 {len(plan.updated)}，"
+            f"恢复 {len(plan.reactivated)}，移除 {len(plan.removed)}；"
+            f"snapshot {plan.snapshot_id}"
+        )
+        cursor = conn.execute(
+            """
+            INSERT INTO sync_events (
+                project_id, event_type, status, message, created_at
+            ) VALUES (?, 'master_snapshot_sync', 'success', ?, ?)
+            """,
+            (plan.project_id, message, applied_at),
+        )
+        event_id = int(cursor.lastrowid)
+        status_by_action = {
+            "add": "added",
+            "update": "updated",
+            "reactivate": "reactivated",
+            "remove": "removed",
+        }
+        for change in plan.changes:
+            state = change.after or change.before
+            if state is None:
+                raise ValueError(f"snapshot change has no evidence state: {change.uid}")
+            changed_fields = ",".join(change.changed_fields)
+            conn.execute(
+                """
+                INSERT INTO sync_event_items (
+                    sync_event_id, item_kind, uid, title, status, message, path
+                ) VALUES (?, 'product', ?, ?, ?, ?, '')
+                """,
+                (
+                    event_id,
+                    change.uid,
+                    state.title,
+                    status_by_action[change.action],
+                    changed_fields,
+                ),
+            )
+        return event_id
+
+
+def _product_params(state: ProductState) -> tuple[Any, ...]:
+    return (
+        state.project_id,
+        state.uid,
+        state.title,
+        state.price_label,
+        state.sort_order,
+        state.master_item_id,
+        state.product_card_json,
+        state.active,
+        state.removed_from_master,
+    )
+
+
+def _change_summary(change: ProductChange) -> dict[str, Any]:
+    state = change.after or change.before
+    if state is None:
+        raise ValueError(f"snapshot change has no summary state: {change.uid}")
+    return {
+        "uid": state.uid,
+        "title": state.title,
+        "price_label": state.price_label,
+        "master_item_id": state.master_item_id,
+        "sort_order": state.sort_order,
+        "changed_fields": list(change.changed_fields),
+    }
 
 
 def _product_card_json(item: dict[str, Any], *, title: str, price_label: str) -> str:

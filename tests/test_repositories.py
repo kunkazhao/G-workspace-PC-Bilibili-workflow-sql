@@ -1,4 +1,5 @@
 from pathlib import Path
+import sqlite3
 
 from bworkflow_sql.db import CURRENT_SCHEMA_VERSION, Database
 from bworkflow_sql.repositories import Repository
@@ -91,6 +92,62 @@ def test_schema_version_table_exists(tmp_path: Path):
         for row in db.fetchall("SELECT name FROM sqlite_master WHERE type='table'")
     }
     assert "schema_version" in tables
+    db.close()
+
+
+def test_fresh_db_v4_has_nullable_master_snapshot_provenance(tmp_path: Path):
+    db = Database(tmp_path / "fresh-v4.db")
+    project_id = db.upsert_project({"name": "keyboard"})
+    columns = {
+        row["name"]: row
+        for row in db.fetchall("PRAGMA table_info(projects)")
+    }
+    project = db.fetchone(
+        "SELECT master_snapshot_id, master_snapshot_applied_at FROM projects WHERE id=?",
+        (project_id,),
+    )
+
+    assert CURRENT_SCHEMA_VERSION == 4
+    assert "master_snapshot_id" in columns
+    assert "master_snapshot_applied_at" in columns
+    assert project["master_snapshot_id"] is None
+    assert project["master_snapshot_applied_at"] is None
+    db.close()
+
+
+def test_v3_database_upgrades_to_v4_without_backfilling_existing_project(tmp_path: Path):
+    db_path = tmp_path / "legacy-v3.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            spoken_md_path TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL);
+        INSERT INTO schema_version (version, applied_at) VALUES
+            (1, 'v1'), (2, 'v2'), (3, 'v3');
+        INSERT INTO projects (name, spoken_md_path, created_at, updated_at)
+        VALUES ('legacy', '', 'before', 'before');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(db_path)
+    project = db.fetchone(
+        "SELECT master_snapshot_id, master_snapshot_applied_at FROM projects WHERE name='legacy'"
+    )
+    versions = [row["version"] for row in db.fetchall(
+        "SELECT version FROM schema_version ORDER BY version"
+    )]
+
+    assert versions == [1, 2, 3, 4]
+    assert project["master_snapshot_id"] is None
+    assert project["master_snapshot_applied_at"] is None
     db.close()
 
 
