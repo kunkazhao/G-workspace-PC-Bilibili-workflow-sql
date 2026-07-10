@@ -462,8 +462,10 @@ def test_prepare_product_recommendation_output_writes_jianying_manifest(
         mode,
         top_uids,
         product_uids,
+        subtitle_alignment,
     ):
         assert product_uids == ["P001"]
+        assert subtitle_alignment == "proportional"
         return SimpleNamespace(package=_package(), missing=[], stale_product_images=[])
 
     output = tmp_path / "render-package.json"

@@ -394,6 +394,18 @@ data\workspace\project-{project_id}\intro\source-intro-plan-引言1.json
 python -m pytest -q tests/test_intro_plan_writer.py tests/test_cutme_intro.py tests/test_intro_timeline.py
 ```
 
+## RenderPackage 跨仓边界
+
+- 正常生产只运行 `python -m bworkflow_sql render-final-video ...` 或
+  `product-images ...`。B-Workflow 内部统一经过 `CutMeAdapter`；不要从业务
+  模块直接调用 CutMe npm、拼 `cutme.render_cli` argv，或解析人类可读路径。
+- B-Workflow 的代表性 producer fixture 位于
+  `contracts/examples/cutme-render-package.v1.json`。修改 RenderPackage 字段后，
+  同时运行本仓测试、CutMe 契约测试和 TotalControl
+  `scripts\boundary2-check.ps1`。
+- `python -m cutme.render_cli ...` 是低层调试/契约入口，不是公开 next 指令。
+  stdout 只有一个版本化 JSON；日志在 stderr。
+
 ## Final MP4 run manifest
 
 Every `render-final-video` run writes a run manifest under
