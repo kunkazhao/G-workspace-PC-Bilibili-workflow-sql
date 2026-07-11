@@ -290,7 +290,7 @@ def run_cutme_render(
     config_path: str | Path,
     output_path: str | Path,
     *,
-    renderer: str = "hyperframes",
+    renderer: str = "remotion",
 ) -> Path:
     config = Path(config_path)
     output = Path(output_path).expanduser()

@@ -7,7 +7,7 @@ from pathlib import Path
 import bworkflow_sql.cutme_intro as cutme_intro_module
 
 
-def test_run_cutme_render_uses_reviewed_hyperframes_intro_template_by_default(
+def test_run_cutme_render_uses_accepted_remotion_intro_v2_by_default(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -29,7 +29,7 @@ def test_run_cutme_render_uses_reviewed_hyperframes_intro_template_by_default(
     command = calls[0]
     assert command[:3] == [sys.executable, "-m", "cutme"]
     assert "--renderer" in command
-    assert command[command.index("--renderer") + 1] == "hyperframes"
+    assert command[command.index("--renderer") + 1] == "remotion"
     assert "--output" in command
     assert str(output_path) in command
     assert "--clean" in command
