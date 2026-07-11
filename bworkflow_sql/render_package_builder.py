@@ -46,9 +46,12 @@ GLOBAL_SUBTITLE_STYLE_IDS = (
     "orange_energy",
 )
 OUTRO_TEMPLATE_IDS = (
-    "outro-centered",
-    "outro-comment-card",
-    "outro-split",
+    "outro-dark-line",
+    "outro-cool-band",
+    "outro-ambient-glow",
+    "outro-editorial-light",
+    "outro-red-slate",
+    "outro-monochrome",
 )
 PRODUCT_COVER_CACHE_ROOT = INTERNAL_WORKSPACE_ROOT / "product-covers"
 PRICE_TRANSITION_KEYWORDS = [

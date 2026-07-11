@@ -211,7 +211,7 @@ python -m bworkflow_sql render-final-video <project_id> --account <账号> --int
 
 CutMe 使用同一 `output.subtitles.styleId` 烧录引言、商品和结尾字幕；合并前每段都按
 `audio.loudnessTarget` 归一化，成片再执行母带响度处理。结尾从
-`outro-centered` / `outro-comment-card` / `outro-split` 随机选一个，选择结果和 seed 写入包内便于复现。
+系统从六套已确认的视频结尾模板中随机选一个：`outro-dark-line`、`outro-cool-band`、`outro-ambient-glow`、`outro-editorial-light`、`outro-red-slate`、`outro-monochrome`。选择结果和 seed 写入包内，便于复现。
 
 标准交付目录优先使用 `--delivery-dir <dir>`，不要让 Agent 临时拼多个输出路径：
 

@@ -68,7 +68,7 @@
       "spokenText": "Thanks for watching and leave a comment.",
       "voiceAsset": "cutme-render-package-v1/audio/outro.fixture",
       "duration": 1.0,
-      "templateId": "outro-centered",
+      "templateId": "outro-dark-line",
       "seed": "contract-fixture-seed",
       "subtitles": [
         {"start": 0.0, "end": 0.9, "text": "Thanks for watching and leave a comment."}
