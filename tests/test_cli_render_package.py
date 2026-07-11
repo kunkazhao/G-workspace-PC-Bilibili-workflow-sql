@@ -146,6 +146,20 @@ def test_render_intro_video_parser_registers_command():
     assert args.asset_root == "assets"
 
 
+def test_render_intro_video_parser_uses_production_defaults():
+    args = cli.build_parser().parse_args(
+        [
+            "render-intro-video",
+            "23",
+            "--account",
+            "小博",
+        ]
+    )
+
+    assert args.intro_label == "引言1"
+    assert Path(args.asset_root) == Path(r"G:\2026项目-b站\素材-自动剪辑")
+
+
 def test_template_calibrate_parser_registers_command():
     args = cli.build_parser().parse_args(
         [

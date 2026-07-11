@@ -30,6 +30,7 @@ from typing import Any
 
 from .cutme_intro import preflight_intro_plan_for_cutme
 from .public_contracts import build_workflow_observation, build_workflow_observation_error
+from .settings import DEFAULT_INTRO_ASSET_ROOT
 from .workflow_errors import (
     AmbiguousProjectReferenceError,
     InvalidWorkflowRequestError,
@@ -858,9 +859,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("render-intro-video", help="Render standalone phase-6 intro MP4 with burned subtitles")
     p.add_argument("project_id", type=int)
     p.add_argument("--account", required=True, help="voice/account label")
-    p.add_argument("--intro-label", default="寮曡█1", help="intro block label, for example 寮曡█1")
+    p.add_argument("--intro-label", default="引言1", help="intro block label, for example 引言1")
     p.add_argument("--output", "-o", help="intro MP4 output path; defaults to the project intro workspace")
-    p.add_argument("--asset-root", default=str(Path("G:/2026椤圭洰-b绔?绱犳潗-鑷姩鍓緫")), help="intro material root")
+    p.add_argument("--asset-root", default=str(DEFAULT_INTRO_ASSET_ROOT), help="intro material root")
 
     # scaffold
     p = sub.add_parser("scaffold", help="预建素材目录骨架（商品图/配音/Roll-B）")
