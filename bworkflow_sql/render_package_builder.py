@@ -62,6 +62,11 @@ def _price_transition_sound_effects(
     if missing:
         raise FileNotFoundError(f"price transition sound effect is missing: {missing[0]}")
     return {role: str(path) for role, path in resolved.items()}
+
+def _product_motion_seed(project_id: int, account_label: str, product_uid: str) -> str:
+    source = f"product-motion-v1|{project_id}|{safe_text(account_label)}|{safe_text(product_uid)}"
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()[:24]
+
 OUTRO_TEMPLATE_IDS = (
     "outro-dark-line",
     "outro-cool-band",
@@ -449,6 +454,7 @@ def build_product_recommendation_package(
             "type": "product_recommendation",
             "id": f"product-{uid}",
             "productUid": uid,
+            "motionSeed": _product_motion_seed(project_id, account, uid),
             "productTitle": title,
             "priceRangeLabel": safe_text(product.get("price_label")),
             "spokenText": safe_text(block.get("body")),

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from bworkflow_sql.db import Database
 from bworkflow_sql.render_package_builder import (
+    _product_motion_seed,
     _price_transition_sound_effects,
     build_product_recommendation_package,
     product_card_content_fingerprint,
@@ -64,6 +65,14 @@ def test_price_transition_sound_effects_use_the_shared_asset_contract(tmp_path: 
         "itemTick": str(sfx_dir / "sfx_progress_tick.wav"),
         "exitWhoosh": str(sfx_dir / "sfx_transition_whoosh.wav"),
     }
+
+
+def test_product_motion_seed_is_stable_per_project_account_and_product():
+    first = _product_motion_seed(23, "小博", "P001")
+
+    assert first == _product_motion_seed(23, "小博", "P001")
+    assert first != _product_motion_seed(23, "小燃", "P001")
+    assert first != _product_motion_seed(24, "小博", "P001")
 
 
 def _insert_script(
