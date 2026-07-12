@@ -12,7 +12,7 @@ from typing import Any
 
 from .db import Database
 from .repositories import Repository
-from .settings import INTERNAL_WORKSPACE_ROOT
+from .settings import DEFAULT_INTRO_ASSET_ROOT, INTERNAL_WORKSPACE_ROOT
 from .subtitle_helpers import (
     align_subtitle_jobs_with_asr_grouped,
     align_subtitle_text_with_asr,
@@ -45,6 +45,23 @@ GLOBAL_SUBTITLE_STYLE_IDS = (
     "tech_cyan",
     "orange_energy",
 )
+
+PRICE_TRANSITION_SFX_FILES = {
+    "titleHit": "sfx_title_hit.wav",
+    "itemTick": "sfx_progress_tick.wav",
+    "exitWhoosh": "sfx_transition_whoosh.wav",
+}
+
+
+def _price_transition_sound_effects(
+    asset_root: str | Path = DEFAULT_INTRO_ASSET_ROOT,
+) -> dict[str, str]:
+    sfx_dir = Path(asset_root) / "1-音效"
+    resolved = {role: sfx_dir / filename for role, filename in PRICE_TRANSITION_SFX_FILES.items()}
+    missing = [path for path in resolved.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"price transition sound effect is missing: {missing[0]}")
+    return {role: str(path) for role, path in resolved.items()}
 OUTRO_TEMPLATE_IDS = (
     "outro-dark-line",
     "outro-cool-band",
@@ -333,6 +350,7 @@ def build_product_recommendation_package(
             "transitionText": body,
             "priceTransitionCard": _build_price_transition_card(label, body, duration=duration),
             "voiceAsset": str(voice_path),
+            "soundEffects": _price_transition_sound_effects(),
             "duration": duration,
             "sourceScriptBlockId": int(block.get("id") or 0),
         }

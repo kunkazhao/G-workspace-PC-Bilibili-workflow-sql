@@ -4,6 +4,7 @@ from pathlib import Path
 
 from bworkflow_sql.db import Database
 from bworkflow_sql.render_package_builder import (
+    _price_transition_sound_effects,
     build_product_recommendation_package,
     product_card_content_fingerprint,
 )
@@ -46,6 +47,23 @@ def _seed_project(tmp_path: Path) -> tuple[Database, int]:
         ],
     )
     return db, project_id
+
+
+def test_price_transition_sound_effects_use_the_shared_asset_contract(tmp_path: Path):
+    sfx_dir = tmp_path / "1-音效"
+    sfx_dir.mkdir()
+    for filename in (
+        "sfx_title_hit.wav",
+        "sfx_progress_tick.wav",
+        "sfx_transition_whoosh.wav",
+    ):
+        (sfx_dir / filename).write_bytes(b"sfx")
+
+    assert _price_transition_sound_effects(tmp_path) == {
+        "titleHit": str(sfx_dir / "sfx_title_hit.wav"),
+        "itemTick": str(sfx_dir / "sfx_progress_tick.wav"),
+        "exitWhoosh": str(sfx_dir / "sfx_transition_whoosh.wav"),
+    }
 
 
 def _insert_script(
