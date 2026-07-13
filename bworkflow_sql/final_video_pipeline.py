@@ -639,13 +639,23 @@ def _read_clip_cache_summary(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {"manifest_path": str(path), "readable": False}
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
-    return {
+    result = {
         "manifest_path": str(path),
         "readable": True,
         "segments_total": summary.get("segments_total", 0),
         "cache_hits": summary.get("cache_hits", 0),
         "rendered": summary.get("rendered", 0),
     }
+    timings = payload.get("timings")
+    if isinstance(timings, dict):
+        result["timings"] = dict(timings)
+    video_encoding = payload.get("videoEncoding")
+    if isinstance(video_encoding, dict):
+        result["video_encoding"] = dict(video_encoding)
+    mastering = payload.get("mastering")
+    if isinstance(mastering, dict):
+        result["mastering"] = dict(mastering)
+    return result
 
 
 def _write_final_video_run_manifest(

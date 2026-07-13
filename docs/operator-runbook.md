@@ -243,16 +243,13 @@ python -m bworkflow_sql render-final-video <project_id> --account <账号> --int
 显式提供原稿。无引言原稿时必须阻断。
 
 CutMe 使用同一 `output.subtitles.styleId` 烧录引言、商品和结尾字幕；合并前每段都按
-`audio.loudnessTarget` 归一化，成片再执行母带响度处理。结尾从
-系统从六套已确认的视频结尾模板中随机选一个：`outro-dark-line`、`outro-cool-band`、`outro-ambient-glow`、`outro-editorial-light`、`outro-red-slate`、`outro-monochrome`。选择结果和 seed 写入包内，便于复现。
+`audio.loudnessTarget` 归一化。整片先测量，只有满足响度、真峰值和 LRA 容差才跳过
+AAC 母带重编码；`--acceptance-mode full` 仍会独立扫描最终 AAC 文件。
 
-2026-07-13 另行验收了六条未来可用的整片结尾 MP4，存放在
-`G:\2026项目-b站\素材-自动剪辑\1-通用\整片结尾-*.mp4`。它们统一为 10 秒、
-1920×1080、30 fps、H.264 + AAC 48 kHz，包含轻提示音但不包含账号固定口播。
-**当前 `render-final-video` 尚未读取这个 MP4 素材池**，仍按上面的
-`outro.templateId + closing_audio_path` 路径生成结尾；后续修改调用逻辑时再把素材池
-接入 RenderPackage。不要把文件名含 `引导三连` 或画面含 `开始推荐` 的引言/中段素材
-当作整片结尾。
+结尾从 `G:\2026项目-b站\素材-自动剪辑\1-通用\*整片结尾*.mp4` 的排序候选中
+确定性选择，并把选择结果和 seed 写入 RenderPackage；账号固定
+`closing_audio_path` 作为口播混入该视频。候选缺失或结尾视频短于口播会在构包阶段阻断，
+不得回退旧的六套静态 CutMe outro 模板，也不得把 `引导三连` 等中段素材当作整片结尾。
 
 标准交付目录优先使用 `--delivery-dir <dir>`，不要让 Agent 临时拼多个输出路径：
 
@@ -264,7 +261,9 @@ python -m bworkflow_sql render-final-video <project_id> --account <账号> --int
 不要再创建 `01_最终成片` 二级目录，也不要把目录名、账号名塞进文件名。验收截图写入
 `02_验收证据\<timestamp>\frames\`，RenderPackage、片头字幕 ASS 等过程文件写入
 `03_过程记录\<timestamp>\`。项目级片段缓存仍在
-`data\workspace\project-<id>\render\final-video-cache\`，不进入交付目录。
+`data\workspace\project-<id>\render\final-video-cache\`，不进入交付目录。该共享目录由
+CutMe 跨进程互斥；片段以内容键命名并原子发布，失败批次只更新
+`clip-cache-manifest.in-progress.json`，完整成片和母带成功后才替换正式 manifest。
 
 `--acceptance-mode` 分四档：`none` 只保留文件/ffprobe 级验证；`quick`
 用于常规生产快验，不跑 loudnorm、不抽验收帧；`visual` 会抽关键帧但不跑
@@ -272,10 +271,15 @@ python -m bworkflow_sql render-final-video <project_id> --account <账号> --int
 返回和 run manifest 会记录 `timings`，用于复盘 package、CutMe 渲染、
 ffprobe、抽帧、loudnorm 各阶段耗时。
 
-CutMe fast-final 会在输出目录旁写
-`fast-final-work\clip-cache-manifest.json`，用于复用未变化的引言、价格、商品和结尾
-段。这个缓存是加速项，不是前置条件：如果用户移动或删除了指定输出目录，或某个
-clip 文件缺失，系统必须自动重渲染对应片段，不能因此阻断生成。
+CutMe fast-final 会在上面的项目级缓存目录写 `clip-cache-manifest.json`，用于跨运行复用
+未变化的引言、价格、商品和结尾段。manifest 同时记录命中/重渲染数量、阶段耗时、
+视频编码和母带证据，并由 B-Workflow 写入 run manifest。这个缓存是加速项，不是前置
+条件：manifest 不可读或某个 clip 缺失时，系统必须安全重渲染对应片段，不能因此阻断生成。
+
+当前生产默认保持 `libx264 veryfast -crf 23`，不是固定 6 Mbps。项目 17 的代表性完整
+实测中，价格转场批处理后的首次生成约 `407.84s`，24/24 命中重渲染约 `172.09s`；
+另一次 `superfast` 完整实验为 `471.45s` / `160.90s`，没有证明它能稳定改善首次总耗时，
+因此不得只根据 60 秒编码切片或 FFmpeg 的硬件编码器列表修改生产默认值。
 
 为了让缓存稳定生效，同一套任务输入下的“随机视觉项”必须可复现：
 `output.subtitles.styleId` 由 B-Workflow 按项目/账号/模板/媒体模式/排序策略稳定选择；

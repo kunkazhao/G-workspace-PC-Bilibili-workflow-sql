@@ -1012,6 +1012,29 @@ def test_run_final_video_pipeline_passes_project_level_cache_dir_to_cutme(
     assert clip_cache_fingerprint["exists"] is True
 
 
+def test_read_clip_cache_summary_preserves_performance_and_mastering_evidence(tmp_path: Path):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    manifest = tmp_path / "clip-cache-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "summary": {"segments_total": 24, "cache_hits": 24, "rendered": 0},
+                "timings": {"concat_ms": 105000, "loudnorm_ms": 31000},
+                "videoEncoding": {"final": {"encoder": "libx264"}},
+                "mastering": {"changed": False, "reason": "already_compliant"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = pipeline_module._read_clip_cache_summary(manifest)
+
+    assert result["timings"]["concat_ms"] == 105000
+    assert result["video_encoding"]["final"]["encoder"] == "libx264"
+    assert result["mastering"] == {"changed": False, "reason": "already_compliant"}
+
+
 def test_run_final_video_pipeline_records_latest_run_in_pipeline(tmp_path: Path, monkeypatch):
     prepared = {}
     import bworkflow_sql.final_video_pipeline as pipeline_module
