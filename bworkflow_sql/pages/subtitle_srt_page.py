@@ -63,7 +63,6 @@ from ..workflow_service import (
     subtitle_manifest_entries,
     voice_provider_label,
 )
-from ..asr import service as asr_service
 from ..dialogs import TaskProgressDialog
 from ..ui_helpers import (
     DialogSection,
@@ -122,8 +121,7 @@ from ..ui_helpers import (
 
 
 def _asr_alignment_label() -> str:
-    provider = asr_service.provider_label()
-    return f"ASR provider {provider} (model={DEFAULT_SUBTITLE_ASR_MODEL}, workers={DEFAULT_SUBTITLE_ASR_WORKERS})"
+    return f"精确原文强制对齐（model={DEFAULT_SUBTITLE_ASR_MODEL}, batch={DEFAULT_SUBTITLE_ASR_WORKERS}）"
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:

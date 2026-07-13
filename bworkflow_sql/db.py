@@ -84,6 +84,11 @@ CREATE TABLE IF NOT EXISTS asset_bindings (
     block_label TEXT NOT NULL DEFAULT '',
     script_id TEXT NOT NULL DEFAULT '',
     text_hash TEXT NOT NULL DEFAULT '',
+    voice_provider TEXT NOT NULL DEFAULT '',
+    voice_model TEXT NOT NULL DEFAULT '',
+    voice_id TEXT NOT NULL DEFAULT '',
+    synthesis_settings_hash TEXT NOT NULL DEFAULT '',
+    generation_fingerprint TEXT NOT NULL DEFAULT '',
     path TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'missing',
     source_kind TEXT NOT NULL DEFAULT 'scan',
@@ -146,13 +151,53 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS account_voice_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    voice_id TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    settings_json TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(account_id, provider)
+);
+
+CREATE TABLE IF NOT EXISTS production_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category_name TEXT NOT NULL,
+    scheme_id TEXT NOT NULL DEFAULT '',
+    scheme_name TEXT NOT NULL DEFAULT '',
+    account_label TEXT NOT NULL,
+    template_id TEXT NOT NULL,
+    template_display_name TEXT NOT NULL DEFAULT '',
+    template_dir TEXT NOT NULL DEFAULT '',
+    run_manifest_path TEXT NOT NULL UNIQUE,
+    original_full_mp4_path TEXT NOT NULL DEFAULT '',
+    full_mp4_path TEXT NOT NULL,
+    full_mp4_sha256 TEXT NOT NULL DEFAULT '',
+    full_mp4_size INTEGER NOT NULL DEFAULT 0,
+    acceptance_mode TEXT NOT NULL,
+    generated_at TEXT NOT NULL DEFAULT '',
+    confirmed_at TEXT NOT NULL,
+    publish_status TEXT NOT NULL DEFAULT 'confirmed',
+    published_at TEXT,
+    archived_at TEXT,
+    recipe_path TEXT NOT NULL DEFAULT '',
+    recipe_sha256 TEXT NOT NULL DEFAULT '',
+    recipe_status TEXT NOT NULL DEFAULT 'legacy_unknown',
+    supersedes_production_run_id INTEGER REFERENCES production_runs(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL,
     applied_at TEXT NOT NULL
 );
 """
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 8
 
 
 def _script_id_slug(value: Any) -> str:
@@ -237,6 +282,10 @@ class Database:
             (2, self._migrate_v2),
             (3, self._migrate_v3),
             (4, self._migrate_v4),
+            (5, self._migrate_v5),
+            (6, self._migrate_v6),
+            (7, self._migrate_v7),
+            (8, self._migrate_v8),
         ]
         for version, func in migrations:
             if current < version:
@@ -350,6 +399,133 @@ class Database:
             conn.execute("ALTER TABLE projects ADD COLUMN master_snapshot_id TEXT")
         if "master_snapshot_applied_at" not in project_columns:
             conn.execute("ALTER TABLE projects ADD COLUMN master_snapshot_applied_at TEXT")
+
+    def _migrate_v5(self, conn: sqlite3.Connection) -> None:
+        """Add the user-confirmed formal production ledger."""
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_production_runs_project_account ON production_runs(project_id, account_label, confirmed_at)"
+        )
+
+    def _migrate_v6(self, conn: sqlite3.Connection) -> None:
+        """Extend formal productions with publish/archive lifecycle state."""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(production_runs)").fetchall()}
+        for column, ddl in {
+            "original_full_mp4_path": "TEXT NOT NULL DEFAULT ''",
+            "full_mp4_sha256": "TEXT NOT NULL DEFAULT ''",
+            "full_mp4_size": "INTEGER NOT NULL DEFAULT 0",
+            "publish_status": "TEXT NOT NULL DEFAULT 'confirmed'",
+            "published_at": "TEXT",
+            "archived_at": "TEXT",
+        }.items():
+            if column not in columns:
+                conn.execute(f"ALTER TABLE production_runs ADD COLUMN {column} {ddl}")
+        conn.execute(
+            "UPDATE production_runs SET original_full_mp4_path=full_mp4_path WHERE original_full_mp4_path=''"
+        )
+
+    def _migrate_v7(self, conn: sqlite3.Connection) -> None:
+        """Add immutable recipe provenance and explicit revision links."""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(production_runs)").fetchall()}
+        for column, ddl in {
+            "recipe_path": "TEXT NOT NULL DEFAULT ''",
+            "recipe_sha256": "TEXT NOT NULL DEFAULT ''",
+            "recipe_status": "TEXT NOT NULL DEFAULT 'legacy_unknown'",
+            "supersedes_production_run_id": "INTEGER REFERENCES production_runs(id) ON DELETE SET NULL",
+        }.items():
+            if column not in columns:
+                conn.execute(f"ALTER TABLE production_runs ADD COLUMN {column} {ddl}")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_production_runs_supersedes ON production_runs(supersedes_production_run_id)"
+        )
+
+    def _migrate_v8(self, conn: sqlite3.Connection) -> None:
+        """Record provider-specific voice profiles and generated-audio provenance."""
+        asset_columns = {row[1] for row in conn.execute("PRAGMA table_info(asset_bindings)").fetchall()}
+        for column, ddl in {
+            "voice_provider": "TEXT NOT NULL DEFAULT ''",
+            "voice_model": "TEXT NOT NULL DEFAULT ''",
+            "voice_id": "TEXT NOT NULL DEFAULT ''",
+            "synthesis_settings_hash": "TEXT NOT NULL DEFAULT ''",
+            "generation_fingerprint": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if column not in asset_columns:
+                conn.execute(f"ALTER TABLE asset_bindings ADD COLUMN {column} {ddl}")
+
+        existing_profile_rows: list[sqlite3.Row] = []
+        profile_table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_voice_profiles'"
+        ).fetchone()
+        if profile_table_exists:
+            foreign_targets = {
+                safe_text(row[2]) for row in conn.execute("PRAGMA foreign_key_list(account_voice_profiles)").fetchall()
+            }
+            if foreign_targets and foreign_targets != {"accounts"}:
+                existing_profile_rows = conn.execute("SELECT * FROM account_voice_profiles").fetchall()
+                conn.execute("DROP TABLE account_voice_profiles")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS account_voice_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                voice_id TEXT NOT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                settings_json TEXT NOT NULL DEFAULT '{}',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(account_id, provider)
+            )
+            """
+        )
+        ts = now_iso()
+        valid_account_ids = {
+            int(row[0]) for row in conn.execute("SELECT id FROM accounts").fetchall()
+        }
+        for row in existing_profile_rows:
+            if int(row["account_id"]) not in valid_account_ids:
+                continue
+            conn.execute(
+                """
+                INSERT INTO account_voice_profiles
+                    (account_id, provider, voice_id, model, settings_json, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, provider) DO UPDATE SET
+                    voice_id=excluded.voice_id,
+                    model=excluded.model,
+                    settings_json=excluded.settings_json,
+                    enabled=excluded.enabled,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    row["account_id"],
+                    row["provider"],
+                    row["voice_id"],
+                    row["model"],
+                    row["settings_json"],
+                    row["enabled"],
+                    row["created_at"],
+                    row["updated_at"],
+                ),
+            )
+        accounts = conn.execute("SELECT id, voice_id, minimax_voice_id FROM accounts").fetchall()
+        for account in accounts:
+            for provider, voice_id in (("indextts", safe_text(account[1])), ("minimax", safe_text(account[2]))):
+                if not voice_id:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO account_voice_profiles
+                        (account_id, provider, voice_id, model, settings_json, enabled, created_at, updated_at)
+                    VALUES (?, ?, ?, '', '{}', 1, ?, ?)
+                    ON CONFLICT(account_id, provider) DO NOTHING
+                    """,
+                    (account[0], provider, voice_id, ts, ts),
+                )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_account_voice_profiles_account ON account_voice_profiles(account_id, provider)"
+        )
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> None:
         with self.connect() as conn:

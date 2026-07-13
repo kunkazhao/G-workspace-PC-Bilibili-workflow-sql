@@ -69,6 +69,8 @@ def test_run_final_video_pipeline_uses_one_adapter_call_and_preserves_cutme_resu
     output_mp4 = tmp_path / "final.mp4"
     cache_manifest = tmp_path / "cache" / "clip-cache-manifest.json"
     pipeline_path = tmp_path / ".pipeline.json"
+    intro_mp4 = tmp_path / "intro.mp4"
+    intro_mp4.write_bytes(b"intro")
     package_path.write_text(
         json.dumps({"schemaVersion": "1.0.0", "segments": []}),
         encoding="utf-8",
@@ -127,6 +129,8 @@ def test_run_final_video_pipeline_uses_one_adapter_call_and_preserves_cutme_resu
         package_output_path=package_path,
         output_path=output_mp4,
         pipeline_path=pipeline_path,
+        intro_video_path=intro_mp4,
+        intro_video_text="测试引言",
         acceptance_mode="none",
         cutme_root=tmp_path,
         cutme_adapter=adapter,
@@ -170,6 +174,8 @@ def test_run_final_video_pipeline_cutme_failure_stops_before_post_processing_or_
     package_path = tmp_path / "render-package.json"
     output_mp4 = tmp_path / "final.mp4"
     pipeline_path = tmp_path / ".pipeline.json"
+    intro_mp4 = tmp_path / "intro.mp4"
+    intro_mp4.write_bytes(b"intro")
     package_path.write_text(
         json.dumps({"schemaVersion": "1.0.0", "segments": []}),
         encoding="utf-8",
@@ -200,7 +206,9 @@ def test_run_final_video_pipeline_cutme_failure_stops_before_post_processing_or_
             account_label="小博",
             package_output_path=package_path,
             output_path=output_mp4,
-            pipeline_path=pipeline_path,
+                pipeline_path=pipeline_path,
+                intro_video_path=intro_mp4,
+                intro_video_text="测试引言",
             acceptance_mode="full",
             cutme_root=tmp_path,
             cutme_adapter=adapter,
@@ -554,7 +562,7 @@ def test_run_final_video_pipeline_renders_intro_and_outro_in_one_mp4_with_quick_
     assert manifest["reports"]["price_transition_report"]["items"][0]["after_top_products"] == 1
 
 
-def test_run_final_video_pipeline_delivery_dir_keeps_mp4s_at_root_and_evidence_in_subdirs(
+def test_run_final_video_pipeline_keeps_only_final_mp4_in_delivery_dir(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -587,11 +595,11 @@ def test_run_final_video_pipeline_delivery_dir_keeps_mp4s_at_root_and_evidence_i
         def prepare_product_recommendation_output(self, project_id, **kwargs):
             captured["package_output"] = Path(kwargs["package_output_path"])
             run_dir = captured["package_output"].parent
-            timestamp = run_dir.name
+            timestamp = run_dir.parent.name
             captured["process_dir"] = run_dir
-            captured["evidence_dir"] = delivery_dir / "02_验收证据" / timestamp
+            captured["evidence_dir"] = run_dir.parent / "acceptance"
             captured["frames_dir"] = captured["evidence_dir"] / "frames"
-            captured["product_mp4"] = delivery_dir / f"商品推荐段-{timestamp}.mp4"
+            captured["product_mp4"] = run_dir / f"product-section-{timestamp}.mp4"
             captured["full_mp4"] = delivery_dir / f"完整成片-{timestamp}.mp4"
             assert captured["package_output"] == run_dir / "render-package.json"
             return {
@@ -635,6 +643,8 @@ def test_run_final_video_pipeline_delivery_dir_keeps_mp4s_at_root_and_evidence_i
     assert not captured["product_mp4"].exists()
     assert captured["full_mp4"].is_file()
     assert not (delivery_dir / "01_最终成片").exists()
+    assert not (delivery_dir / "02_验收证据").exists()
+    assert not (delivery_dir / "03_过程记录").exists()
     manifest = json.loads(Path(result["run_manifest_path"]).read_text(encoding="utf-8"))
     assert manifest["outputs"]["product_mp4"] == str(captured["full_mp4"])
     assert manifest["outputs"]["full_mp4"] == str(captured["full_mp4"])

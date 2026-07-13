@@ -74,6 +74,33 @@ def _write_matching_intro_plan(tmp_path: Path, project_id: int, intro_text: str)
     )
 
 
+def _write_matching_price_plan(tmp_path: Path, project_id: int, price_text: str) -> None:
+    import bworkflow_sql.price_transition_plan as price_plan_module
+
+    plan = price_plan_module.validate_price_transition_plan_set(
+        {
+            "transitions": [
+                {
+                    "price_range_label": "300-500元",
+                    "block_label": "正文",
+                    "transition_text": price_text,
+                    "audience": "适合看连接和手感稳定性",
+                    "items": [
+                        {"label": "连接", "trigger_text": "连接"},
+                        {"label": "手感稳定", "trigger_text": "手感稳定性"},
+                    ],
+                }
+            ]
+        }
+    )
+    workspace = tmp_path / "workspace" / f"project-{project_id}" / "price-transitions"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "source-price-transition-plan-set.json").write_text(
+        json.dumps(plan, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
 def test_script_doctor_reports_missing_content_units(tmp_path: Path, monkeypatch):
     import bworkflow_sql.markdown_paths as markdown_paths_module
 
@@ -495,11 +522,15 @@ Beta 复用文案。
 
 def test_script_doctor_reports_ready_to_sync_when_copy_units_exist(tmp_path: Path, monkeypatch):
     import bworkflow_sql.cutme_intro as cutme_intro_module
+    import bworkflow_sql.price_transition_plan as price_plan_module
 
     monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    monkeypatch.setattr(price_plan_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
     db, project_id, md_path = _seed_project(tmp_path)
     intro_text = "最近想买键盘吗？先别急着看参数。"
+    price_text = "这个价位开始更适合看连接和手感稳定性。"
     _write_matching_intro_plan(tmp_path, project_id, intro_text)
+    _write_matching_price_plan(tmp_path, project_id, price_text)
     md_path.write_text(
         f"""
 ## 引言文案
@@ -528,7 +559,7 @@ Beta 的单品文案。
 
 #### 正文
 
-这个价位开始更适合看连接和手感稳定性。
+{price_text}
 """.strip(),
         encoding="utf-8",
     )
@@ -593,17 +624,19 @@ Beta 的单品文案。
     assert any(issue["code"] == "missing_matching_intro_plan" for issue in result["issues"])
     assert result["next"]["action"] == "create_intro_plan"
     assert result["next"]["task"] == "补引言剪辑计划"
-    assert result["next"]["command"] == f"python -m bworkflow_sql intro-plan {project_id} --slots <slots.json> --label 引言1 --sync"
-    assert result["next"]["requires_user_final_approval"] is True
+    assert result["next"]["command"] == f"python -m bworkflow_sql intro-plan {project_id} --slots <slots.json> --label 引言1"
+    assert result["next"]["requires_user_final_approval"] is False
 
 
-def test_script_doctor_reports_ready_after_markdown_sync(tmp_path: Path, monkeypatch):
+def test_script_doctor_blocks_price_transition_plan_hash_mismatch(tmp_path: Path, monkeypatch):
     import bworkflow_sql.cutme_intro as cutme_intro_module
+    import bworkflow_sql.price_transition_plan as price_plan_module
 
     monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    monkeypatch.setattr(price_plan_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
     db, project_id, md_path = _seed_project(tmp_path)
-    intro_text = "最近想买键盘吗？先别急着看参数。"
-    _write_matching_intro_plan(tmp_path, project_id, intro_text)
+    intro_text = "最近想买键盘吗？先看真实使用场景。"
+    price_text = "三百到五百元重点看连接稳定和按键手感，适合长期办公的人。"
     md_path.write_text(
         f"""
 ## 引言文案
@@ -632,7 +665,79 @@ Beta 的单品文案。
 
 #### 正文
 
-这个价位开始更适合看连接和手感稳定性。
+{price_text}后来又手动改了一句。
+""".strip(),
+        encoding="utf-8",
+    )
+    _write_matching_intro_plan(tmp_path, project_id, intro_text)
+    plan = price_plan_module.validate_price_transition_plan_set(
+        {
+            "transitions": [
+                {
+                    "price_range_label": "300-500元",
+                    "block_label": "正文",
+                    "transition_text": price_text,
+                    "audience": "适合长期办公的人",
+                    "items": [
+                        {"label": "连接稳定", "trigger_text": "连接稳定"},
+                        {"label": "按键手感", "trigger_text": "按键手感"},
+                    ],
+                }
+            ]
+        }
+    )
+    plan_path = price_plan_module.price_transition_plan_path(project_id)
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
+    result = diagnose_script_flow(db, project_id=project_id, intro_label="引言1")
+
+    assert result["status"] == "content_incomplete"
+    assert any(issue["code"] == "missing_matching_price_transition_plan" for issue in result["issues"])
+    assert result["next"]["action"] == "rebuild_price_transition_plan"
+    assert result["next"]["requires_user_final_approval"] is False
+
+
+def test_script_doctor_reports_ready_after_markdown_sync(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.cutme_intro as cutme_intro_module
+    import bworkflow_sql.price_transition_plan as price_plan_module
+
+    monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    monkeypatch.setattr(price_plan_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    db, project_id, md_path = _seed_project(tmp_path)
+    intro_text = "最近想买键盘吗？先别急着看参数。"
+    price_text = "这个价位开始更适合看连接和手感稳定性。"
+    _write_matching_intro_plan(tmp_path, project_id, intro_text)
+    _write_matching_price_plan(tmp_path, project_id, price_text)
+    md_path.write_text(
+        f"""
+## 引言文案
+
+### 引言1
+
+{intro_text}
+
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha 的单品文案。
+
+### 399元-P002-Beta Keyboard
+
+#### 正文
+
+Beta 的单品文案。
+
+## 价格过渡文案
+
+### 300-500元
+
+#### 正文
+
+{price_text}
 """.strip(),
         encoding="utf-8",
     )

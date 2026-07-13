@@ -45,6 +45,7 @@
 - [x] 7.2 拆出 `draft_helpers.py`（108 行：剪映草稿格式化）
 - [x] 7.3 拆出 `subtitle_helpers.py`（465 行：字幕断行 + ASR 对齐 + SRT 格式化）
 - [x] 7.4 `workflow_service.py` 保留 WorkflowService 类 + 编排（1985 行，从 2939 行降 32%）
+- [x] 7.5 拆出 `tts_contracts.py` / `tts_adapters.py`：统一生成身份、request/result、fail-closed registry 和 IndexTTS/MiniMax 适配器；业务循环不再按 provider 分叉
 - [x] 7.5 更新测试 import，跑回归（117 passed）
 
 ## 第三阶段：解耦旧依赖

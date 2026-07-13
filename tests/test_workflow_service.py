@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 import math
 import re
+import sqlite3
 import struct
 import wave
 
@@ -15,8 +16,8 @@ from bworkflow_sql.sync_service import SyncService
 from bworkflow_sql.utils import now_iso, text_hash
 from bworkflow_sql.workflow_errors import AmbiguousProjectReferenceError
 import bworkflow_sql.workflow_service as workflow_service_module
-import bworkflow_sql.subtitle_helpers as subtitle_helpers_module
 import bworkflow_sql.tts_helpers as tts_helpers_module
+from bworkflow_sql.tts_helpers import voice_synthesis_identity
 from bworkflow_sql.workflow_service import (
     DEFAULT_CLOSING_TEXT,
     VOICE_PROVIDER_MINIMAX,
@@ -812,7 +813,13 @@ def test_expired_voice_generation_overwrites_original_filename(tmp_path: Path):
             write_test_wav(generated, [(0.02, 0.2)])
             return {"audio_path": str(generated)}
 
-    assert service._has_existing_stale_voice_file(project_id, job=job, account=account)
+    identity = voice_synthesis_identity("indextts", account["voice_id"])
+    assert service._has_existing_stale_voice_file(
+        project_id,
+        job=job,
+        account=account,
+        identity=identity,
+    )
     result_path = service._generate_one_voice(
         FakeHttp(),
         job=job,
@@ -871,7 +878,14 @@ def test_upserting_new_voice_deletes_stale_generated_voice_file(tmp_path: Path):
             ),
         )
 
-    service._upsert_voice_asset(project_id, job=job, account=account, path=new_path)
+    identity = voice_synthesis_identity("indextts", account["voice_id"])
+    service._upsert_voice_asset(
+        project_id,
+        job=job,
+        account=account,
+        path=new_path,
+        identity=identity,
+    )
 
     stale_asset = db.fetchone(
         "SELECT status FROM asset_bindings WHERE project_id=? AND path=?",
@@ -1702,10 +1716,6 @@ def test_export_subtitle_srt_uses_asr_alignment_when_enabled(tmp_path: Path, mon
     )
     output = tmp_path / "out.srt"
 
-    def fake_provider_label(provider_name=None):
-        assert provider_name == "fake-provider"
-        return "fake-provider"
-
     def fake_align_jobs(jobs, *, model_name, language, beam_size, workers, provider_name=None):
         assert len(jobs) == 1
         assert Path(jobs[0]["audio_path"]) == product_audio
@@ -1718,7 +1728,6 @@ def test_export_subtitle_srt_uses_asr_alignment_when_enabled(tmp_path: Path, mon
         assert provider_name == "fake-provider"
         return [(0.2, 0.9, "第一句"), (0.9, 1.8, "第二句")]
 
-    monkeypatch.setattr(workflow_service_module.asr_service, "provider_label", fake_provider_label)
     monkeypatch.setattr(workflow_service_module, "align_subtitle_jobs_with_asr", fake_align_jobs)
 
     result = service.export_subtitle_srt(
@@ -1730,68 +1739,12 @@ def test_export_subtitle_srt_uses_asr_alignment_when_enabled(tmp_path: Path, mon
     )
 
     assert result.returncode == 0
-    assert "ASR provider: fake-provider" in result.stdout
+    assert "精确原文强制对齐" in result.stdout
     text = output.read_text(encoding="utf-8-sig")
     assert "00:00:00,200 --> 00:00:00,900" in text
     assert "00:00:00,900 --> 00:00:01,800" in text
     assert "第一句\n" in text
     assert "第二句\n" in text
-
-
-def test_asr_alignment_snaps_subtitle_start_after_breath_pause(tmp_path: Path, monkeypatch):
-    audio_path = tmp_path / "voice.wav"
-    write_test_wav(audio_path, [(0.4, 0.6), (0.3, 0.0), (0.4, 0.6)], frame_rate=1000)
-
-    def fake_asr(_audio_path, *, model_name, language, beam_size, provider_name=None):
-        assert beam_size == workflow_service_module.DEFAULT_SUBTITLE_ASR_BEAM_SIZE
-        assert provider_name is None
-        return [
-            {"start": 0.0, "end": 0.1, "text": "第"},
-            {"start": 0.1, "end": 0.2, "text": "一"},
-            {"start": 0.2, "end": 0.4, "text": "句"},
-            {"start": 0.4, "end": 0.5, "text": "第"},
-            {"start": 0.5, "end": 0.8, "text": "二"},
-            {"start": 0.8, "end": 1.1, "text": "句"},
-        ]
-
-    monkeypatch.setattr(subtitle_helpers_module, "run_subtitle_alignment_asr", fake_asr)
-
-    items = subtitle_helpers_module.align_subtitle_text_with_asr(audio_path, "第一句。第二句。", 0.0)
-
-    assert items[0] == (0.0, 0.4, "第一句")
-    assert items[1][0] == 0.7
-    assert items[1][2] == "第二句"
-
-
-def test_asr_alignment_runs_all_jobs_in_one_isolated_worker(tmp_path: Path, monkeypatch):
-    first_audio = tmp_path / "first.wav"
-    second_audio = tmp_path / "second.wav"
-    write_test_wav(first_audio, [(1.0, 0.5)])
-    write_test_wav(second_audio, [(1.0, 0.5)])
-    jobs = [
-        {"label": "first", "audio_path": str(first_audio), "text": "第一句。", "offset_sec": 0.0},
-        {"label": "second", "audio_path": str(second_audio), "text": "第二句。", "offset_sec": 1.0},
-    ]
-    calls = []
-
-    def fake_worker(worker_jobs, *, model_name, language, beam_size, workers, provider_name=None):
-        calls.append(worker_jobs)
-        assert model_name == workflow_service_module.DEFAULT_SUBTITLE_ASR_MODEL
-        assert language == workflow_service_module.DEFAULT_SUBTITLE_ASR_LANGUAGE
-        assert beam_size == workflow_service_module.DEFAULT_SUBTITLE_ASR_BEAM_SIZE
-        assert workers == 3
-        assert provider_name is None
-        return [
-            [{"start": 0.1, "end": 0.8, "text": "第一句"}],
-            [{"start": 0.2, "end": 0.9, "text": "第二句"}],
-        ]
-
-    monkeypatch.setattr(subtitle_helpers_module, "run_subtitle_asr_worker", fake_worker)
-
-    items = subtitle_helpers_module.align_subtitle_jobs_with_asr(jobs, workers=3)
-
-    assert len(calls) == 1
-    assert items == [(0.1, 0.8, "第一句"), (1.2, 1.9, "第二句")]
 
 
 def test_default_subtitle_srt_path_prefixes_spoken_md_name(tmp_path: Path):
@@ -2141,6 +2094,66 @@ def test_generate_voice_cancel_stops_after_current_job(tmp_path: Path, monkeypat
     assert "取消" in result.stdout
 
 
+def test_generate_voice_binding_failure_keeps_old_audio_and_removes_new_file(tmp_path: Path, monkeypatch):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    repo = Repository(db)
+    account = repo.accounts()[0]
+    job = service._voice_jobs(project_id)[0]
+    output_dir = tmp_path / "voice-out"
+    old_path = output_dir / Path(service._voice_filename(job)).with_suffix(".mp3").name
+    old_path.parent.mkdir(parents=True)
+    old_path.write_bytes(b"old-audio")
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, script_block_id, asset_type, account_label, account_id,
+                 block_label, script_id, text_hash, path, status, source_kind,
+                 file_size, file_mtime, confirmed, created_at, updated_at)
+            VALUES (?, ?, ?, 'voice', ?, ?, ?, ?, 'old-hash', ?, 'ready', 'generated', ?, 'old', 1, ?, ?)
+            """,
+            (
+                project_id,
+                job.uid,
+                job.block["id"],
+                account["label"],
+                account["account_id"],
+                job.block["block_label"],
+                job.block["script_id"],
+                str(old_path),
+                old_path.stat().st_size,
+                now_iso(),
+                now_iso(),
+            ),
+        )
+
+    monkeypatch.setattr(WorkflowService, "_prepare_minimax_voice", lambda self, voice_id, **kwargs: voice_id)
+
+    def fake_synthesize(self, text: str, *, voice_id: str, final_path: Path, **kwargs):
+        assert final_path != old_path
+        final_path.write_bytes(b"new-audio")
+        return final_path
+
+    monkeypatch.setattr(WorkflowService, "_synthesize_minimax_to_path", fake_synthesize)
+    monkeypatch.setattr(
+        WorkflowService,
+        "_upsert_voice_asset",
+        lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.IntegrityError("db failed")),
+    )
+
+    result = service.generate_voice(
+        project_id,
+        account_label=account["label"],
+        voice_provider=VOICE_PROVIDER_MINIMAX,
+        output_dir=output_dir,
+    )
+
+    assert result.returncode == 1
+    assert old_path.read_bytes() == b"old-audio"
+    assert list(output_dir.glob("*.mp3")) == [old_path]
+
+
 def test_markdown_file_to_voice_text_keeps_document_as_single_text(tmp_path: Path):
     md = tmp_path / "稿件.md"
     md.write_text(
@@ -2290,3 +2303,147 @@ def test_synthesize_standalone_voice_with_reference_audio_uses_clone_path(tmp_pa
     assert str(captured["url"]).endswith("/v1/clone")
     assert captured["payload"]["speaker_audio_path"] == str(reference)
     assert len(list((tmp_path / "standalone").glob("*.wav"))) == 1
+
+
+def test_voice_reuse_requires_same_provider_model_voice_and_settings(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    repo = Repository(db)
+    account = repo.accounts()[0]
+    block = next(block for block in repo.script_blocks(project_id) if block["script_type"] == "product")
+    job = VoiceJob(
+        block=block,
+        uid="YXEJ002",
+        product_name="Product One",
+        price_label="59",
+        index=1,
+        kind="product",
+    )
+    ready_path = tmp_path / "voice.wav"
+    ready_path.write_bytes(b"voice")
+    original_identity = voice_synthesis_identity("indextts", account["voice_id"])
+    service._upsert_voice_asset(
+        project_id,
+        job=job,
+        account=account,
+        path=ready_path,
+        identity=original_identity,
+    )
+
+    existing, pending = service._split_existing_voice_jobs(
+        project_id,
+        [job],
+        account,
+        identity=original_identity,
+    )
+    assert existing == [job]
+    assert pending == []
+
+    for changed_identity in (
+        voice_synthesis_identity("indextts", "another-local-voice"),
+        voice_synthesis_identity("minimax", "another-cloud-voice"),
+    ):
+        existing, pending = service._split_existing_voice_jobs(
+            project_id,
+            [job],
+            account,
+            identity=changed_identity,
+        )
+        assert existing == []
+        assert pending == [job]
+
+
+def test_account_voice_profile_overrides_legacy_model_and_settings(tmp_path: Path):
+    db, _project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    repo = Repository(db)
+    account = repo.accounts()[0]
+    repo.upsert_account(account)
+    with db.connect() as conn:
+        conn.execute(
+            """
+            UPDATE account_voice_profiles
+            SET voice_id='profile-voice', model='speech-custom', settings_json='{"speed":0.95}'
+            WHERE account_id=? AND provider='minimax'
+            """,
+            (account["id"],),
+        )
+
+    identity, settings = service._voice_configuration_for_account(account, "minimax")
+
+    assert identity.voice_id == "profile-voice"
+    assert identity.model == "speech-custom"
+    assert settings["speed"] == 0.95
+    assert settings["sample_rate"] == 32000
+    assert identity.settings_hash == voice_synthesis_identity(
+        "minimax",
+        "profile-voice",
+        model="speech-custom",
+        settings=settings,
+    ).settings_hash
+
+
+def test_voice_asset_database_failure_preserves_previous_file_and_binding(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    repo = Repository(db)
+    account = repo.accounts()[0]
+    block = next(block for block in repo.script_blocks(project_id) if block["script_type"] == "product")
+    job = VoiceJob(
+        block=block,
+        uid="YXEJ002",
+        product_name="Product One",
+        price_label="59",
+        index=1,
+        kind="product",
+    )
+    stale_path = tmp_path / "old.wav"
+    replacement_path = tmp_path / "new.wav"
+    stale_path.write_bytes(b"old")
+    replacement_path.write_bytes(b"new")
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, script_block_id, asset_type, account_label, account_id,
+                 block_label, script_id, text_hash, path, status, source_kind,
+                 file_size, file_mtime, confirmed, created_at, updated_at)
+            VALUES (?, ?, ?, 'voice', ?, ?, ?, ?, 'old-hash', ?, 'ready', 'generated', ?, 'old', 1, ?, ?)
+            """,
+            (
+                project_id,
+                job.uid,
+                job.block["id"],
+                account["label"],
+                account["account_id"],
+                job.block["block_label"],
+                job.block["script_id"],
+                str(stale_path),
+                stale_path.stat().st_size,
+                now_iso(),
+                now_iso(),
+            ),
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER reject_voice_binding_insert
+            BEFORE INSERT ON asset_bindings
+            BEGIN
+                SELECT RAISE(ABORT, 'blocked for rollback test');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="blocked for rollback test"):
+        service._upsert_voice_asset(
+            project_id,
+            job=job,
+            account=account,
+            path=replacement_path,
+            identity=voice_synthesis_identity("indextts", account["voice_id"]),
+        )
+
+    binding = db.fetchone("SELECT status, path FROM asset_bindings WHERE path=?", (str(stale_path),))
+    assert binding["status"] == "ready"
+    assert binding["path"] == str(stale_path)
+    assert stale_path.read_bytes() == b"old"

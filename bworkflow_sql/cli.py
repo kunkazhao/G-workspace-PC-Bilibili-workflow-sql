@@ -29,8 +29,10 @@ from pathlib import Path
 from typing import Any
 
 from .cutme_intro import preflight_intro_plan_for_cutme
+from .cutme_adapter import CutMeAdapterError
 from .public_contracts import build_workflow_observation, build_workflow_observation_error
 from .settings import DEFAULT_INTRO_ASSET_ROOT
+from .tts_helpers import VOICE_PROVIDER_INDEXTTS, VOICE_PROVIDER_MINIMAX
 from .workflow_errors import (
     AmbiguousProjectReferenceError,
     InvalidWorkflowRequestError,
@@ -132,6 +134,8 @@ def cmd_create_project(args: argparse.Namespace) -> None:
     master = sync.sync_master_scheme(project_id, apply_changes=True) if args.sync_master else None
     project = repo.project(project_id)
     products = repo.products(project_id, include_removed=False)
+    from .media_workspace import build_media_workspace_plan, ensure_media_workspace
+    workspace = ensure_media_workspace(build_media_workspace_plan(project or {}, repo.accounts()))
     _json_out(
         {
             "ok": True,
@@ -149,6 +153,7 @@ def cmd_create_project(args: argparse.Namespace) -> None:
             }
             if master
             else None,
+            "media_workspace": workspace,
             "updated_at": now_iso(),
         }
     )
@@ -255,7 +260,7 @@ def cmd_voice(args: argparse.Namespace) -> None:
     result = wf.generate_voice(
         args.project_id,
         account_label=args.account or "",
-        voice_provider="minimax",
+        voice_provider=args.voice_provider,
         uids=args.uids.split(",") if args.uids else None,
         start_service_if_needed=False,
         progress_hook=lambda msg: logs.append(msg),
@@ -279,6 +284,7 @@ def cmd_voice_counts(args: argparse.Namespace) -> None:
     total, existing, pending = wf.voice_generation_counts(
         args.project_id,
         account_label=args.account or "",
+        voice_provider=args.voice_provider,
     )
     _json_out({
         "ok": True,
@@ -422,6 +428,28 @@ def cmd_intro_plan(args: argparse.Namespace) -> None:
     })
 
 
+def cmd_price_transition_plan(args: argparse.Namespace) -> None:
+    from .price_transition_plan import write_price_transition_plan_for_project
+
+    db, _, _, _ = _init()
+    result = write_price_transition_plan_for_project(
+        db=db,
+        project_id=args.project_id,
+        plan_input_path=args.plan,
+        markdown_path=args.markdown or None,
+        sync=args.sync,
+    )
+    _json_out({
+        "ok": True,
+        "project_id": args.project_id,
+        "plan_path": str(result.plan_path),
+        "markdown_path": str(result.markdown_path),
+        "transition_count": result.transition_count,
+        "synced": result.synced,
+        "sync_result": result.sync_result,
+    })
+
+
 def cmd_intro_preflight(args: argparse.Namespace) -> None:
     _, repo, _, _ = _init()
     project = repo.project(args.project_id)
@@ -445,81 +473,100 @@ def cmd_render_intro_video(args: argparse.Namespace) -> None:
         intro_label=args.intro_label,
         output_path=args.output or None,
         asset_root=args.asset_root,
+        pipeline_path=getattr(args, "pipeline", "") or None,
     )
     _json_out(result)
 
 
 def cmd_scaffold(args: argparse.Namespace) -> None:
-    """为项目预建素材目录骨架（商品图 / 配音 / Roll-B）。
-
-    目录基于项目记录的 root + 品类名（项目 name，如 家居-速干衣）+ 配音员：
-      商品图：{image_root}/{品类}/{配音员}/{模板}    模板 = 该配音员在 template_config 里的坐标模板
-      配音：  {voice_root}/{品类}/{配音员}
-      Roll-B：{video_root}/{品类}                  （不依赖配音员）
-
-    模板目录严格按 template_config.USER_TEMPLATES 建，不硬编码数量：
-    每个模板对应剪映草稿生成时的展示坐标（TEMPLATE_COORDS），建多余的模板目录
-    会和坐标表对不上，草稿生成时取不到坐标。
-
-    未指定 --account 时只建 Roll-B，待配音员确定后再补建带配音员的目录。
-    """
-    from .template_config import available_templates, image_set_for_template
+    """幂等建立或修复项目完整媒体工作区。"""
+    from .media_workspace import build_media_workspace_plan, ensure_media_workspace
 
     _, repo, _, _ = _init()
     project = repo.project(args.project_id)
     if not project:
         _json_err(f"项目不存在: {args.project_id}")
 
-    category = (project.get("name") or "").strip()
-    if not category:
-        _json_err("项目缺少品类名（name），无法建目录")
-
     account = (args.account or "").strip()
-    # 模板默认按配音员在 template_config 里的坐标模板取，不硬编码。
-    # --templates 显式传入时覆盖（应急用）。
-    template_warning = ""
-    if args.templates:
-        templates = [t.strip() for t in args.templates.split(",") if t.strip()]
-    elif account:
-        templates = [image_set_for_template(t) for t in available_templates(account)]
-        if not templates:
-            template_warning = f"配音员「{account}」不在 template_config.USER_TEMPLATES 中，未建任何模板目录，请先在坐标表里登记其模板"
-    else:
-        templates = []
+    templates = [value.strip() for value in (args.templates or "").split(",") if value.strip()]
+    plan = build_media_workspace_plan(
+        project,
+        repo.accounts(),
+        account_filter=account,
+        template_overrides=templates or None,
+    )
+    _json_out({"ok": True, "project_id": args.project_id, "category": project.get("name"), "plan": plan, **ensure_media_workspace(plan)})
 
-    image_root = (project.get("image_root") or "").strip()
-    voice_root = (project.get("voice_root") or "").strip()
-    video_root = (project.get("video_root") or "").strip()
 
-    plan: list[dict[str, str]] = []
-    if video_root:
-        plan.append({"path": str(Path(video_root) / category), "purpose": "Roll-B 视频（按品类，不分配音员）"})
-    if account and image_root:
-        for t in templates:
-            plan.append({"path": str(Path(image_root) / category / account / t), "purpose": f"商品图（{account} / {t}）"})
-    if account and voice_root:
-        plan.append({"path": str(Path(voice_root) / category / account), "purpose": f"配音文件（{account}）"})
+def cmd_confirm_production(args: argparse.Namespace) -> None:
+    from .production_history import ProductionHistoryService
 
-    created: list[dict[str, str]] = []
-    existed: list[dict[str, str]] = []
-    for entry in plan:
-        p = Path(entry["path"])
-        if p.exists():
-            existed.append(entry)
-        else:
-            p.mkdir(parents=True, exist_ok=True)
-            created.append(entry)
+    _, repo, _, _ = _init()
+    result = ProductionHistoryService(repo).confirm(
+        args.project_id,
+        run_manifest_path=args.run_manifest,
+        final_path=args.final_path or None,
+    )
+    if args.pipeline:
+        pipeline_path = Path(args.pipeline).expanduser().resolve()
+        payload = json.loads(pipeline_path.read_text(encoding="utf-8-sig"))
+        payload["production_confirmation"] = {
+            "status": "confirmed",
+            "production_run_id": result["production"]["id"],
+            "run_manifest_path": result["production"]["run_manifest_path"],
+            "confirmed_at": result["production"]["confirmed_at"],
+        }
+        phases = payload.get("phases") if isinstance(payload.get("phases"), dict) else {}
+        assembly = phases.get("assembly") if isinstance(phases.get("assembly"), dict) else {}
+        pending = assembly.get("pending_candidate") if isinstance(assembly.get("pending_candidate"), dict) else {}
+        if str(pending.get("run_manifest_path") or "") == result["production"]["run_manifest_path"]:
+            assembly.pop("pending_candidate", None)
+            phases["assembly"] = assembly
+            payload["phases"] = phases
+        pipeline_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        result["pipeline_path"] = str(pipeline_path)
+    _json_out(result)
 
-    _json_out({
-        "ok": True,
-        "category": category,
-        "account": account or None,
-        "templates": templates,
-        "created": created,
-        "existed": existed,
-        "account_dirs_pending": not account,
-        "warning": template_warning or None,
-    })
+
+def cmd_production_history(args: argparse.Namespace) -> None:
+    from .production_history import ProductionHistoryService
+
+    _, repo, _, _ = _init()
+    _json_out(ProductionHistoryService(repo).history(args.project_id, account_label=args.account))
+
+
+def cmd_rerender_production_preflight(args: argparse.Namespace) -> None:
+    from .production_history import ProductionHistoryService
+
+    _, repo, _, _ = _init()
+    _json_out(ProductionHistoryService(repo).rerender_preflight(args.production_run_id))
+
+
+def cmd_rerender_production(args: argparse.Namespace) -> None:
+    from .production_history import ProductionHistoryService
+
+    _, repo, _, _ = _init()
+    _json_out(
+        ProductionHistoryService(repo).rerender(
+            args.production_run_id,
+            pipeline_path=args.pipeline,
+            delivery_dir=args.delivery_dir or None,
+        )
+    )
+
+
+def cmd_complete_publishing(args: argparse.Namespace) -> None:
+    from .production_history import ProductionHistoryService
+
+    _, repo, _, _ = _init()
+    _json_out(
+        ProductionHistoryService(repo).complete_publishing(
+            args.production_run_id,
+            pipeline_path=args.pipeline,
+            archive_dir=args.archive_dir or None,
+            current_path=args.current_path or None,
+        )
+    )
 
 
 # ── assets-check ──────────────────────────────────────────────────────
@@ -791,15 +838,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--asset-type", choices=["image", "video", "voice"])
 
     # voice
-    p = sub.add_parser("voice", help="批量生成配音（MiniMax）")
+    p = sub.add_parser("voice", help="批量生成配音")
     p.add_argument("project_id", type=int)
     p.add_argument("--account", help="配音账户标签（如 小博）")
     p.add_argument("--uids", help="指定商品 UID，逗号分隔")
+    p.add_argument(
+        "--voice-provider",
+        choices=[VOICE_PROVIDER_MINIMAX, VOICE_PROVIDER_INDEXTTS],
+        default=VOICE_PROVIDER_MINIMAX,
+        help="配音实现；默认 minimax，传 indextts 可切回本地服务",
+    )
 
     # voice-counts
     p = sub.add_parser("voice-counts", help="配音生成数量预览")
     p.add_argument("project_id", type=int)
     p.add_argument("--account", help="配音账户标签")
+    p.add_argument(
+        "--voice-provider",
+        choices=[VOICE_PROVIDER_MINIMAX, VOICE_PROVIDER_INDEXTTS],
+        default=VOICE_PROVIDER_MINIMAX,
+        help="按指定配音实现计算可复用与待生成数量",
+    )
 
     # assemble
     p = sub.add_parser("assemble", help="组合口播稿")
@@ -850,24 +909,56 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--markdown", help="覆盖写入目标 MD；默认使用项目 md_path 或文案骨架默认路径")
     p.add_argument("--sync", action="store_true", help="写入 Markdown 后立即同步入库")
 
+    p = sub.add_parser("price-transition-plan", help="用结构化计划生成价格过渡文案和自动剪辑卡片源计划")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--plan", required=True, help="价格过渡结构化计划 JSON 文件")
+    p.add_argument("--markdown", help="覆盖写入目标 MD；默认使用项目文案路径")
+    p.add_argument("--sync", action="store_true", help="写入 Markdown 后立即同步入库；仅限用户确认定稿后")
+
     p = sub.add_parser("intro-preflight", help="Check CutMe intro template and material gates before rendering")
     p.add_argument("project_id", type=int)
     p.add_argument("--source-plan", required=True, help="source-intro-plan JSON path")
     p.add_argument("--asset-root", default=str(Path("G:/2026项目-b站/素材-自动剪辑")), help="intro material root")
     p.add_argument("--pipeline", default="", help="optional .pipeline.json path to record phase-6 preflight status")
 
-    p = sub.add_parser("render-intro-video", help="Render standalone phase-6 intro MP4 with burned subtitles")
+    p = sub.add_parser("render-intro-video", help="Render standalone phase-6 intro MP4 without temporary subtitles")
     p.add_argument("project_id", type=int)
     p.add_argument("--account", required=True, help="voice/account label")
     p.add_argument("--intro-label", default="引言1", help="intro block label, for example 引言1")
     p.add_argument("--output", "-o", help="intro MP4 output path; defaults to the project intro workspace")
     p.add_argument("--asset-root", default=str(DEFAULT_INTRO_ASSET_ROOT), help="intro material root")
+    p.add_argument("--pipeline", default="", help=".pipeline.json path; creates/reuses its project delivery directory")
 
     # scaffold
-    p = sub.add_parser("scaffold", help="预建素材目录骨架（商品图/配音/Roll-B）")
+    p = sub.add_parser("scaffold", help="建立或修复完整媒体工作区")
     p.add_argument("project_id", type=int)
-    p.add_argument("--account", help="配音员（如 小歪）；不传则只建 Roll-B 目录")
+    p.add_argument("--account", help="只修复指定账号；不传则处理所有启用账号")
     p.add_argument("--templates", help="覆盖商品图模板子目录（逗号分隔）；默认按配音员在 template_config 的坐标模板自动取")
+
+    p = sub.add_parser("confirm-production", help="将已验收完整 MP4 确认为正式成片")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--run-manifest", required=True, help="final-video run manifest 路径")
+    p.add_argument("--final-path", default="", help="显式确认后续剪辑导出的最终发布版 MP4；模板与生成来源仍取 run manifest")
+    p.add_argument("--pipeline", default="", help="可选 .pipeline.json；写入正式确认凭证")
+
+    p = sub.add_parser("production-history", help="查询正式成片模板历史与未使用模板推荐")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--account", required=True)
+
+    p = sub.add_parser("rerender-production-preflight", help="只读检查正式成片冻结配方和全部源文件")
+    p.add_argument("production_run_id", type=int)
+
+    p = sub.add_parser("rerender-production", help="仅按冻结配方重渲染并生成待确认候选片")
+    p.add_argument("production_run_id", type=int)
+    p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json；已发布状态不会被降级")
+    p.add_argument("--delivery-dir", default="", help="覆盖 pipeline 中的正式交付目录")
+
+    p = sub.add_parser("complete-publishing", help="记录发布完成并移动或重绑已发布成片")
+    p.add_argument("production_run_id", type=int)
+    p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json")
+    destination = p.add_mutually_exclusive_group()
+    destination.add_argument("--archive-dir", default="", help="覆盖默认归档目录；默认优先使用已发布视频下的当前月份目录，不存在则使用根目录")
+    destination.add_argument("--current-path", default="", help="成片已手工移动时传入当前完整路径")
 
     # assets-check
     p = sub.add_parser("assets-check", help="素材完整性检查")
@@ -915,7 +1006,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--subtitle-alignment",
         choices=["proportional", "asr"],
         default="proportional",
-        help="final_mp4 subtitle timing: proportional is fast; asr aligns text to audio for accuracy",
+        help="final_mp4 subtitle timing: asr uses exact-transcript forced alignment; proportional is a manual fallback",
     )
     p.add_argument("--output", "-o", help="render-package.json output path")
 
@@ -966,8 +1057,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="standard delivery directory: MP4s go at root, evidence/process files go into subdirectories",
     )
     p.add_argument("--intro-video", help="accepted intro MP4 to prepend to the product recommendation MP4")
-    p.add_argument("--intro-video-text", default="", help="intro spoken text for burned subtitles")
-    p.add_argument("--intro-video-text-file", default="", help="UTF-8 text file containing intro spoken text for subtitles")
+    p.add_argument("--intro-video-text", default="", help="intro spoken text for the final video's unified subtitles")
+    p.add_argument("--intro-video-text-file", default="", help="UTF-8 intro text file for the final video's unified subtitles")
     p.add_argument("--intro-video-source-plan", default="", help="source-intro-plan JSON; preferred for intro subtitle scene splitting")
     p.add_argument("--full-output", help="full MP4 output path when --intro-video is provided")
     p.add_argument("--pipeline", default="", help="optional .pipeline.json path to record the latest final MP4 run")
@@ -975,7 +1066,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--subtitle-alignment",
         choices=["proportional", "asr"],
         default="asr",
-        help="subtitle timing: asr is the normal accurate path; proportional is an explicit fast fallback",
+        help="subtitle timing: asr uses exact-transcript forced alignment; proportional is an explicit manual fallback",
     )
     p.add_argument(
         "--acceptance-mode",
@@ -1107,9 +1198,15 @@ DISPATCH = {
     "outline": cmd_outline,
     "research-pack": cmd_research_pack,
     "intro-plan": cmd_intro_plan,
+    "price-transition-plan": cmd_price_transition_plan,
     "intro-preflight": cmd_intro_preflight,
     "render-intro-video": cmd_render_intro_video,
     "scaffold": cmd_scaffold,
+    "confirm-production": cmd_confirm_production,
+    "production-history": cmd_production_history,
+    "rerender-production-preflight": cmd_rerender_production_preflight,
+    "rerender-production": cmd_rerender_production,
+    "complete-publishing": cmd_complete_publishing,
     "assets-check": cmd_assets_check,
     "render-package": cmd_render_package,
     "render-final-video": cmd_render_final_video,
@@ -1141,6 +1238,24 @@ def main() -> None:
         DISPATCH[args.command](args)
     except (ValueError, FileNotFoundError) as exc:
         _json_err(str(exc))
+    except CutMeAdapterError as exc:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "status": "repair_required",
+                    "error": {
+                        "code": exc.code,
+                        "message": str(exc),
+                        "retryable": exc.retryable,
+                        "diagnostic": exc.stderr,
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
     except Exception:
         _json_err(traceback.format_exc())
 

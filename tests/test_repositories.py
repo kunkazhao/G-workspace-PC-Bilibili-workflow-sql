@@ -95,7 +95,7 @@ def test_schema_version_table_exists(tmp_path: Path):
     db.close()
 
 
-def test_fresh_db_v4_has_nullable_master_snapshot_provenance(tmp_path: Path):
+def test_fresh_db_has_nullable_master_snapshot_provenance(tmp_path: Path):
     db = Database(tmp_path / "fresh-v4.db")
     project_id = db.upsert_project({"name": "keyboard"})
     columns = {
@@ -107,7 +107,7 @@ def test_fresh_db_v4_has_nullable_master_snapshot_provenance(tmp_path: Path):
         (project_id,),
     )
 
-    assert CURRENT_SCHEMA_VERSION == 4
+    assert CURRENT_SCHEMA_VERSION == 8
     assert "master_snapshot_id" in columns
     assert "master_snapshot_applied_at" in columns
     assert project["master_snapshot_id"] is None
@@ -115,7 +115,7 @@ def test_fresh_db_v4_has_nullable_master_snapshot_provenance(tmp_path: Path):
     db.close()
 
 
-def test_v3_database_upgrades_to_v4_without_backfilling_existing_project(tmp_path: Path):
+def test_v3_database_upgrades_to_current_without_backfilling_existing_project(tmp_path: Path):
     db_path = tmp_path / "legacy-v3.db"
     conn = sqlite3.connect(db_path)
     conn.executescript(
@@ -145,9 +145,78 @@ def test_v3_database_upgrades_to_v4_without_backfilling_existing_project(tmp_pat
         "SELECT version FROM schema_version ORDER BY version"
     )]
 
-    assert versions == [1, 2, 3, 4]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
     assert project["master_snapshot_id"] is None
     assert project["master_snapshot_applied_at"] is None
+    db.close()
+
+
+def test_voice_provenance_schema_and_account_profiles_are_created(tmp_path: Path):
+    db = Database(tmp_path / "voice-provenance.db")
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO accounts
+                (label, account_id, voice_id, minimax_voice_id, voice_name, created_at, updated_at)
+            VALUES ('小燃', 'xiaoran', 'local-xiaoran', 'cloud-xiaoran', '小燃', 'now', 'now')
+            """
+        )
+        conn.execute("DELETE FROM account_voice_profiles")
+        conn.execute("DELETE FROM schema_version WHERE version=8")
+    db.close()
+
+    migrated = Database(tmp_path / "voice-provenance.db")
+    asset_columns = {row["name"] for row in migrated.fetchall("PRAGMA table_info(asset_bindings)")}
+    profiles = migrated.fetchall(
+        "SELECT provider, voice_id FROM account_voice_profiles ORDER BY provider"
+    )
+
+    assert {
+        "voice_provider",
+        "voice_model",
+        "voice_id",
+        "synthesis_settings_hash",
+        "generation_fingerprint",
+    }.issubset(asset_columns)
+    assert [(row["provider"], row["voice_id"]) for row in profiles] == [
+        ("indextts", "local-xiaoran"),
+        ("minimax", "cloud-xiaoran"),
+    ]
+    migrated.close()
+
+
+def test_upsert_account_keeps_provider_profiles_in_sync(tmp_path: Path):
+    db = Database(tmp_path / "account-profiles.db")
+    repo = Repository(db)
+
+    account_id = repo.upsert_account(
+        {
+            "label": "小燃",
+            "account_id": "xiaoran",
+            "voice_id": "local-voice",
+            "minimax_voice_id": "cloud-voice",
+            "voice_name": "小燃",
+        }
+    )
+
+    assert repo.account_voice_profile(account_id, "indextts")["voice_id"] == "local-voice"
+    assert repo.account_voice_profile(account_id, "minimax")["voice_id"] == "cloud-voice"
+
+    repo.upsert_account({"label": "小燃", "voice_id": "local-voice-from-legacy"})
+    assert repo.account_voice_profile(account_id, "minimax")["voice_id"] == "cloud-voice"
+
+    repo.upsert_account(
+        {
+            "label": "小燃",
+            "account_id": "xiaoran",
+            "voice_id": "local-voice-2",
+            "minimax_voice_id": "",
+            "voice_name": "小燃",
+        }
+    )
+
+    assert repo.account_voice_profile(account_id, "indextts")["voice_id"] == "local-voice-2"
+    assert repo.account_voice_profile(account_id, "minimax") is None
     db.close()
 
 

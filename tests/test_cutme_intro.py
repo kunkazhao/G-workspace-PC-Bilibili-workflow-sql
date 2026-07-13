@@ -360,10 +360,9 @@ def test_prepare_cutme_config_writes_intro_subtitle_contract_from_scenes(
 
     subtitles = config["output"]["subtitles"]
     assert subtitles == {
-        "enabled": True,
-        "styleId": "impact_yellow",
+        "enabled": False,
         "source": "intro_plan_scenes",
-        "scope": "standalone_intro",
+        "scope": "final_video_only",
     }
     assert config["subtitles"] == [
         {"start": 0.0, "end": 2.2, "text": "第一句先说清楚问题"},
@@ -371,7 +370,7 @@ def test_prepare_cutme_config_writes_intro_subtitle_contract_from_scenes(
     ]
     saved = json.loads(config_path.read_text(encoding="utf-8"))
     assert saved["subtitles"] == config["subtitles"]
-    assert saved["output"]["subtitles"]["scope"] == "standalone_intro"
+    assert saved["output"]["subtitles"]["scope"] == "final_video_only"
 
 
 def test_prepare_cutme_config_splits_long_intro_scene_subtitles_with_shared_rules(

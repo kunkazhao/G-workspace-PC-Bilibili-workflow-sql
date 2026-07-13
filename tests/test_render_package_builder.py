@@ -357,7 +357,7 @@ def test_build_product_recommendation_package_from_ready_assets(
     assert all(Path(segment["imageCardAsset"]).is_absolute() for segment in products)
 
 
-def test_final_mp4_builds_one_batch_for_intro_products_and_random_outro(
+def test_final_mp4_builds_one_batch_with_deterministic_whole_video_outro(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -368,6 +368,12 @@ def test_final_mp4_builds_one_batch_for_intro_products_and_random_outro(
     closing = tmp_path / "closing.mp3"
     intro.write_bytes(b"intro")
     closing.write_bytes(b"closing")
+    outro_dir = tmp_path / "outro-assets" / "1-通用"
+    outro_dir.mkdir(parents=True)
+    outro_a = outro_dir / "整片结尾-A.mp4"
+    outro_b = outro_dir / "整片结尾-B.mp4"
+    outro_a.write_bytes(b"outro-a")
+    outro_b.write_bytes(b"outro-b")
     with db.connect() as conn:
         conn.execute(
             """
@@ -385,8 +391,9 @@ def test_final_mp4_builds_one_batch_for_intro_products_and_random_outro(
         return [[(0.1, 0.9, job["text"])] for job in jobs]
 
     monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
-    monkeypatch.setattr(builder, "probe_media_duration_seconds", lambda _path: 4.0)
+    monkeypatch.setattr(builder, "probe_media_duration_seconds", lambda path: 10.0 if "整片结尾" in Path(path).name else 4.0)
     monkeypatch.setattr(builder, "align_subtitle_jobs_with_asr_grouped", fake_grouped)
+    monkeypatch.setattr(builder, "DEFAULT_INTRO_ASSET_ROOT", outro_dir.parent)
 
     result = build_product_recommendation_package(
         db,
@@ -417,8 +424,24 @@ def test_final_mp4_builds_one_batch_for_intro_products_and_random_outro(
         "product-P002",
         "outro-fixed",
     ]
-    assert result.package["segments"][-1]["templateId"] in builder.OUTRO_TEMPLATE_IDS
-    assert result.package["segments"][-1]["seed"]
+    outro = result.package["segments"][-1]
+    assert Path(outro["videoAsset"]) in {outro_a.resolve(), outro_b.resolve()}
+    assert outro["seed"]
+    assert "templateId" not in outro
+    repeated = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+        product_order_strategy="stable",
+        subtitle_alignment="asr",
+        intro_video_path=intro,
+        intro_video_text="这是无字幕引言。",
+        include_outro=True,
+        closing_text="感谢观看，评论区留言。",
+    )
+    assert repeated.package["segments"][-1]["videoAsset"] == outro["videoAsset"]
+    assert repeated.package["segments"][-1]["seed"] == outro["seed"]
     assert all(segment["subtitles"] for segment in result.package["segments"])
     assert result.package["output"]["subtitles"]["styleScope"] == "global"
 
@@ -668,6 +691,139 @@ def test_price_transition_card_fallback_stays_as_short_parameter_slots(
     assert [item["label"] for item in card["items"]] == ["高端型号", "睡眠场景", "玩法"]
     assert all(len(item["label"]) <= 8 for item in card["items"])
     assert "基本上都是各品牌的高端型" not in card["keyPoints"]
+
+
+def test_structured_price_transition_plan_disables_keyword_inference(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import json
+    import bworkflow_sql.price_transition_plan as plan_module
+    import bworkflow_sql.render_package_builder as builder
+
+    monkeypatch.setattr(plan_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    db, project_id = _seed_ready_package_data(tmp_path)
+    body = "两百到三百元重点看水流稳定、档位调节和喷嘴适配，续航也够日常使用，适合正畸人群。"
+    with db.connect() as conn:
+        block_id = conn.execute(
+            "SELECT id FROM script_blocks WHERE script_type='price_transition'"
+        ).fetchone()["id"]
+        conn.execute(
+            "UPDATE script_blocks SET body=?, text_hash=? WHERE id=?",
+            (body, text_hash(body), block_id),
+        )
+        conn.execute(
+            "UPDATE asset_bindings SET text_hash=? WHERE asset_type='voice' AND script_block_id=?",
+            (text_hash(body), block_id),
+        )
+    plan = plan_module.validate_price_transition_plan_set(
+        {
+            "transitions": [
+                {
+                    "price_range_label": "200-300",
+                    "block_label": "正文",
+                    "transition_text": body,
+                    "audience": "适合正畸人群",
+                    "items": [
+                        {"label": "水流稳定", "trigger_text": "水流稳定"},
+                        {"label": "档位调节", "trigger_text": "档位调节"},
+                        {"label": "喷嘴适配", "trigger_text": "喷嘴适配"},
+                    ],
+                }
+            ]
+        }
+    )
+    target = plan_module.price_transition_plan_path(project_id)
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 9.0)
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+    )
+
+    segment = result.package["segments"][0]
+    assert result.missing == []
+    assert segment["priceTransitionPlanVersion"] == "1.0.0"
+    assert [item["label"] for item in segment["priceTransitionCard"]["items"]] == [
+        "水流稳定",
+        "档位调节",
+        "喷嘴适配",
+    ]
+    assert "续航" not in segment["priceTransitionCard"]["keyPoints"]
+
+
+def test_structured_price_transition_plan_hash_mismatch_blocks_package(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import json
+    import bworkflow_sql.price_transition_plan as plan_module
+    import bworkflow_sql.render_package_builder as builder
+
+    monkeypatch.setattr(plan_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    db, project_id = _seed_ready_package_data(tmp_path)
+    plan_body = "两百到三百元重点看水流稳定和档位调节，适合第一次购买的人。"
+    plan = plan_module.validate_price_transition_plan_set(
+        {
+            "transitions": [
+                {
+                    "price_range_label": "200-300",
+                    "block_label": "正文",
+                    "transition_text": plan_body,
+                    "audience": "适合第一次购买的人",
+                    "items": [
+                        {"label": "水流稳定", "trigger_text": "水流稳定"},
+                        {"label": "档位调节", "trigger_text": "档位调节"},
+                    ],
+                }
+            ]
+        }
+    )
+    target = plan_module.price_transition_plan_path(project_id)
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 9.0)
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+    )
+
+    assert any(item["kind"] == "price_transition_plan" for item in result.missing)
+    assert not any(segment["type"] == "price_transition" for segment in result.package["segments"])
+
+
+def test_structured_price_transition_timings_are_rebased_to_asr_subtitles():
+    from bworkflow_sql.render_package_builder import _align_price_transition_card_with_subtitles
+
+    segment = {
+        "type": "price_transition",
+        "duration": 8.0,
+        "transitionText": "这个价位先看水流稳定。接着看档位调节，适合第一次购买的人。",
+        "subtitles": [
+            {"start": 0.2, "end": 2.8, "text": "这个价位先看水流稳定"},
+            {"start": 3.6, "end": 7.4, "text": "接着看档位调节，适合第一次购买的人"},
+        ],
+        "priceTransitionCard": {
+            "items": [
+                {"label": "水流稳定", "triggerText": "水流稳定", "timing": {"start": 0.5, "duration": 7.5}},
+                {"label": "档位调节", "triggerText": "档位调节", "timing": {"start": 1.0, "duration": 7.0}},
+            ]
+        },
+    }
+
+    _align_price_transition_card_with_subtitles(segment)
+
+    starts = [item["timing"]["start"] for item in segment["priceTransitionCard"]["items"]]
+    assert 1.5 < starts[0] < 2.8
+    assert 4.0 < starts[1] < 6.0
+    assert starts == sorted(starts)
 
 
 def test_build_product_recommendation_package_reports_stale_product_image(

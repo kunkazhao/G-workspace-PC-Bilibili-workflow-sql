@@ -10,6 +10,7 @@ import wave
 from pathlib import Path
 from typing import Any
 
+from .tts_contracts import VoiceSynthesisIdentity, stable_payload_hash
 from .utils import safe_text
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ DEFAULT_TTS_FIELDS = {
 }
 VOICE_PROVIDER_INDEXTTS = "indextts"
 VOICE_PROVIDER_MINIMAX = "minimax"
+INDEXTTS_MODEL = "IndexTTS2"
 VOICE_PROVIDER_LABELS = {
     VOICE_PROVIDER_INDEXTTS: "IndexTTS 本地服务",
     VOICE_PROVIDER_MINIMAX: "MiniMax API",
@@ -40,6 +42,17 @@ MINIMAX_API_BASE_URL = "https://api.minimaxi.com"
 MINIMAX_T2A_URL = f"{MINIMAX_API_BASE_URL}/v1/t2a_v2"
 MINIMAX_VOICE_LIST_URL = f"{MINIMAX_API_BASE_URL}/v1/get_voice"
 MINIMAX_T2A_MODEL = "speech-2.8-hd"
+MINIMAX_DEFAULT_SYNTHESIS_SETTINGS = {
+    "speed": 1.2,
+    "emotion": "",
+    "text_normalization": True,
+    "volume": 1.0,
+    "pitch": 0,
+    "sample_rate": 32000,
+    "bitrate": 128000,
+    "format": "mp3",
+    "channel": 1,
+}
 MINIMAX_VOICE_ALIASES = {
     "知了": "bilibili-zhiliao",
     "蓉蓉": "rongrong-v2",
@@ -226,9 +239,12 @@ def seconds_to_frames(seconds: float, frame_rate: int) -> int:
 
 def normalize_voice_provider(value: str) -> str:
     text = safe_text(value).casefold()
+    if not text or text in {"indextts", "indextts 本地服务".casefold(), "index-tts", "local"}:
+        return VOICE_PROVIDER_INDEXTTS
     if text in {"minimax", "minimax api", "minimax-api", "minimax_api", "api", "MiniMax API".casefold()}:
         return VOICE_PROVIDER_MINIMAX
-    return VOICE_PROVIDER_INDEXTTS
+    available = ", ".join(sorted(VOICE_PROVIDER_LABELS))
+    raise ValueError(f"unknown TTS provider: {value}; available: {available}")
 
 
 def voice_provider_label(provider: str) -> str:
@@ -252,6 +268,38 @@ def account_voice_id_for_provider(account: dict[str, Any], provider: str) -> str
                 return resolved
         return ""
     return safe_text(account.get("voice_id") or account.get("account_id"))
+
+
+def default_voice_synthesis_settings(provider: str) -> dict[str, Any]:
+    normalized = normalize_voice_provider(provider)
+    source = MINIMAX_DEFAULT_SYNTHESIS_SETTINGS if normalized == VOICE_PROVIDER_MINIMAX else DEFAULT_TTS_FIELDS
+    return dict(source)
+
+
+def default_voice_model(provider: str) -> str:
+    normalized = normalize_voice_provider(provider)
+    return MINIMAX_T2A_MODEL if normalized == VOICE_PROVIDER_MINIMAX else INDEXTTS_MODEL
+
+
+def voice_synthesis_identity(
+    provider: str,
+    voice_id: str,
+    *,
+    model: str = "",
+    settings: dict[str, Any] | None = None,
+) -> VoiceSynthesisIdentity:
+    normalized = normalize_voice_provider(provider)
+    resolved_voice_id = resolve_minimax_voice_id(voice_id) if normalized == VOICE_PROVIDER_MINIMAX else safe_text(voice_id)
+    if not resolved_voice_id:
+        raise ValueError(f"{voice_provider_label(normalized)} requires a voice_id")
+    resolved_model = safe_text(model) or default_voice_model(normalized)
+    resolved_settings = dict(settings) if settings is not None else default_voice_synthesis_settings(normalized)
+    return VoiceSynthesisIdentity(
+        provider=normalized,
+        model=resolved_model,
+        voice_id=resolved_voice_id,
+        settings_hash=stable_payload_hash(resolved_settings),
+    )
 
 
 def _load_env_file_value(path: Path, key: str) -> str:

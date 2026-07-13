@@ -20,9 +20,10 @@
 | 项目重名 | `ProjectPageDialog` 保存前用 `project_name_exists(...)` 校验，重名时提示用户，不创建重复项目。 |
 | Master 同步 | 同步中心先预览 Master 变化；如果 Master API 连接失败，用 `MasterServiceManager.ensure_running()` 尝试启动 `G:\workspace\bilibili-newTools-next-master` 后端再重试预览。 |
 | 手动配音映射 | 同步中心的配音检查对缺失和过期配音提供 `手动映射音频`，调用 `SyncService.manual_bind_voice_asset(...)` 写入 `asset_bindings.source_kind='manual'`，并用当前文案 hash 标记 ready。 |
-| 配音方式 | `生成配音` 和 `单独配音` 都支持 `IndexTTS 本地服务` 与 `MiniMax API`。页面仍按同一个用户名称选择，后端用 `voice_id` 对应 IndexTTS、`minimax_voice_id` 对应 MiniMax。 |
+| 配音架构 | 项目配音通过 `TtsProviderRegistry` 调度 `IndexTtsProvider` / `MiniMaxTtsProvider`；业务循环只依赖统一 request/result 契约。CLI `voice` 与 `voice-counts` 都接受 `--voice-provider minimax|indextts`，默认 `minimax`，两步必须使用同一 provider。 |
+| 配音配置 | `account_voice_profiles(account_id, provider, voice_id, model, settings_json, enabled)` 是 provider 配置正本；`accounts.voice_id` 和 `accounts.minimax_voice_id` 只作迁移兼容。生成复用必须同时匹配账号、文本 hash、provider、model、voice ID 和合成设置。 |
 | MiniMax 配置 | API key 读取顺序是环境变量 `MINIMAX_API_KEY`，然后 `C:\Users\zhaoer\.codex\skills\zhaoer-tools-minimax-tts\.env`，再兼容旧路径 `C:\Users\zhaoer\.codex\skills\minimax-tts\.env` 和当前工作目录 `.env`。常用映射：小博 `xiaobo-v2`，小燃 `xiaoran-v2`，小歪 `xiaowai-v6`，知了 `bilibili-zhiliao`，荣荣/蓉蓉 `rongrong-v2`。 |
-| MiniMax 换音色 | 用 `scripts/swap_voice.py`；MiniMax 旧 voice id 不能覆盖，必须克隆到新的 `NEW_MINIMAX_VOICE_ID`。脚本兼容无 `MINIMAX_GROUP_ID` 的 `.env`，成功时输出 `SWAP_DONE=1`。 |
+| MiniMax 换音色 | 用 `scripts/swap_voice.py`；MiniMax 旧 voice id 不能覆盖，必须克隆到新的 `NEW_MINIMAX_VOICE_ID`。脚本更新 `account_voice_profiles` 和兼容字段，禁止字符串替换应用或外部 Skill 源码；成功时输出 `SWAP_DONE=1`。 |
 | IndexTTS 音色 | 本地 voice profile 的 `speaker_audio_path` 是重新注册 IndexTTS 的来源路径。更换参考音频时要同步 `data\bworkflow.db.voice_profiles`，不要只改 `G:\Tools\IndexTTS2.0\outputs\voices\voices.json`。 |
 | 小歪当前音色 | IndexTTS 参考音频：`G:\Tools\自己用的音色\小歪10秒新.mp3`；MiniMax voice id：`xiaowai-v6`。 |
 | 小歪结尾配音 | `accounts.closing_audio_path` 当前为 `G:\2026项目-b站\素材-配音\公共-结尾\小歪\结尾-小歪.mp3`；生成草稿时 `_closing_manifest_entry(...)` 只在文件存在时写入结尾音频。 |
@@ -32,3 +33,8 @@
 | 字幕断行 | `split_subtitle_text(...)` 对超长分句做语义断行，保留数字+单位、英文型号、小数和 `的/地/得` 结构，优先在连词前断。 |
 | 验证命令 | 从仓库根目录运行 `python -m pytest`，不要用裸 `pytest`。最小回归常用：`python -m pytest -q tests/test_workflow_service.py tests/test_ui_helpers.py tests/test_repositories.py tests/test_sync_service.py`。 |
 | 非价格过渡口播稿 | 当品类按用途/标签分组而非价格段时（如充电宝按品类标签），软件无法直接生成口播稿。完整流程和踩坑记录见 `docs/operator-runbook.md` 的「非价格过渡口播稿」章节。参考脚本：`scripts/batch_tts_chongdianbao.py`（批量配音）、`scripts/gen_manifest_chongdianbao.py`（生成 manifest）。 |
+| 媒体工作区 | `create-project` 自动建立所有启用账号的配音、实际配置模板商品图、Roll-B 和引言展示视频目录；`scaffold` 只做幂等修复。 |
+| 正式成片履历 | `render-final-video` 的 run manifest 不等于正式生产。用户确认后用 `confirm-production` 写 `production_runs`，选模板前用 `production-history`；测试和预览不计入。 |
+| 发布完成与归档 | 沿用 `production_runs` 与 `phases.publishing`。`complete-publishing` 默认使用 `G:\2026项目-b站\已发布视频` 下已存在的当前月份目录，不存在则放根目录；`--archive-dir` 覆盖，`--current-path` 重绑手工移动文件。 |
+| 视频组件与剪辑模板 | 进入 `zhaoer-bilibili-video-design`，先静态预览、再动画短样片、最后正式接入。不要做网页/HUD 风格，不改写结构化槽位；正式随机必须记录稳定 id 和 seed。 |
+| 手动测试目录 | 预览、短样片、RenderPackage、ASS、抽帧和测试缓存统一放在 `data\workspace\manual-tests\{测试主题}\`；默认不写正式 `.pipeline.json`，CutMe 临时 job 验证后只清理该次明确生成的目录。 |

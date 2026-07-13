@@ -4,13 +4,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .forced_alignment import (
+    DEFAULT_FORCED_ALIGNMENT_LANGUAGE,
+    DEFAULT_FORCED_ALIGNMENT_MODEL,
+    forced_alignment_results,
+    items_to_subtitle_segments,
+)
 from .subtitle_helpers import (
     DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
-    DEFAULT_SUBTITLE_ASR_LANGUAGE,
-    DEFAULT_SUBTITLE_ASR_MODEL,
-    align_subtitle_text_with_units,
     normalize_subtitle_alignment_text,
-    run_subtitle_alignment_asr,
 )
 from .utils import safe_text
 
@@ -20,21 +22,33 @@ def align_intro_plan_scenes_with_asr(
     audio_path: str | Path,
     *,
     offset_sec: float = 0.0,
-    model_name: str = DEFAULT_SUBTITLE_ASR_MODEL,
-    language: str = DEFAULT_SUBTITLE_ASR_LANGUAGE,
+    model_name: str = DEFAULT_FORCED_ALIGNMENT_MODEL,
+    language: str = DEFAULT_FORCED_ALIGNMENT_LANGUAGE,
     beam_size: int = DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
 ) -> dict[str, Any]:
     scenes = intro_plan_scenes(intro_plan)
     scene_texts = [scene["text"] for scene in scenes]
     validate_intro_scene_texts(intro_plan, scene_texts)
 
-    units = run_subtitle_alignment_asr(
-        audio_path,
+    forced_result = forced_alignment_results(
+        [{
+            "label": "引言场景与视觉事件",
+            "audio_path": str(audio_path),
+            "text": safe_text(intro_plan.get("full_script")) or "".join(scene_texts),
+        }],
         model_name=model_name,
         language=language,
-        beam_size=beam_size,
+        batch_size=1,
+    )[0]
+    units = forced_result.get("items") if isinstance(forced_result, dict) else None
+    if not isinstance(units, list):
+        raise ValueError("引言强制对齐结果缺少文字锚点。")
+    aligned = items_to_subtitle_segments(
+        scene_texts,
+        units,
+        offset_sec=offset_sec,
+        audio_duration_sec=float(forced_result.get("audio_duration_sec") or 0.0),
     )
-    aligned = align_subtitle_text_with_units(audio_path, scene_texts, units, offset_sec)
 
     result = dict(intro_plan)
     result["scenes"] = list(intro_plan.get("scenes") or [])
@@ -50,10 +64,9 @@ def align_intro_plan_scenes_with_asr(
         offset_sec=offset_sec,
     )
     result["timing_source"] = {
-        "type": "asr_scene_and_visual_event_alignment",
+        "type": "forced_transcript_scene_and_visual_event_alignment",
         "model": model_name,
         "language": language,
-        "beam_size": beam_size,
     }
     return result
 
@@ -138,7 +151,10 @@ def align_visual_event_specs_with_units(
             intro_plan=intro_plan,
         )
         if timing is None:
-            timing = _fallback_visual_event_timing(spec, intro_plan)
+            event_id = safe_text(spec.get("id")) or safe_text(spec.get("target")) or "未命名视觉事件"
+            raise ValueError(
+                f"引言视觉事件 {event_id} 的触发词无法在精确原文中定位：{trigger_text}"
+            )
         event["timing"] = timing
         event["alignment"] = {
             "source": timing.get("source") or "unknown",
@@ -192,30 +208,7 @@ def _align_visual_event_timing(
     return {
         "start": round(start, 3),
         "duration": round(max(0.25, min(0.8, end - start)), 3),
-        "source": "asr_trigger_text",
-    }
-
-
-def _fallback_visual_event_timing(
-    spec: dict[str, Any],
-    intro_plan: dict[str, Any],
-) -> dict[str, Any]:
-    scene_type = safe_text(spec.get("scene_type"))
-    order = max(0, int(spec.get("order") or 0))
-    scene_timing = _scene_timing(intro_plan, scene_type)
-    if not scene_timing:
-        return {"start": 0.0, "duration": 0.42, "source": "fallback_no_scene_timing"}
-
-    scene_start, scene_end = scene_timing
-    scene_duration = max(0.1, scene_end - scene_start)
-    event_count = max(1, _visual_event_count_for_scene(intro_plan, scene_type))
-    usable_start = scene_start + min(0.8, max(0.2, scene_duration * 0.12))
-    usable_duration = max(0.2, scene_duration - (usable_start - scene_start) - 0.35)
-    start = usable_start + usable_duration * min(order, event_count - 1) / event_count
-    return {
-        "start": round(start, 3),
-        "duration": 0.42,
-        "source": "fallback_scene_distribution",
+        "source": "forced_alignment_trigger_text",
     }
 
 
@@ -263,12 +256,12 @@ def _char_offset_to_unit_index(
     normalized_length: int,
     unit_count: int,
 ) -> int:
-    if unit_count <= 1 or normalized_length <= 1:
-        return 0
-    if unit_count == normalized_length:
-        return max(0, min(char_offset, unit_count - 1))
-    ratio = max(0.0, min(1.0, char_offset / max(normalized_length - 1, 1)))
-    return max(0, min(unit_count - 1, round(ratio * (unit_count - 1))))
+    if unit_count != normalized_length:
+        raise ValueError(
+            "引言视觉事件的强制对齐锚点没有完整覆盖精确原文："
+            f"原文 {normalized_length} 字，对齐 {unit_count} 字。"
+        )
+    return max(0, min(char_offset, unit_count - 1))
 
 
 def _scene_timing(intro_plan: dict[str, Any], scene_type: str) -> tuple[float, float] | None:
@@ -287,11 +280,3 @@ def _scene_timing(intro_plan: dict[str, Any], scene_type: str) -> tuple[float, f
             return None
         return start, start + duration
     return None
-
-
-def _visual_event_count_for_scene(intro_plan: dict[str, Any], scene_type: str) -> int:
-    return sum(
-        1
-        for spec in intro_plan.get("visual_event_specs") or []
-        if isinstance(spec, dict) and safe_text(spec.get("scene_type")) == scene_type
-    )

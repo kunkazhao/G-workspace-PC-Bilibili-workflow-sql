@@ -12,7 +12,12 @@ from typing import Any
 
 from .db import Database
 from .repositories import Repository
-from .settings import DEFAULT_INTRO_ASSET_ROOT, INTERNAL_WORKSPACE_ROOT
+from .settings import (
+    DEFAULT_INTRO_ASSET_ROOT,
+    DEFAULT_RECOMMENDATION_BACKGROUND_ROOT,
+    INTERNAL_WORKSPACE_ROOT,
+)
+from .subtitle_rules import normalize_subtitle_alignment_text
 from .subtitle_helpers import (
     align_subtitle_jobs_with_asr_grouped,
     align_subtitle_text_with_asr,
@@ -29,6 +34,13 @@ from .template_config import (
 )
 from .tts_helpers import DEFAULT_LOUDNORM_I, DEFAULT_LOUDNORM_LRA, DEFAULT_LOUDNORM_TP
 from .utils import safe_text, text_hash
+from .price_transition_plan import (
+    PRICE_TRANSITION_PLAN_VERSION,
+    find_price_transition_plan_for_text,
+    load_price_transition_plan_set,
+    price_transition_card_from_plan,
+    price_transition_plan_path,
+)
 
 
 SUPPORTED_OUTPUT_MODES = {"jianying_draft", "final_mp4"}
@@ -63,18 +75,12 @@ def _price_transition_sound_effects(
         raise FileNotFoundError(f"price transition sound effect is missing: {missing[0]}")
     return {role: str(path) for role, path in resolved.items()}
 
+
 def _product_motion_seed(project_id: int, account_label: str, product_uid: str) -> str:
     source = f"product-motion-v1|{project_id}|{safe_text(account_label)}|{safe_text(product_uid)}"
     return hashlib.sha256(source.encode("utf-8")).hexdigest()[:24]
-
-OUTRO_TEMPLATE_IDS = (
-    "outro-dark-line",
-    "outro-cool-band",
-    "outro-ambient-glow",
-    "outro-editorial-light",
-    "outro-red-slate",
-    "outro-monochrome",
-)
+WHOLE_VIDEO_OUTRO_KEYWORD = "整片结尾"
+WHOLE_VIDEO_OUTRO_COMMON_FOLDER = "1-通用"
 PRODUCT_COVER_CACHE_ROOT = INTERNAL_WORKSPACE_ROOT / "product-covers"
 PRICE_TRANSITION_KEYWORDS = [
     "品牌完成度",
@@ -323,8 +329,37 @@ def build_product_recommendation_package(
     stale_product_images: list[dict[str, Any]] = []
     price_segments: dict[str, dict[str, Any]] = {}
     product_segments: dict[str, dict[str, Any]] = {}
+    price_plan_error = ""
+    try:
+        strict_price_plan = load_price_transition_plan_set(project_id) is not None
+    except ValueError as exc:
+        strict_price_plan = True
+        price_plan_error = str(exc)
 
     for block in price_blocks:
+        label = safe_text(block.get("price_range_label"))
+        body = safe_text(block.get("body"))
+        block_label = safe_text(block.get("block_label")) or "正文"
+        matched_price_plan = None
+        if strict_price_plan and not price_plan_error:
+            matched_price_plan = find_price_transition_plan_for_text(
+                project_id,
+                price_range_label=label,
+                block_label=block_label,
+                body=body,
+            )
+        if strict_price_plan and (price_plan_error or matched_price_plan is None):
+            missing.append(
+                {
+                    "kind": "price_transition_plan",
+                    "price_range_label": label,
+                    "block_label": block_label,
+                    "path": str(price_transition_plan_path(project_id)),
+                    "message": price_plan_error
+                    or "price transition text does not match the structured source plan",
+                }
+            )
+            continue
         voice = _ready_asset(
             assets,
             asset_type="voice",
@@ -345,20 +380,25 @@ def build_product_recommendation_package(
             )
             continue
         voice_path = _absolute_file_path(voice.get("path"))
-        label = safe_text(block.get("price_range_label"))
-        body = safe_text(block.get("body"))
         duration = get_audio_duration_seconds(voice_path)
+        price_card = (
+            price_transition_card_from_plan(matched_price_plan, duration=duration)
+            if matched_price_plan is not None
+            else _build_price_transition_card(label, body, duration=duration)
+        )
         price_segments[label] = {
             "type": "price_transition",
             "id": f"price-{block.get('id')}",
             "priceRangeLabel": label,
             "transitionText": body,
-            "priceTransitionCard": _build_price_transition_card(label, body, duration=duration),
+            "priceTransitionCard": price_card,
             "voiceAsset": str(voice_path),
             "soundEffects": _price_transition_sound_effects(),
             "duration": duration,
             "sourceScriptBlockId": int(block.get("id") or 0),
         }
+        if matched_price_plan is not None:
+            price_segments[label]["priceTransitionPlanVersion"] = PRICE_TRANSITION_PLAN_VERSION
         if output_mode == "final_mp4":
             price_segments[label]["subtitles"] = (
                 []
@@ -560,28 +600,49 @@ def build_product_recommendation_package(
                 {"kind": "closing_text", "account": account, "message": "closing text is required"}
             )
         else:
-            outro_seed = f"{random.SystemRandom().getrandbits(64):016x}"
-            template_index = int(hashlib.sha1(outro_seed.encode("utf-8")).hexdigest()[:8], 16) % len(OUTRO_TEMPLATE_IDS)
-            outro_duration = get_audio_duration_seconds(closing_audio)
-            segments.append(
-                {
-                    "type": "outro",
-                    "id": "outro-fixed",
-                    "spokenText": outro_text,
-                    "voiceAsset": str(closing_audio),
-                    "duration": outro_duration,
-                    "templateId": OUTRO_TEMPLATE_IDS[template_index],
-                    "seed": outro_seed,
-                    "subtitles": (
-                        []
-                        if subtitle_mode == "asr"
-                        else _segment_subtitles(outro_text, outro_duration, subtitle_alignment=subtitle_mode)
-                    ),
-                }
+            outro_video, outro_seed = _select_whole_video_outro(
+                project_id=project_id,
+                account=account,
+                closing_text=outro_text,
+                segment_ids=[safe_text(item.get("id")) for item in segments],
             )
+            outro_duration = probe_media_duration_seconds(outro_video)
+            closing_duration = get_audio_duration_seconds(closing_audio)
+            if closing_duration > outro_duration + 0.05:
+                missing.append(
+                    {
+                        "kind": "closing_video_too_short",
+                        "account": account,
+                        "video": str(outro_video),
+                        "video_duration": outro_duration,
+                        "voice_duration": closing_duration,
+                        "message": "whole-video outro MP4 is shorter than account closing voice",
+                    }
+                )
+                outro_video = None
+            if outro_video is None:
+                pass
+            else:
+                segments.append(
+                    {
+                        "type": "outro",
+                        "id": "outro-fixed",
+                        "spokenText": outro_text,
+                        "voiceAsset": str(closing_audio),
+                        "videoAsset": str(outro_video),
+                        "duration": outro_duration,
+                        "seed": outro_seed,
+                        "selectionKeyword": WHOLE_VIDEO_OUTRO_KEYWORD,
+                        "subtitles": (
+                            []
+                            if subtitle_mode == "asr"
+                            else _segment_subtitles(outro_text, closing_duration, subtitle_alignment=subtitle_mode)
+                        ),
+                    }
+                )
 
     if output_mode == "final_mp4" and subtitle_mode == "asr" and not missing:
-        _align_package_segments_with_asr(segments)
+        _align_package_segments_with_forced_alignment(segments)
 
     package = {
         "schemaVersion": "1.0.0",
@@ -608,7 +669,14 @@ def build_product_recommendation_package(
             }
         },
         "segments": segments,
-        "assets": {},
+        "assets": (
+            {
+                "recommendationBackgroundCandidates": [str(DEFAULT_RECOMMENDATION_BACKGROUND_ROOT)],
+                "assetFallbackPolicy": "forbid",
+            }
+            if output_mode == "final_mp4"
+            else {}
+        ),
         "approval": {
             "productRecommendationBatch": {
                 "status": "pending",
@@ -644,7 +712,39 @@ def build_product_recommendation_package(
     )
 
 
-def _align_package_segments_with_asr(segments: list[dict[str, Any]]) -> None:
+def _select_whole_video_outro(
+    *,
+    project_id: int,
+    account: str,
+    closing_text: str,
+    segment_ids: list[str],
+) -> tuple[Path, str]:
+    common_dir = Path(DEFAULT_INTRO_ASSET_ROOT) / WHOLE_VIDEO_OUTRO_COMMON_FOLDER
+    candidates = sorted(
+        path.resolve()
+        for path in common_dir.iterdir()
+        if path.is_file()
+        and path.suffix.lower() == ".mp4"
+        and WHOLE_VIDEO_OUTRO_KEYWORD in path.stem
+    ) if common_dir.is_dir() else []
+    if not candidates:
+        raise FileNotFoundError(
+            f"whole-video outro asset is missing: {common_dir} has no MP4 containing {WHOLE_VIDEO_OUTRO_KEYWORD}"
+        )
+    seed_source = "|".join(
+        [
+            "whole-video-outro-v1",
+            str(project_id),
+            safe_text(account),
+            text_hash(closing_text),
+            ",".join(segment_ids),
+        ]
+    )
+    seed = hashlib.sha256(seed_source.encode("utf-8")).hexdigest()[:24]
+    return random.Random(seed).choice(candidates), seed
+
+
+def _align_package_segments_with_forced_alignment(segments: list[dict[str, Any]]) -> None:
     jobs: list[dict[str, Any]] = []
     aligned_segments: list[dict[str, Any]] = []
     for segment in segments:
@@ -657,7 +757,7 @@ def _align_package_segments_with_asr(segments: list[dict[str, Any]]) -> None:
         if segment_type not in {"intro", "price_transition", "product_recommendation", "outro"}:
             continue
         if not text or not audio_path:
-            raise ValueError(f"{segment.get('id') or segment_type} ASR subtitle alignment is missing text or audio")
+            raise ValueError(f"{segment.get('id') or segment_type} 强制对齐缺少精确原文或音频")
         jobs.append(
             {
                 "label": safe_text(segment.get("id")) or segment_type,
@@ -671,13 +771,76 @@ def _align_package_segments_with_asr(segments: list[dict[str, Any]]) -> None:
     grouped = align_subtitle_jobs_with_asr_grouped(jobs)
     if len(grouped) != len(aligned_segments):
         raise ValueError(
-            f"ASR subtitle alignment returned {len(grouped)} groups for {len(aligned_segments)} segments"
+            f"强制对齐返回 {len(grouped)} 组，但渲染段共有 {len(aligned_segments)} 组"
         )
     for segment, items in zip(aligned_segments, grouped):
         segment["subtitles"] = [
             {"start": round(start, 3), "end": round(end, 3), "text": safe_text(text)}
             for start, end, text in items
         ]
+        if safe_text(segment.get("type")) == "price_transition" and safe_text(
+            segment.get("priceTransitionPlanVersion")
+        ):
+            _align_price_transition_card_with_subtitles(segment)
+
+
+def _align_price_transition_card_with_subtitles(segment: dict[str, Any]) -> None:
+    card = segment.get("priceTransitionCard")
+    if not isinstance(card, dict):
+        raise ValueError("structured price transition is missing priceTransitionCard")
+    items = [item for item in card.get("items") or [] if isinstance(item, dict)]
+    if not 2 <= len(items) <= 3:
+        raise ValueError("structured price transition must contain 2 to 3 card items")
+
+    body = normalize_subtitle_alignment_text(safe_text(segment.get("transitionText")))
+    subtitles = [item for item in segment.get("subtitles") or [] if isinstance(item, dict)]
+    chunks: list[tuple[int, int, dict[str, Any]]] = []
+    cursor = 0
+    for subtitle in subtitles:
+        text = normalize_subtitle_alignment_text(safe_text(subtitle.get("text")))
+        if not text:
+            continue
+        chunks.append((cursor, cursor + len(text), subtitle))
+        cursor += len(text)
+    if not body or not chunks:
+        raise ValueError("structured price transition forced alignment is missing body or subtitles")
+
+    search_cursor = 0
+    previous_start = -0.5
+    duration = max(float(segment.get("duration") or 0), 1.0)
+    for item in items:
+        trigger_text = safe_text(item.get("triggerText") or item.get("trigger_text"))
+        trigger = normalize_subtitle_alignment_text(trigger_text)
+        position = body.find(trigger, search_cursor)
+        if position < 0:
+            raise ValueError(f"structured price transition trigger is missing from body: {trigger_text}")
+        search_cursor = position + len(trigger)
+        chunk = next((entry for entry in chunks if entry[0] <= position < entry[1]), None)
+        if chunk is None:
+            raise ValueError(f"structured price transition trigger has no forced subtitle anchor: {trigger_text}")
+        chunk_start, chunk_end, subtitle = chunk
+        subtitle_start = float(subtitle.get("start") or 0.0)
+        subtitle_end = float(subtitle.get("end") or subtitle_start + 0.1)
+        ratio = (position - chunk_start) / max(chunk_end - chunk_start, 1)
+        start = subtitle_start + max(0.0, min(ratio, 1.0)) * max(subtitle_end - subtitle_start, 0.1)
+        start = max(0.45, min(start, max(0.45, duration - 0.6)))
+        if start <= previous_start:
+            start = min(max(0.45, duration - 0.6), previous_start + 0.15)
+        previous_start = start
+        item["timing"] = {
+            "start": round(start, 3),
+            "duration": round(max(0.8, duration - start), 3),
+        }
+    card["keyPoints"] = [safe_text(item.get("label")) for item in items]
+    card["visualEvents"] = [
+        {
+            "target": f"price_param_{index + 1:02d}",
+            "text": safe_text(item.get("label")),
+            "trigger_text": safe_text(item.get("triggerText") or item.get("trigger_text")),
+            "timing": item["timing"],
+        }
+        for index, item in enumerate(items)
+    ]
 
 
 def _segment_subtitles(
@@ -692,7 +855,7 @@ def _segment_subtitles(
         raise ValueError(f"unsupported subtitle_alignment: {mode}")
     if mode == "asr":
         if audio_path is None:
-            raise ValueError("ASR subtitle alignment requires audio_path")
+            raise ValueError("精确原文强制对齐需要 audio_path")
         aligned = align_subtitle_text_with_asr(audio_path, safe_text(text), 0.0)
         return [
             {

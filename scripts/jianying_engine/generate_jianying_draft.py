@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from python_env import inject_local_site_packages
 from bworkflow_sql.asr import service as asr_service
+from bworkflow_sql.forced_alignment import align_subtitle_jobs_with_forced_alignment
 from bworkflow_sql.subtitle_rules import split_subtitle_text
 from image_index import DEFAULT_IMAGE_INDEX_PATH, resolve_image_paths
 from PIL import Image, ImageDraw, ImageFont
@@ -38,14 +39,6 @@ except Exception as exc:  # pragma: no cover - environment specific
     DRAFT_IMPORT_ERROR = exc
 else:
     DRAFT_IMPORT_ERROR = None
-
-try:
-    import torch
-    from qwen_asr import Qwen3ForcedAligner
-except Exception:  # pragma: no cover - optional dependency
-    torch = None
-    Qwen3ForcedAligner = None
-
 
 DEFAULT_DRAFT_ROOT = r"E:\剪辑-剪映\草稿\JianyingPro Drafts"
 DEFAULT_DRAFT_NAME = "自动剪辑草稿"
@@ -75,7 +68,6 @@ def _resolve_default_background() -> str:
 DEFAULT_BACKGROUND_IMAGE = _resolve_default_background()
 PUNCTUATION_TRANSLATION = str.maketrans("", "", "，。！？；：、,.!?;:()（）【】[]《》<>“”\\\"'‘’`~…—-")
 WHITESPACE_RE = re.compile(r"\s+")
-QWEN_FORCED_ALIGNER_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B"
 QWEN_LANGUAGE_MAP = {
     "zh": "Chinese",
     "zh-cn": "Chinese",
@@ -83,7 +75,6 @@ QWEN_LANGUAGE_MAP = {
     "ja": "Japanese",
     "ko": "Korean",
 }
-QWEN_ALIGNER_CACHE: dict[str, Any] = {}
 
 
 class SkillError(RuntimeError):
@@ -154,8 +145,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--subtitle-engine",
         choices=["whisper", "qwen"],
-        default="whisper",
-        help="字幕对齐引擎。whisper 为现有方案，qwen 为强制对齐方案。",
+        default="qwen",
+        help="字幕对齐引擎。qwen 为正式精确原文强制对齐；whisper 仅保留为显式旧版调试选项。",
     )
     parser.add_argument("--skip-subtitles", action="store_true", help="跳过字幕对齐。")
     parser.add_argument("--subtitle-no-vad", action="store_true", help="字幕 ASR 不启用 VAD，兼容 onnxruntime 不可用的环境。")
@@ -763,7 +754,7 @@ def build_subtitle_segments(
     offset_sec: float,
     model_name: str,
     language: str,
-    engine: str = "whisper",
+    engine: str = "qwen",
     *,
     vad_filter: bool = True,
 ) -> list[SubtitleSegment]:
@@ -800,60 +791,22 @@ def build_subtitle_segments(
     return enforce_subtitle_gaps(results)
 
 
-def get_qwen_forced_aligner() -> Any:
-    if QWEN_FORCED_ALIGNER_MODEL in QWEN_ALIGNER_CACHE:
-        return QWEN_ALIGNER_CACHE[QWEN_FORCED_ALIGNER_MODEL]
-    if Qwen3ForcedAligner is None or torch is None:
-        raise SkillError("当前环境未安装 qwen-asr 或 torch，无法使用 Qwen 强制对齐。")
-
-    model_kwargs: dict[str, Any] = {}
-    if torch.cuda.is_available():
-        model_kwargs["device_map"] = "cuda:0"
-        model_kwargs["dtype"] = torch.bfloat16
-    else:
-        model_kwargs["device_map"] = "cpu"
-    aligner = Qwen3ForcedAligner.from_pretrained(QWEN_FORCED_ALIGNER_MODEL, **model_kwargs)
-    QWEN_ALIGNER_CACHE[QWEN_FORCED_ALIGNER_MODEL] = aligner
-    return aligner
-
-
 def build_qwen_subtitle_segments(
     audio_path: Path,
     clauses: list[str],
     offset_sec: float,
     language: str,
 ) -> list[SubtitleSegment]:
-    aligner = get_qwen_forced_aligner()
     qwen_language = QWEN_LANGUAGE_MAP.get(language.lower(), language)
-    results = aligner.align(audio=str(audio_path), text="".join(clauses), language=qwen_language)
-    items = results[0].items if isinstance(results, list) else results.items
-
-    clause_segments: list[SubtitleSegment] = []
-    item_index = 0
-    for clause in clauses:
-        target = clause
-        built = ""
-        start_time: float | None = None
-        end_time: float | None = None
-        while item_index < len(items) and len(built) < len(target):
-            token_text = normalize_subtitle_text(getattr(items[item_index], "text", ""))
-            if token_text:
-                if start_time is None:
-                    start_time = float(getattr(items[item_index], "start_time", 0.0))
-                end_time = float(getattr(items[item_index], "end_time", 0.0))
-                built += token_text
-            item_index += 1
-
-        if not built or start_time is None or end_time is None:
-            continue
-        clause_segments.append(
-            SubtitleSegment(
-                start_sec=offset_sec + start_time,
-                duration_sec=max(end_time - start_time, 0.1),
-                text=target,
-            )
-        )
-    return clause_segments
+    aligned = align_subtitle_jobs_with_forced_alignment(
+        [{"audio_path": str(audio_path), "text": "。".join(clauses), "offset_sec": offset_sec}],
+        language=qwen_language,
+        batch_size=1,
+    )
+    return [
+        SubtitleSegment(start_sec=start, duration_sec=end - start, text=text)
+        for start, end, text in aligned
+    ]
 
 
 def load_price_title_font(size: int) -> Any:

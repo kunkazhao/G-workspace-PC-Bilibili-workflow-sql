@@ -9,6 +9,10 @@ The project treats SQLite as the local source of truth:
 - Asset folders store real files. The database stores paths, status, file metadata, and mappings.
 - Runtime workflow is database-first: voice generation writes SQLite asset bindings directly, spoken-script assembly reads SQLite directly, and `audio_segment_registry.json` is not used by the new workflow.
 - Old project files are only read by explicit migration/import helpers.
+- Project creation idempotently creates the complete external media workspace
+  for every enabled account and its configured templates.
+- `production_runs` contains only user-confirmed complete MP4 productions;
+  run manifests alone are generation evidence and tests do not count.
 
 ## Run
 
@@ -80,6 +84,25 @@ The UI is intentionally direct and database-first. JSON/Markdown support is comp
 3. Sync the MD copy. The importer only accepts products that are already in the current Master scheme; extra MD products are reported but not imported.
 4. Sync asset folders. Image/video/voice files are matched to current products by UID in the filename or path and saved as database bindings.
 5. Use the workflow pages in order: `生成配音` -> `组合口播稿` -> `生成剪映草稿`. The spoken-script output MD is chosen in `组合口播稿`, not in the category project.
+6. After reviewing a complete MP4, run `confirm-production` only when the user
+   accepts it as an actual production. Before the next episode, query
+   `production-history` and prefer its unused-template recommendation.
+
+CLI examples:
+
+```powershell
+python -m bworkflow_sql scaffold <project_id>
+python -m bworkflow_sql confirm-production <project_id> --run-manifest <run-manifest.json> --pipeline <.pipeline.json>
+python -m bworkflow_sql production-history <project_id> --account <账号>
+python -m bworkflow_sql complete-publishing <production_run_id> --pipeline <.pipeline.json>
+```
+
+By default the command uses the existing current-month folder under
+`G:\2026项目-b站\已发布视频`, or that root if the month folder is absent; it does
+not create a missing month folder. Use `--archive-dir` to override. For a
+manually moved file, use `--current-path
+<当前完整MP4路径>`. The command reuses `production_runs` and the existing pipeline
+publishing phase; it does not create a second publishing-status store.
 
 Legacy migration helpers are available in `资产中心` and `用户管理`:
 
@@ -117,31 +140,26 @@ v1 observation to stdout and exit nonzero. The former raw JSON shape is removed
 and has no compatibility flag. The producer Schema and examples live under
 `contracts/schemas` and `contracts/examples`.
 
-## ASR Provider Notes
+## Exact-transcript subtitle alignment
 
 Subtitle export, intro-scene timing, Jianying subtitle alignment, and final MP4
-ASR subtitle alignment all go through `bworkflow_sql.asr.service`. The default
-provider is local `faster_whisper`.
+timing use one transcript-constrained service in `bworkflow_sql.forced_alignment`.
+The public mode name remains `asr` for CLI compatibility, but free ASR text no
+longer decides subtitle timing. The aligner receives the approved script and its
+audio together, then returns exact character/word anchors through
+`Qwen/Qwen3-ForcedAligner-0.6B`.
 
-To select another provider, set:
+Install the isolated runtime once:
 
 ```powershell
-$env:BWORKFLOW_ASR_PROVIDER = "doubao"
+scripts\setup_subtitle_forced_alignment.ps1
 ```
 
-The Doubao provider uses Volcengine recording-file ASR. Configure either
-`BWORKFLOW_DOUBAO_ASR_API_KEY` for the new console, or
-`BWORKFLOW_DOUBAO_ASR_APP_KEY` plus `BWORKFLOW_DOUBAO_ASR_ACCESS_KEY` for the
-old console. The official API accepts an audio URL, not a local file upload, so
-local audio paths require an `audio_url` job field or a
-`BWORKFLOW_DOUBAO_ASR_LOCAL_ROOT` / `BWORKFLOW_DOUBAO_ASR_URL_ROOT` mapping to a
-publicly reachable URL root.
-
-New ASR models should be added as providers under `bworkflow_sql/asr/providers`
-and registered in `bworkflow_sql.asr.service`. Providers that need cloud audio
-URLs should reuse `bworkflow_sql.asr.audio_sources.resolve_cloud_audio_source`.
-Callers should keep using the shared service instead of importing provider SDKs
-directly.
+The service caches results by audio bytes, exact script, model, and subtitle
+split-rule version. It rejects missing text, non-monotonic timestamps, subtitle
+overlap, out-of-bounds anchors, and suspiciously uncovered audio edges before a
+RenderPackage can enter CutMe. `bworkflow_sql.asr.service` remains available for
+standalone transcription tasks, but is not a production subtitle-timing path.
 
 Project and sync rules:
 
@@ -163,19 +181,36 @@ Output rules:
 - Internal generated files are kept under `data/workspace`.
 - Jianying drafts are written to `E:\剪辑-剪映\草稿\JianyingPro Drafts`.
 - Standalone voice files default to `G:\2026项目-b站` and do not write `asset_bindings`.
-- Final MP4 can be produced with `python -m bworkflow_sql render-final-video <project_id> --account <账号> --product-media-mode video_preferred`. The normal path builds one `final_mp4` RenderPackage containing the raw intro, price/product recommendation segments, and the account's fixed closing audio; it batch-aligns every segment with ASR, chooses one global subtitle style, calls CutMe once through `CutMeAdapter`, and returns one complete MP4. Add `--intro-video <raw-intro.mp4>` plus either `--intro-video-text-file <transcript.txt>` or `--intro-video-source-plan <plan.json>`; the intro is re-timed from its audio even if the plan contains old scene timing. CutMe normalizes every segment to the package loudness target before concat and masters the complete output. Use `--acceptance-mode quick` for normal delivery, `visual` when visuals changed, and `full` for loudness plus visual archival verification. `--delivery-dir <dir>` writes the single `完整成片-<timestamp>.mp4` at the directory root; evidence and process files remain under `02_验收证据\<timestamp>\` and `03_过程记录\<timestamp>\`.
+- Final MP4 can be produced with `python -m bworkflow_sql render-final-video <project_id> --account <账号> --product-media-mode video_preferred`. The normal path builds one `final_mp4` RenderPackage containing the raw intro, price/product recommendation segments, and the account's fixed closing audio; it batch-aligns every segment with ASR, chooses one global subtitle style, calls CutMe once through `CutMeAdapter`, and returns one complete MP4. Add `--intro-video <raw-intro.mp4>` plus either `--intro-video-text-file <transcript.txt>` or `--intro-video-source-plan <plan.json>`; the intro is re-timed from its audio even if the plan contains old scene timing. CutMe normalizes every segment to the package loudness target before concat and masters the complete output. Use `--acceptance-mode quick` for normal delivery, `visual` when visuals changed, and `full` for loudness plus visual archival verification. With `--pipeline <.pipeline.json>`, the program creates or reuses `G:\2026项目-b站\MMDD-品类-账号` and writes only `引言视频.mp4` plus the complete final MP4 there. RenderPackage, product-section MP4, acceptance frames, and process evidence remain under `data\workspace\project-<id>\runs\artifacts\`.
 
 ## Voice Generation Notes
 
+- Workflow voice generation is provider-based. `bworkflow_sql.tts_contracts`
+  owns the request/result/identity contract and fail-closed registry;
+  `bworkflow_sql.tts_adapters` owns the IndexTTS and MiniMax adapters. Adding a
+  provider should extend this boundary instead of adding branches to the
+  workflow loop.
 - `生成配音` and `单独配音` both support two providers:
   - `IndexTTS 本地服务`: uses the local IndexTTS API, registers the selected account's `voice_id`, and writes WAV output.
   - `MiniMax API`: uses cloud TTS, does not start IndexTTS, requires `MINIMAX_API_KEY`, and writes MP3 output.
-- User selection is still by the same visible account label such as `小博`, `小燃`, or `小歪`. The account row stores provider-specific ids:
-  - `voice_id` for IndexTTS.
-  - `minimax_voice_id` for MiniMax.
+- Project CLI defaults to MiniMax and supports an explicit override. Use the
+  same provider for preview and generation:
+  ```powershell
+  python -m bworkflow_sql voice-counts <project_id> --account <账号> --voice-provider minimax
+  python -m bworkflow_sql voice <project_id> --account <账号> --voice-provider minimax
+  # Replace minimax with indextts to use the local service.
+  ```
+- User selection is still by visible account label. Provider configuration is
+  stored in `account_voice_profiles`; legacy `accounts.voice_id` and
+  `accounts.minimax_voice_id` remain compatibility inputs and are synchronized
+  by the account write path.
+- A generated voice is reusable only when account, text hash, provider, model,
+  voice ID, and synthesis settings match. Generation writes a unique new file,
+  commits its binding, and only then removes stale generated files; a database
+  failure preserves the previous ready file.
 - MiniMax API keys are read from the `MINIMAX_API_KEY` environment variable first, then from `C:\Users\zhaoer\.codex\skills\zhaoer-tools-minimax-tts\.env`, then the legacy `C:\Users\zhaoer\.codex\skills\minimax-tts\.env`, then the current working directory `.env`.
 - Known MiniMax voice aliases include `小博 -> xiaobo-v2`, `小燃 -> xiaoran-v2`, `小歪 -> xiaowai-v6`, `知了 -> bilibili-zhiliao`, and `荣荣/蓉蓉 -> rongrong-v2`.
-- Replacing a user's voice should use `scripts/swap_voice.py`. The script updates IndexTTS (`voice_profiles` plus `voices.json`) and clones a new MiniMax voice id; MiniMax voice ids are not overwritten in place.
+- Replacing a user's voice should use `scripts/swap_voice.py`. The script updates IndexTTS (`voice_profiles` plus `voices.json`), clones a new MiniMax voice id, and updates `account_voice_profiles` plus the legacy account field. It does not rewrite application or skill source files; MiniMax voice ids are not overwritten in place.
 - MiniMax standalone voice generation requires a configured user voice. Uploading a one-off reference audio file is an IndexTTS-only mode.
 - Project voice generation writes SQLite asset bindings for matched script blocks.
 - Standalone voice generation accepts either a configured user voice or one uploaded reference audio file. The two voice sources are mutually exclusive.
@@ -229,3 +264,8 @@ The V2 outline creator writes product headings as `价格-UID-商品名`, for ex
 ```
 
 The parser still accepts the older `商品名-UID-价格` heading format for existing documents.
+# Formal production revisions and frozen rerender
+
+`render-final-video` now renders to an internal partial file, promotes only an accepted complete MP4, and writes an immutable production recipe. `confirm-production` is the only promotion into formal history. Use `rerender-production-preflight <id>` before `rerender-production <id> --pipeline <path>`; rerendering consumes only the frozen recipe and creates a new candidate without demoting a published pipeline.
+
+External post-edited MP4 files remain valid formal productions, but are recorded as `external_edit` and are not automatically rerenderable. Publishing validates the confirmed hash before moving and is safe to retry.

@@ -71,7 +71,7 @@
       "product_uid": "PMGD001",
       "draft_name": "模板校准-荣荣模板3-PMGD001",
       "active": true,
-      "notes": "Rongrong template3 accepted UI; template-doctor, one-product Jianying calibration draft, and short MP4 probe were confirmed by user on 2026-07-06. Use PMGD001 for repeatable slot checks."
+      "notes": "Rongrong template3 UI accepted. After the 1.1.0 text-capacity and media-slot update, the PMGD001 one-product Jianying calibration draft was confirmed by the user on 2026-07-13 at canvas slot x=867, y=72, width=990, height=562. Use PMGD001 for repeatable slot checks."
     }
   ]
 }

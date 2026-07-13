@@ -47,7 +47,6 @@ from .workflow_errors import (
     InvalidWorkflowRequestError,
     ProjectNotFoundError,
 )
-from .asr import service as asr_service
 from .template_config import (
     display_template_from_image_path,
     display_template_for_product_card_template_id,
@@ -55,6 +54,8 @@ from .template_config import (
     resolve_product_card_template,
     user_for_template,
 )
+from .tts_adapters import IndexTtsProvider, MiniMaxTtsProvider
+from .tts_contracts import TtsProviderRegistry, TtsSynthesisRequest, VoiceSynthesisIdentity
 from .tts_helpers import (  # noqa: F401 – re-exported
     DEFAULT_KEEP_SILENCE_MS,
     DEFAULT_LEADING_SILENCE_MS,
@@ -79,6 +80,8 @@ from .tts_helpers import (  # noqa: F401 – re-exported
     VOICE_PROVIDER_MINIMAX,
     account_voice_id_for_provider,
     compress_internal_silence,
+    default_voice_model,
+    default_voice_synthesis_settings,
     dbfs_for_chunk,
     load_minimax_api_key,
     markdown_file_to_voice_text,
@@ -91,6 +94,7 @@ from .tts_helpers import (  # noqa: F401 – re-exported
     seconds_to_frames,
     silence_ranges_for_audio,
     voice_provider_label,
+    voice_synthesis_identity,
 )
 from .subtitle_helpers import (  # noqa: F401 – re-exported
     DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
@@ -104,20 +108,15 @@ from .subtitle_helpers import (  # noqa: F401 – re-exported
     SUBTITLE_DROP_PUNCT_RE,
     align_subtitle_jobs_with_asr,
     align_subtitle_text_with_asr,
-    align_subtitle_text_with_units,
     distribute_subtitle_text,
     format_srt,
     format_srt_timestamp,
     normalize_subtitle_alignment_text,
     probe_media_duration_seconds,
-    run_subtitle_alignment_asr,
-    run_subtitle_asr_worker,
-    snap_subtitle_segments_to_speech,
     split_subtitle_text,
     subtitle_asr_python_path,
     subtitle_entry_label,
     subtitle_manifest_entries,
-    subtitle_speech_ranges,
 )
 from .draft_helpers import (  # noqa: F401 – re-exported
     format_duration_cn,
@@ -671,6 +670,7 @@ class WorkflowService:
         intro_label: str = "寮曟█1",
         output_path: str | Path | None = None,
         asset_root: str | Path = "",
+        pipeline_path: str | Path | None = None,
     ) -> dict[str, Any]:
         project = self._required_project(project_id)
         account = safe_text(account_label)
@@ -694,12 +694,21 @@ class WorkflowService:
         source_plan_path = find_intro_plan_for_text(project_id, safe_text(intro_block.get("body")))
         if source_plan_path is None:
             raise ValueError("missing matching source-intro-plan for the selected intro block")
-        target = self._intro_video_output_path(
-            project_id,
-            account_label=account,
-            intro_label=safe_text(intro_block.get("block_label")) or intro_label,
-            output_path=output_path,
-        )
+        if output_path or not pipeline_path:
+            target = self._intro_video_output_path(
+                project_id,
+                account_label=account,
+                intro_label=safe_text(intro_block.get("block_label")) or intro_label,
+                output_path=output_path,
+            )
+        else:
+            from .production_delivery import resolve_project_delivery_dir
+
+            target = resolve_project_delivery_dir(
+                project=project,
+                account_label=account,
+                pipeline_path=pipeline_path,
+            ) / "引言视频.mp4"
         prepared = prepare_cutme_intro(
             source_plan_path=source_plan_path,
             audio_path=voice_path,
@@ -713,7 +722,35 @@ class WorkflowService:
         rendered = run_cutme_render(prepared.config_path, target)
         config = json.loads(prepared.config_path.read_text(encoding="utf-8-sig"))
         subtitles = config.get("subtitles") if isinstance(config.get("subtitles"), list) else []
+        output_config = config.get("output") if isinstance(config.get("output"), dict) else {}
+        subtitle_config = (
+            output_config.get("subtitles")
+            if isinstance(output_config.get("subtitles"), dict)
+            else {}
+        )
         report_path = prepared.intro_plan_path.with_suffix(".report.json")
+        if pipeline_path:
+            from .production_delivery import record_pipeline_video_path
+
+            record_pipeline_video_path(pipeline_path, key="intro_video", video_path=rendered)
+            pipeline_file = Path(pipeline_path).expanduser().resolve()
+            pipeline = json.loads(pipeline_file.read_text(encoding="utf-8-sig"))
+            phases = pipeline.get("phases") if isinstance(pipeline.get("phases"), dict) else {}
+            intro_phase = phases.get("intro_video") if isinstance(phases.get("intro_video"), dict) else {}
+            intro_phase.update(
+                {
+                    "status": "awaiting_user_review",
+                    "accepted": False,
+                    "output_mp4_path": str(Path(rendered).resolve()),
+                    "updated_at": now_iso(),
+                }
+            )
+            phases["intro_video"] = intro_phase
+            pipeline["phases"] = phases
+            pipeline["current_phase"] = "intro_video"
+            pipeline["next_action"] = "请用户验收引言视频；验收通过后再进入组装。"
+            pipeline["updated_at"] = now_iso()
+            pipeline_file.write_text(json.dumps(pipeline, ensure_ascii=False, indent=2), encoding="utf-8")
         return {
             "ok": True,
             "project_id": project_id,
@@ -725,8 +762,8 @@ class WorkflowService:
             "cutme_config_path": str(prepared.config_path),
             "report_path": str(report_path),
             "output_path": str(rendered),
-            "subtitle_enabled": bool(subtitles),
-            "subtitle_count": len(subtitles),
+            "subtitle_enabled": subtitle_config.get("enabled") is True,
+            "subtitle_count": len(subtitles) if subtitle_config.get("enabled") is True else 0,
             "selected_assets": prepared.selected_assets,
             "preflight": prepared.preflight,
             "aligned_with_asr": prepared.aligned_with_asr,
@@ -895,14 +932,20 @@ class WorkflowService:
         project_id: int,
         *,
         account_label: str = "",
+        voice_provider: str = VOICE_PROVIDER_INDEXTTS,
         uids: list[str] | None = None,
         script_ids: list[str] | None = None,
     ) -> tuple[int, int, int]:
         account = self._resolve_account(account_label)
         if not account:
             return 0, 0, 0
+        provider = normalize_voice_provider(voice_provider)
+        configuration = self._voice_configuration_for_account(account, provider)
+        if not configuration:
+            return 0, 0, 0
+        identity, _settings = configuration
         jobs = self._voice_jobs(project_id, uids=uids, script_ids=script_ids)
-        existing, pending = self._split_existing_voice_jobs(project_id, jobs, account)
+        existing, pending = self._split_existing_voice_jobs(project_id, jobs, account, identity=identity)
         return len(jobs), len(existing), len(pending)
 
     def generate_voice(
@@ -929,27 +972,32 @@ class WorkflowService:
         if not account:
             raise ValueError("请先在用户管理里配置配音用户。")
         provider = normalize_voice_provider(voice_provider)
-        voice_id = account_voice_id_for_provider(account, provider)
-        if not voice_id:
+        configuration = self._voice_configuration_for_account(account, provider)
+        if not configuration:
             missing_field = "MiniMax 音色标识" if provider == VOICE_PROVIDER_MINIMAX else "IndexTTS 音色标识"
             raise ValueError(f"用户“{account.get('label') or account_label}”缺少{missing_field}。请到用户管理里补齐。")
+        identity, synthesis_settings = configuration
         out_dir = Path(output_dir) if safe_text(output_dir) else self._voice_output_dir(project, account=account, account_label=account_label)
         out_dir.mkdir(parents=True, exist_ok=True)
         jobs = self._voice_jobs(project_id, uids=uids, script_ids=script_ids)
         if not jobs:
             return WorkflowRunResult([f"{INTERNAL_PREFIX}voice"], stdout="没有需要生成配音的文案。\n")
 
-        existing, pending = self._split_existing_voice_jobs(project_id, jobs, account)
+        existing, pending = self._split_existing_voice_jobs(project_id, jobs, account, identity=identity)
         emit(f"[配音任务] 文案 {len(jobs)} 条，已存在 {len(existing)} 条，待生成 {len(pending)} 条。")
         if not pending:
             return WorkflowRunResult([f"{INTERNAL_PREFIX}voice"], stdout="\n".join(logs) + "\n")
 
         http = JsonHttpClient(timeout=600.0)
-        if provider == VOICE_PROVIDER_INDEXTTS:
-            self._ensure_tts_api_ready(http, logs=logs, start_if_needed=start_service_if_needed, progress_hook=progress_hook)
-            self._ensure_registered_voice(http, voice_id=voice_id, account=account, logs=logs, progress_hook=progress_hook)
-        else:
-            voice_id = self._prepare_minimax_voice(voice_id, logs=logs, progress_hook=progress_hook)
+        provider_adapter = self._voice_provider_registry(
+            http=http,
+            account=account,
+            identity=identity,
+            logs=logs,
+            start_service_if_needed=start_service_if_needed,
+            progress_hook=progress_hook,
+        ).get(provider)
+        provider_adapter.prepare()
         generated = 0
         cancelled = False
         failures: list[str] = []
@@ -961,24 +1009,36 @@ class WorkflowService:
                 break
             try:
                 emit(f"[生成 {position}/{len(pending)}] {job.product_name} / {job.block['block_label']}")
-                overwrite_expired = self._has_existing_stale_voice_file(project_id, job=job, account=account)
-                if provider == VOICE_PROVIDER_INDEXTTS:
-                    path = self._generate_one_voice(
-                        http,
+                filename = Path(self._voice_filename(job)).with_suffix(
+                    provider_adapter.capabilities.output_suffix
+                ).name
+                # Generate beside the previous artifact first. The database update decides
+                # which file is current; only after that commit may stale files be removed.
+                final_path = unique_path(out_dir / filename)
+                synthesis = provider_adapter.synthesize(
+                    TtsSynthesisRequest(
+                        text=safe_text(job.block.get("body")),
+                        identity=identity,
+                        output_path=final_path,
+                        settings=synthesis_settings,
+                    )
+                )
+                path = synthesis.audio_path
+                try:
+                    self._upsert_voice_asset(
+                        project_id,
                         job=job,
                         account=account,
-                        voice_id=voice_id,
-                        output_dir=out_dir,
-                        overwrite_expired=overwrite_expired,
+                        path=path,
+                        identity=identity,
                     )
-                else:
-                    path = self._generate_one_minimax_voice(
-                        job=job,
-                        voice_id=voice_id,
-                        output_dir=out_dir,
-                        overwrite_expired=overwrite_expired,
-                    )
-                self._upsert_voice_asset(project_id, job=job, account=account, path=path)
+                except Exception:
+                    try:
+                        if path.is_file():
+                            path.unlink()
+                    except OSError:
+                        pass
+                    raise
                 generated += 1
                 emit(f"[成功] {path}")
             except Exception as exc:
@@ -1003,6 +1063,99 @@ class WorkflowService:
             stdout="\n".join(logs) + "\n",
             stderr="\n".join(failures),
         )
+
+    def _voice_provider_registry(
+        self,
+        *,
+        http: "JsonHttpClient",
+        account: dict[str, Any],
+        identity: VoiceSynthesisIdentity,
+        logs: list[str],
+        start_service_if_needed: bool,
+        progress_hook: Callable[[str], None] | None,
+    ) -> TtsProviderRegistry:
+        def prepare_indextts() -> None:
+            self._ensure_tts_api_ready(
+                http,
+                logs=logs,
+                start_if_needed=start_service_if_needed,
+                progress_hook=progress_hook,
+            )
+            self._ensure_registered_voice(
+                http,
+                voice_id=identity.voice_id,
+                account=account,
+                logs=logs,
+                progress_hook=progress_hook,
+            )
+
+        def prepare_minimax() -> None:
+            self._prepare_minimax_voice(
+                identity.voice_id,
+                logs=logs,
+                progress_hook=progress_hook,
+            )
+
+        registry = TtsProviderRegistry()
+        registry.register(
+            IndexTtsProvider(
+                http=http,
+                endpoint=f"{DEFAULT_TTS_API_BASE_URL.rstrip('/')}/v1/clone/voice",
+                prepare_callback=prepare_indextts,
+                finalize_callback=self._finalize_generated_voice,
+            )
+        )
+        registry.register(
+            MiniMaxTtsProvider(
+                prepare_callback=prepare_minimax,
+                synthesize_callback=lambda request: self._synthesize_minimax_to_path(
+                    request.text,
+                    voice_id=request.identity.voice_id,
+                    final_path=request.output_path,
+                    model=request.identity.model,
+                    **request.settings,
+                ),
+            )
+        )
+        return registry
+
+    def _voice_configuration_for_account(
+        self,
+        account: dict[str, Any],
+        provider: str,
+    ) -> tuple[VoiceSynthesisIdentity, dict[str, Any]] | None:
+        normalized = normalize_voice_provider(provider)
+        profile = self.repo.account_voice_profile(int(account["id"]), normalized)
+        voice_id = safe_text(profile.get("voice_id")) if profile else ""
+        if not voice_id:
+            voice_id = account_voice_id_for_provider(account, normalized)
+        if not voice_id:
+            return None
+
+        settings = default_voice_synthesis_settings(normalized)
+        model = default_voice_model(normalized)
+        if profile:
+            model = safe_text(profile.get("model")) or model
+            settings_text = safe_text(profile.get("settings_json"))
+            if settings_text:
+                try:
+                    configured = json.loads(settings_text)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"用户“{account.get('label')}”的 {normalized} settings_json 不是有效 JSON。"
+                    ) from exc
+                if not isinstance(configured, dict):
+                    raise ValueError(
+                        f"用户“{account.get('label')}”的 {normalized} settings_json 必须是 JSON 对象。"
+                    )
+                settings.update(configured)
+        identity = voice_synthesis_identity(
+            normalized,
+            voice_id,
+            model=model,
+            settings=settings,
+        )
+        return identity, settings
 
     def synthesize_standalone_voice(
         self,
@@ -1797,10 +1950,9 @@ class WorkflowService:
             f"总时长：{total_duration:.3f} 秒\n"
         )
         if align_with_asr:
-            provider_label = asr_service.provider_label(subtitle_asr_provider)
             stdout += (
-                f"ASR provider: {provider_label} (model={subtitle_asr_model}, "
-                f"beam={DEFAULT_SUBTITLE_ASR_BEAM_SIZE}, workers={max(1, int(subtitle_asr_workers or 1))})\n"
+                f"精确原文强制对齐: {subtitle_asr_model} "
+                f"(batch={max(1, int(subtitle_asr_workers or 1))})\n"
             )
         if intro_video is not None:
             stdout += f"引言成片偏移：{initial_offset:.3f} 秒\n"
@@ -2040,12 +2192,23 @@ class WorkflowService:
                 )
         return jobs
 
-    def _split_existing_voice_jobs(self, project_id: int, jobs: list[VoiceJob], account: dict[str, Any]) -> tuple[list[VoiceJob], list[VoiceJob]]:
+    def _split_existing_voice_jobs(
+        self,
+        project_id: int,
+        jobs: list[VoiceJob],
+        account: dict[str, Any],
+        *,
+        identity: VoiceSynthesisIdentity,
+    ) -> tuple[list[VoiceJob], list[VoiceJob]]:
         assets = self.repo.asset_bindings(project_id)
         account_label = safe_text(account.get("label"))
         existing: list[VoiceJob] = []
         pending: list[VoiceJob] = []
         for job in jobs:
+            expected_fingerprint = identity.fingerprint(
+                account_label=account_label,
+                text_hash=safe_text(job.block.get("text_hash")),
+            )
             found = False
             for asset in assets:
                 if asset["asset_type"] != "voice" or asset["status"] != "ready":
@@ -2055,6 +2218,8 @@ class WorkflowService:
                 if safe_text(asset.get("account_label")) != account_label:
                     continue
                 if safe_text(asset.get("text_hash")) != safe_text(job.block.get("text_hash")):
+                    continue
+                if safe_text(asset.get("generation_fingerprint")) != expected_fingerprint:
                     continue
                 path = Path(safe_text(asset.get("path")))
                 if path.exists():
@@ -2152,9 +2317,16 @@ class WorkflowService:
         *,
         voice_id: str,
         final_path: Path,
+        model: str = MINIMAX_T2A_MODEL,
         speed: float = 1.2,
         emotion: str = "",
         text_normalization: bool = True,
+        volume: float = 1.0,
+        pitch: int = 0,
+        sample_rate: int = 32000,
+        bitrate: int = 128000,
+        format: str = "mp3",
+        channel: int = 1,
     ) -> Path:
         body = safe_text(text).strip()
         if not body:
@@ -2163,21 +2335,21 @@ class WorkflowService:
             raise ValueError(f"MiniMax 单段文本超过 10000 字符（实际 {len(body)}），请拆分后再生成。")
         api_key = load_minimax_api_key()
         payload: dict[str, Any] = {
-            "model": MINIMAX_T2A_MODEL,
+            "model": model,
             "text": body,
             "stream": False,
             "voice_setting": {
                 "voice_id": resolve_minimax_voice_id(voice_id),
                 "speed": speed,
-                "vol": 1.0,
-                "pitch": 0,
+                "vol": volume,
+                "pitch": pitch,
                 "text_normalization": text_normalization,
             },
             "audio_setting": {
-                "sample_rate": 32000,
-                "bitrate": 128000,
-                "format": "mp3",
-                "channel": 1,
+                "sample_rate": sample_rate,
+                "bitrate": bitrate,
+                "format": format,
+                "channel": channel,
             },
         }
         if safe_text(emotion):
@@ -2223,9 +2395,17 @@ class WorkflowService:
         normalize_audio_loudness(final_path)
         return final_path
 
-    def _has_existing_stale_voice_file(self, project_id: int, *, job: VoiceJob, account: dict[str, Any]) -> bool:
+    def _has_existing_stale_voice_file(
+        self,
+        project_id: int,
+        *,
+        job: VoiceJob,
+        account: dict[str, Any],
+        identity: VoiceSynthesisIdentity,
+    ) -> bool:
         account_label = safe_text(account.get("label"))
         current_hash = safe_text(job.block.get("text_hash"))
+        current_fingerprint = identity.fingerprint(account_label=account_label, text_hash=current_hash)
         for asset in self.repo.asset_bindings(project_id):
             if asset["asset_type"] != "voice" or asset["status"] != "ready":
                 continue
@@ -2234,7 +2414,8 @@ class WorkflowService:
             if safe_text(asset.get("account_label")) != account_label:
                 continue
             asset_hash = safe_text(asset.get("text_hash"))
-            if not asset_hash or asset_hash == current_hash:
+            asset_fingerprint = safe_text(asset.get("generation_fingerprint"))
+            if asset_hash == current_hash and asset_fingerprint == current_fingerprint:
                 continue
             path_text = safe_text(asset.get("path"))
             if path_text and Path(path_text).exists():
@@ -2260,33 +2441,60 @@ class WorkflowService:
             return safe_text(value)
         return str(int(number)) if number.is_integer() else str(number)
 
-    def _upsert_voice_asset(self, project_id: int, *, job: VoiceJob, account: dict[str, Any], path: Path) -> None:
+    def _upsert_voice_asset(
+        self,
+        project_id: int,
+        *,
+        job: VoiceJob,
+        account: dict[str, Any],
+        path: Path,
+        identity: VoiceSynthesisIdentity,
+    ) -> None:
         meta = file_metadata(path)
         ts = now_iso()
         account_label = safe_text(account.get("label"))
         account_id = safe_text(account.get("account_id"))
-        self._delete_stale_voice_files(
-            project_id,
-            job=job,
+        generation_fingerprint = identity.fingerprint(
             account_label=account_label,
-            current_path=path,
+            text_hash=safe_text(job.block.get("text_hash")),
         )
         with self.db.connect() as conn:
             conn.execute(
                 """
                 UPDATE asset_bindings
                 SET status='expired', updated_at=?
-                WHERE project_id=? AND script_block_id=? AND asset_type='voice' AND account_label=? AND text_hash<>?
+                WHERE project_id=? AND script_block_id=? AND asset_type='voice' AND account_label=?
+                  AND (COALESCE(text_hash, '')<>? OR COALESCE(generation_fingerprint, '')<>?)
                 """,
-                (ts, project_id, job.block["id"], account_label, job.block["text_hash"]),
+                (
+                    ts,
+                    project_id,
+                    job.block["id"],
+                    account_label,
+                    job.block["text_hash"],
+                    generation_fingerprint,
+                ),
             )
             conn.execute(
                 """
                 INSERT INTO asset_bindings
-                    (project_id, uid, script_block_id, asset_type, account_label, account_id, block_label, script_id, text_hash, path, status, source_kind, file_size, file_mtime, confirmed, created_at, updated_at)
-                VALUES (?, ?, ?, 'voice', ?, ?, ?, ?, ?, ?, 'ready', 'generated', ?, ?, 1, ?, ?)
+                    (project_id, uid, script_block_id, asset_type, account_label, account_id, block_label, script_id, text_hash,
+                     voice_provider, voice_model, voice_id, synthesis_settings_hash, generation_fingerprint,
+                     path, status, source_kind, file_size, file_mtime, confirmed, created_at, updated_at)
+                VALUES (?, ?, ?, 'voice', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', 'generated', ?, ?, 1, ?, ?)
                 ON CONFLICT(project_id, uid, script_block_id, asset_type, account_label, block_label, path)
-                DO UPDATE SET account_id=excluded.account_id, text_hash=excluded.text_hash, status='ready', file_size=excluded.file_size, file_mtime=excluded.file_mtime, updated_at=excluded.updated_at
+                DO UPDATE SET
+                    account_id=excluded.account_id,
+                    text_hash=excluded.text_hash,
+                    voice_provider=excluded.voice_provider,
+                    voice_model=excluded.voice_model,
+                    voice_id=excluded.voice_id,
+                    synthesis_settings_hash=excluded.synthesis_settings_hash,
+                    generation_fingerprint=excluded.generation_fingerprint,
+                    status='ready',
+                    file_size=excluded.file_size,
+                    file_mtime=excluded.file_mtime,
+                    updated_at=excluded.updated_at
                 """,
                 (
                     project_id,
@@ -2297,6 +2505,11 @@ class WorkflowService:
                     safe_text(job.block.get("price_range_label")) if job.kind == "price_transition" else safe_text(job.block.get("block_label")),
                     safe_text(job.block.get("script_id")) or f"script-{job.block['id']}",
                     safe_text(job.block.get("text_hash")),
+                    identity.provider,
+                    identity.model,
+                    identity.voice_id,
+                    identity.settings_hash,
+                    generation_fingerprint,
                     str(path),
                     meta["file_size"],
                     meta["file_mtime"],
@@ -2304,6 +2517,13 @@ class WorkflowService:
                     ts,
                 ),
             )
+        self._delete_stale_voice_files(
+            project_id,
+            job=job,
+            account_label=account_label,
+            current_path=path,
+            generation_fingerprint=generation_fingerprint,
+        )
 
     def _delete_stale_voice_files(
         self,
@@ -2312,6 +2532,7 @@ class WorkflowService:
         job: VoiceJob,
         account_label: str,
         current_path: Path,
+        generation_fingerprint: str,
     ) -> None:
         rows = self.db.fetchall(
             """
@@ -2320,7 +2541,7 @@ class WorkflowService:
               AND script_block_id=?
               AND asset_type='voice'
               AND account_label=?
-              AND text_hash<>?
+              AND (COALESCE(text_hash, '')<>? OR COALESCE(generation_fingerprint, '')<>?)
               AND source_kind<>'manual'
             """,
             (
@@ -2328,6 +2549,7 @@ class WorkflowService:
                 job.block["id"],
                 account_label,
                 safe_text(job.block.get("text_hash")),
+                generation_fingerprint,
             ),
         )
         current = current_path.resolve()

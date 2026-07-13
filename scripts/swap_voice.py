@@ -24,25 +24,12 @@ NEW_AUDIO = Path(r"G:\Tools\自己用的音色\小歪10秒新.mp3")  # 新参考
 
 DO_MINIMAX = True                                         # 是否同时换 MiniMax
 NEW_MINIMAX_VOICE_ID = "xiaowai-v6"                      # 必须是平台上【不存在】的新 id（旧 id 不能覆盖）
-OLD_MINIMAX_VOICE_ID = "xiaowai-v4"                      # 当前 accounts.minimax_voice_id，用于同步两处别名表
 
 # ============================ 固定路径（一般不用改） ============================
 DB_PATH = Path(r"G:\workspace\PC-Bilibili-workflow-sql\data\bworkflow.db")
 VOICES_JSON = Path(r"G:\Tools\IndexTTS2.0\outputs\voices\voices.json")
-WORKFLOW_SERVICE = Path(r"G:\workspace\PC-Bilibili-workflow-sql\bworkflow_sql\workflow_service.py")
 MINIMAX_SKILL_ROOT = Path(r"C:\Users\zhaoer\.codex\skills\zhaoer-tools-minimax-tts")
 MINIMAX_LEGACY_SKILL_ROOT = Path(r"C:\Users\zhaoer\.codex\skills\minimax-tts")
-T2A_CORE = next(
-    (
-        path
-        for path in (
-            MINIMAX_SKILL_ROOT / "scripts" / "t2a_core.py",
-            MINIMAX_LEGACY_SKILL_ROOT / "scripts" / "t2a_core.py",
-        )
-        if path.exists()
-    ),
-    MINIMAX_SKILL_ROOT / "scripts" / "t2a_core.py",
-)
 ENV_PATHS = (
     MINIMAX_SKILL_ROOT / ".env",
     MINIMAX_LEGACY_SKILL_ROOT / ".env",
@@ -154,22 +141,31 @@ def clone_minimax() -> dict:
     if cl.json().get("base_resp", {}).get("status_code", -1) != 0:
         return {"ok": False, "reason": str(cl.json())}
 
-    # 3) accounts.minimax_voice_id
+    # 3) 统一更新兼容字段和标准化 provider profile，不修改任何业务源码。
     conn = sqlite3.connect(DB_PATH)
-    rc = conn.execute("UPDATE accounts SET minimax_voice_id=? WHERE label=?",
-                      (NEW_MINIMAX_VOICE_ID, ACCOUNT_LABEL)).rowcount
+    now_db = time.strftime("%Y%m%d%H%M%S")
+    account = conn.execute("SELECT id FROM accounts WHERE label=?", (ACCOUNT_LABEL,)).fetchone()
+    if account is None:
+        conn.close()
+        return {"ok": False, "reason": "ACCOUNT_NOT_FOUND"}
+    rc = conn.execute(
+        "UPDATE accounts SET minimax_voice_id=?, updated_at=? WHERE id=?",
+        (NEW_MINIMAX_VOICE_ID, now_db, account[0]),
+    ).rowcount
+    conn.execute(
+        """
+        INSERT INTO account_voice_profiles
+            (account_id, provider, voice_id, model, settings_json, enabled, created_at, updated_at)
+        VALUES (?, 'minimax', ?, '', '{}', 1, ?, ?)
+        ON CONFLICT(account_id, provider) DO UPDATE SET
+            voice_id=excluded.voice_id,
+            enabled=1,
+            updated_at=excluded.updated_at
+        """,
+        (account[0], NEW_MINIMAX_VOICE_ID, now_db, now_db),
+    )
     conn.commit()
     conn.close()
-
-    # 4) 两处别名表（OLD -> NEW）：workflow_service.py 文本、t2a_core.py 二进制
-    ws = WORKFLOW_SERVICE.read_text(encoding="utf-8")
-    if OLD_MINIMAX_VOICE_ID in ws:
-        WORKFLOW_SERVICE.write_text(ws.replace(OLD_MINIMAX_VOICE_ID, NEW_MINIMAX_VOICE_ID), encoding="utf-8")
-    if T2A_CORE.exists():
-        raw = T2A_CORE.read_bytes()
-        old_b = OLD_MINIMAX_VOICE_ID.encode()
-        if old_b in raw:
-            T2A_CORE.write_bytes(raw.replace(old_b, NEW_MINIMAX_VOICE_ID.encode()))
     return {"ok": True, "file_id": file_id, "acc_rows": rc}
 
 
@@ -192,14 +188,22 @@ def main() -> int:
     conn = sqlite3.connect(DB_PATH)
     sp = conn.execute("SELECT speaker_audio_path FROM voice_profiles WHERE voice_id=?",
                       (INDEXTTS_VOICE_ID,)).fetchone()[0]
-    acc = conn.execute("SELECT minimax_voice_id FROM accounts WHERE label=?",
-                       (ACCOUNT_LABEL,)).fetchone()
+    acc = conn.execute(
+        """
+        SELECT a.minimax_voice_id, p.voice_id
+        FROM accounts a
+        LEFT JOIN account_voice_profiles p
+          ON p.account_id=a.id AND p.provider='minimax' AND p.enabled=1
+        WHERE a.label=?
+        """,
+        (ACCOUNT_LABEL,),
+    ).fetchone()
     conn.close()
     data2 = json.loads(VOICES_JSON.read_text(encoding="utf-8"))
     je = [e for e in data2["voices"] if e.get("voice_id") == INDEXTTS_VOICE_ID][0]
     ok = (sp == str(NEW_AUDIO)) and (je["speaker_audio_fingerprint"]["sha256"] == it["fp"]["sha256"])
     if DO_MINIMAX and mm.get("ok"):
-        ok = ok and (acc and acc[0] == NEW_MINIMAX_VOICE_ID)
+        ok = ok and bool(acc and acc[0] == NEW_MINIMAX_VOICE_ID and acc[1] == NEW_MINIMAX_VOICE_ID)
     print("VERIFY_DB_JSON_OK=", int(ok))
     print("CURRENT_MINIMAX=", acc[0] if acc else "NULL")
     print("SWAP_DONE=" + ("1" if ok else "0"))

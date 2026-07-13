@@ -179,10 +179,9 @@ def prepare_cutme_config(
         "subtitles": intro_subtitles,
         "output": {
             "subtitles": {
-                "enabled": bool(intro_subtitles),
-                "styleId": "impact_yellow",
+                "enabled": False,
                 "source": "intro_plan_scenes",
-                "scope": "standalone_intro",
+                "scope": "final_video_only",
             }
         },
     }

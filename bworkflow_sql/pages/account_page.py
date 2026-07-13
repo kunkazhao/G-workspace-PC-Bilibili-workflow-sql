@@ -47,7 +47,7 @@ from ..settings import (
 from ..template_config import available_templates, image_set_for_template
 from ..style_config import UIStyle
 from ..sync_service import AUDIO_SUFFIXES, SyncService
-from ..utils import compact_path, now_iso, safe_text, text_hash
+from ..utils import compact_path, safe_text, text_hash
 from ..workflow_service import (
     DEFAULT_SUBTITLE_ASR_BEAM_SIZE,
     DEFAULT_SUBTITLE_ASR_MODEL,
@@ -175,15 +175,7 @@ class AccountPage(BasePage):
         if not payload["label"]:
             self.toast("请填写用户标签，例如小燃。", kind="warning")
             return
-        ts = now_iso()
-        with self.db.connect() as conn:
-            conn.execute("""
-                INSERT INTO accounts (label, account_id, voice_id, minimax_voice_id, voice_name, media_identity, closing_audio_path, enabled, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-                ON CONFLICT(label) DO UPDATE SET
-                    account_id=excluded.account_id, voice_id=excluded.voice_id, minimax_voice_id=excluded.minimax_voice_id, voice_name=excluded.voice_name,
-                    media_identity=excluded.media_identity, closing_audio_path=excluded.closing_audio_path, updated_at=excluded.updated_at
-            """, (payload["label"], payload["account_id"], payload["voice_id"], payload["minimax_voice_id"], payload["voice_name"], payload["media_identity"], payload["closing_audio_path"], ts, ts))
+        self.repo.upsert_account(payload)
         self.refresh()
         self.toast("用户已保存")
 

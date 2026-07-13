@@ -38,6 +38,42 @@
       ]
     },
     {
+      "type": "price_transition",
+      "id": "price-water-flosser-100-200",
+      "priceRangeLabel": "100-200元",
+      "transitionText": "一百到两百元重点看水流稳定、档位调节和喷嘴适配，适合正畸或者高频使用。",
+      "priceTransitionPlanVersion": "1.0.0",
+      "priceTransitionCard": {
+        "planVersion": "1.0.0",
+        "rangeLabel": "100-200元",
+        "headline": "重点参数",
+        "audience": "适合正畸或者高频使用",
+        "keyPoints": ["水流稳定", "档位调节", "喷嘴适配"],
+        "items": [
+          {
+            "label": "水流稳定",
+            "triggerText": "水流稳定",
+            "timing": {"start": 0.45, "duration": 0.8}
+          },
+          {
+            "label": "档位调节",
+            "triggerText": "档位调节",
+            "timing": {"start": 0.6, "duration": 0.8}
+          },
+          {
+            "label": "喷嘴适配",
+            "triggerText": "喷嘴适配",
+            "timing": {"start": 0.75, "duration": 0.8}
+          }
+        ]
+      },
+      "voiceAsset": "cutme-render-package-v1/audio/price-transition.fixture",
+      "duration": 1.5,
+      "subtitles": [
+        {"start": 0.0, "end": 1.4, "text": "一百到两百元重点看水流稳定、档位调节和喷嘴适配，适合正畸或者高频使用。"}
+      ]
+    },
+    {
       "type": "product_recommendation",
       "id": "product-CONTRACT-001",
       "productUid": "CONTRACT-001",
@@ -67,6 +103,7 @@
       "id": "outro-fixed",
       "spokenText": "Thanks for watching and leave a comment.",
       "voiceAsset": "cutme-render-package-v1/audio/outro.fixture",
+      "videoAsset": "cutme-render-package-v1/assets/outro.fixture",
       "duration": 1.0,
       "templateId": "outro-dark-line",
       "seed": "contract-fixture-seed",
@@ -75,6 +112,9 @@
       ]
     }
   ],
-  "assets": {},
+  "assets": {
+    "recommendationBackground": "cutme-render-package-v1/assets/product-card.fixture",
+    "assetFallbackPolicy": "forbid"
+  },
   "approval": {}
 }

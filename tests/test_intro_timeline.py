@@ -37,27 +37,31 @@ def test_align_intro_plan_scenes_with_asr_writes_scene_timing(tmp_path: Path, mo
         ],
     }
 
-    def fake_asr(_audio_path, *, model_name, language, beam_size):
-        assert model_name == intro_timeline_module.DEFAULT_SUBTITLE_ASR_MODEL
-        assert language == intro_timeline_module.DEFAULT_SUBTITLE_ASR_LANGUAGE
-        assert beam_size == intro_timeline_module.DEFAULT_SUBTITLE_ASR_BEAM_SIZE
-        return [
-            {"start": 0.0, "end": 0.15, "text": "第"},
-            {"start": 0.15, "end": 0.3, "text": "一"},
-            {"start": 0.3, "end": 0.5, "text": "句"},
-            {"start": 0.7, "end": 0.85, "text": "第"},
-            {"start": 0.85, "end": 1.0, "text": "二"},
-            {"start": 1.0, "end": 1.2, "text": "句"},
-            {"start": 1.4, "end": 1.55, "text": "第"},
-            {"start": 1.55, "end": 1.7, "text": "三"},
-            {"start": 1.7, "end": 1.9, "text": "句"},
-        ]
+    def fake_forced(jobs, *, model_name, language, batch_size):
+        assert jobs[0]["audio_path"] == str(audio_path)
+        assert model_name == intro_timeline_module.DEFAULT_FORCED_ALIGNMENT_MODEL
+        assert language == intro_timeline_module.DEFAULT_FORCED_ALIGNMENT_LANGUAGE
+        assert batch_size == 1
+        return [{
+            "audio_duration_sec": 2.1,
+            "items": [
+                {"start": 0.0, "end": 0.15, "text": "第"},
+                {"start": 0.15, "end": 0.3, "text": "一"},
+                {"start": 0.3, "end": 0.5, "text": "句"},
+                {"start": 0.7, "end": 0.85, "text": "第"},
+                {"start": 0.85, "end": 1.0, "text": "二"},
+                {"start": 1.0, "end": 1.2, "text": "句"},
+                {"start": 1.4, "end": 1.55, "text": "第"},
+                {"start": 1.55, "end": 1.7, "text": "三"},
+                {"start": 1.7, "end": 1.9, "text": "句"},
+            ],
+        }]
 
-    monkeypatch.setattr(intro_timeline_module, "run_subtitle_alignment_asr", fake_asr)
+    monkeypatch.setattr(intro_timeline_module, "forced_alignment_results", fake_forced)
 
     aligned = intro_timeline_module.align_intro_plan_scenes_with_asr(plan, audio_path)
 
-    assert aligned["timing_source"]["type"] == "asr_scene_and_visual_event_alignment"
+    assert aligned["timing_source"]["type"] == "forced_transcript_scene_and_visual_event_alignment"
     assert aligned["scenes"][0]["timing"] == {"start": 0.0, "duration": 0.5}
     assert aligned["scenes"][1]["timing"]["start"] == pytest.approx(0.7)
     assert aligned["scenes"][2]["timing"]["start"] == pytest.approx(1.4)
@@ -124,6 +128,31 @@ def test_align_visual_event_specs_with_units_uses_trigger_text():
         "pain_points.cards[0]",
         "pain_points.cards[1]",
     ]
-    assert events[0]["timing"]["source"] == "asr_trigger_text"
+    assert events[0]["timing"]["source"] == "forced_alignment_trigger_text"
     assert events[0]["timing"]["start"] == pytest.approx(1.0, abs=0.15)
     assert events[1]["timing"]["start"] == pytest.approx(2.3, abs=0.15)
+
+
+def test_align_visual_event_specs_rejects_missing_trigger_text():
+    plan = {
+        "full_script": "只说了这一句。",
+        "scenes": [
+            {
+                "type": "hook_open",
+                "text": "只说了这一句。",
+                "timing": {"start": 0.0, "duration": 1.0},
+            }
+        ],
+        "visual_event_specs": [
+            {
+                "id": "missing-trigger",
+                "scene_type": "hook_open",
+                "target": "hook_open.title",
+                "trigger_text": "原文没有这句话",
+            }
+        ],
+    }
+    units = [{"start": 0.0, "end": 1.0, "text": "只说了这一句。"}]
+
+    with pytest.raises(ValueError, match="触发词无法在精确原文中定位"):
+        intro_timeline_module.align_visual_event_specs_with_units(plan, units)

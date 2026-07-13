@@ -43,38 +43,23 @@ class LegacyImportService:
         payload = _read_json(OLD_ACCOUNTS_PATH)
         rows = payload.get("accounts") if isinstance(payload, dict) else []
         count = 0
-        ts = now_iso()
-        with self.db.connect() as conn:
-            for row in rows if isinstance(rows, list) else []:
-                if not isinstance(row, dict):
-                    continue
-                label = safe_text(row.get("display_name") or row.get("account_id"))
-                if not label:
-                    continue
-                conn.execute(
-                    """
-                    INSERT INTO accounts (label, account_id, voice_id, voice_name, media_identity, closing_audio_path, enabled, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
-                    ON CONFLICT(label) DO UPDATE SET
-                        account_id=excluded.account_id,
-                        voice_id=excluded.voice_id,
-                        voice_name=excluded.voice_name,
-                        media_identity=excluded.media_identity,
-                        closing_audio_path=excluded.closing_audio_path,
-                        updated_at=excluded.updated_at
-                    """,
-                    (
-                        label,
-                        safe_text(row.get("account_id") or label),
-                        safe_text(row.get("voice_id") or label),
-                        label,
-                        safe_text(row.get("media_identity") or label),
-                        safe_text(row.get("closing_audio_path")),
-                        ts,
-                        ts,
-                    ),
-                )
-                count += 1
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            label = safe_text(row.get("display_name") or row.get("account_id"))
+            if not label:
+                continue
+            self.repo.upsert_account(
+                {
+                    "label": label,
+                    "account_id": safe_text(row.get("account_id") or label),
+                    "voice_id": safe_text(row.get("voice_id") or label),
+                    "voice_name": label,
+                    "media_identity": safe_text(row.get("media_identity") or label),
+                    "closing_audio_path": safe_text(row.get("closing_audio_path")),
+                }
+            )
+            count += 1
         return count
 
     def import_voice_profiles(self) -> int:

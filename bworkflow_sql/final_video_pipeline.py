@@ -15,6 +15,8 @@ from .content_constants import DEFAULT_CLOSING_TEXT
 from .settings import CUTME_ROOT, INTERNAL_WORKSPACE_ROOT
 from .utils import safe_text
 from .workflow_service import safe_path_component
+from .production_delivery import resolve_pipeline_output_dir, resolve_project_delivery_dir
+from .production_recipe import build_production_recipe, write_production_recipe
 
 Runner = Callable[..., Any]
 ProbeVideo = Callable[[Path], dict[str, Any]]
@@ -94,16 +96,36 @@ def run_final_video_pipeline(
     clip_cache_manifest_path = clip_cache_dir / "clip-cache-manifest.json"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     stem = f"render-package-{safe_path_component(account)}-final-video-{timestamp}"
-    delivery_layout = _delivery_layout(delivery_dir, account=account, timestamp=timestamp)
+    resolved_delivery_dir = delivery_dir or resolve_pipeline_output_dir(pipeline_path)
+    if (
+        pipeline_path
+        and not resolved_delivery_dir
+        and not any((package_output_path, output_path, full_output_path))
+    ):
+        resolved_delivery_dir = resolve_project_delivery_dir(
+            project=workflow._required_project(project_id),
+            account_label=account,
+            pipeline_path=pipeline_path,
+        )
+    delivery_layout = _delivery_layout(
+        resolved_delivery_dir,
+        project_id=project_id,
+        account=account,
+        timestamp=timestamp,
+    )
     if delivery_layout:
         package_output_path = package_output_path or delivery_layout["package_path"]
-        output_path = output_path or delivery_layout["product_mp4"]
-        full_output_path = full_output_path or delivery_layout["full_mp4"]
+        output_path = output_path or delivery_layout["candidate_mp4"]
+        full_output_path = full_output_path or delivery_layout["candidate_mp4"]
     package_path = _absolute_path(package_output_path) if package_output_path else render_root / f"{stem}.json"
     target_mp4 = _absolute_path(output_path) if output_path else package_path.with_suffix(".mp4")
     intro_mp4 = _absolute_path(intro_video_path) if intro_video_path else None
     intro_source_plan_path = _absolute_path(intro_video_source_plan_path) if intro_video_source_plan_path else None
     resolved_intro_text = safe_text(intro_video_text).strip()
+    if (pipeline_path or delivery_layout) and not intro_mp4:
+        raise ValueError(
+            "formal final-video generation requires an accepted intro MP4; product-only renders are diagnostic artifacts"
+        )
     if intro_mp4:
         if not intro_mp4.is_file():
             raise FileNotFoundError(f"intro video does not exist: {intro_mp4}")
@@ -128,7 +150,7 @@ def run_final_video_pipeline(
                 product_uid="",
                 product_card_template_id=product_card_template_id,
             )
-        if product_images.get("ok") is False:
+        if product_images is not None and product_images.get("ok") is False:
             return {
                 "ok": False,
                 "stage": "product_images",
@@ -182,7 +204,7 @@ def run_final_video_pipeline(
     job_package_path = _absolute_path(cutme_artifacts["job_package_path"])
     target_mp4 = _absolute_path(cutme_artifacts["output_path"])
 
-    full_target_mp4 = target_mp4 if intro_mp4 else None
+    full_target_mp4 = target_mp4 if intro_mp4 and acceptance != "none" else None
     concat_result = None
     intro_subtitle_ass_path = None
     intro_subtitle_report = (
@@ -233,6 +255,34 @@ def run_final_video_pipeline(
     if not isinstance(cutme_cache, dict):
         cutme_cache = _read_clip_cache_summary(clip_cache_manifest) if clip_cache_manifest else None
 
+    recipe_path = (
+        INTERNAL_WORKSPACE_ROOT
+        / f"project-{project_id}"
+        / "runs"
+        / f"final-video-{timestamp}.production-recipe.json"
+    )
+    recipe = build_production_recipe(
+        job_package_path=job_package_path,
+        source_package_path=package_path,
+        cutme_result=cutme_result,
+    )
+    write_production_recipe(recipe, recipe_path)
+
+    # The delivery root only receives a complete candidate after all requested
+    # automated gates have passed. Failed or unaccepted renders stay internal.
+    if delivery_layout and acceptance != "none":
+        promoted_path = delivery_layout["full_mp4"]
+        promoted_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_dir = target_mp4.parent if target_mp4.parent.name == ".bworkflow-staging" else None
+        target_mp4.replace(promoted_path)
+        if staging_dir is not None:
+            try:
+                staging_dir.rmdir()
+            except OSError:
+                pass
+        target_mp4 = promoted_path
+        full_target_mp4 = promoted_path
+
     result = {
         "ok": True,
         "project_id": project_id,
@@ -244,6 +294,8 @@ def run_final_video_pipeline(
         "product_card_template_id": safe_text(product_card_template_id) or None,
         "package_path": str(package_path),
         "job_package_path": str(job_package_path),
+        "production_recipe_path": str(recipe_path),
+        "production_recipe_sha256": recipe["recipeSha256"],
         "output_mp4": str(target_mp4),
         "output_mp4_link": _markdown_link("打开完整 MP4", target_mp4),
         "full_output_mp4": str(full_target_mp4) if full_target_mp4 else None,
@@ -281,6 +333,8 @@ def run_final_video_pipeline(
         result=result,
         target_mp4=target_mp4,
         full_target_mp4=full_target_mp4,
+        recipe_path=recipe_path,
+        recipe_sha256=recipe["recipeSha256"],
         intro_video_path=_absolute_path(intro_video_path) if intro_video_path else None,
         intro_video_source_plan_path=_absolute_path(intro_video_source_plan_path) if intro_video_source_plan_path else None,
     )
@@ -327,6 +381,7 @@ def _absolute_path(path_text: str | Path) -> Path:
 def _delivery_layout(
     delivery_dir: str | Path | None,
     *,
+    project_id: int,
     account: str,
     timestamp: str,
 ) -> dict[str, Path] | None:
@@ -334,15 +389,21 @@ def _delivery_layout(
         return None
     root = _absolute_path(delivery_dir)
     root.mkdir(parents=True, exist_ok=True)
-    evidence_dir = root / "02_验收证据" / timestamp
-    process_dir = root / "03_过程记录" / timestamp
+    artifact_root = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "runs" / "artifacts" / timestamp
+    evidence_dir = artifact_root / "acceptance"
+    process_dir = artifact_root / "process"
     frames_dir = evidence_dir / "frames"
+    candidate_dir = process_dir
+    if process_dir.anchor.casefold() != root.anchor.casefold():
+        candidate_dir = root.parent / ".bworkflow-staging"
+        candidate_dir.mkdir(parents=True, exist_ok=True)
     return {
         "dir": root,
         "evidence_dir": evidence_dir,
         "process_dir": process_dir,
         "frames_dir": frames_dir,
-        "product_mp4": root / f"商品推荐段-{timestamp}.mp4",
+        "product_mp4": process_dir / f"product-section-{timestamp}.mp4",
+        "candidate_mp4": candidate_dir / f"complete-candidate-{timestamp}.partial.mp4",
         "full_mp4": root / f"完整成片-{timestamp}.mp4",
         "package_path": process_dir / "render-package.json",
     }
@@ -595,6 +656,8 @@ def _write_final_video_run_manifest(
     result: dict[str, Any],
     target_mp4: Path,
     full_target_mp4: Path | None,
+    recipe_path: Path,
+    recipe_sha256: str,
     intro_video_path: Path | None,
     intro_video_source_plan_path: Path | None = None,
 ) -> Path:
@@ -606,6 +669,8 @@ def _write_final_video_run_manifest(
         result=result,
         target_mp4=target_mp4,
         full_target_mp4=full_target_mp4,
+        recipe_path=recipe_path,
+        recipe_sha256=recipe_sha256,
         intro_video_path=intro_video_path,
         intro_video_source_plan_path=intro_video_source_plan_path,
     )
@@ -633,9 +698,51 @@ def _record_final_video_pipeline(
     price_report = result.get("price_transition_report") if isinstance(result.get("price_transition_report"), dict) else {}
     now = datetime.now().isoformat(timespec="seconds")
     final_mp4_path = str(full_target_mp4 or target_mp4)
+    publishing = phases.get("publishing") if isinstance(phases.get("publishing"), dict) else {}
+    already_published = payload.get("current_phase") == "done" or publishing.get("status") == "done"
+    if already_published:
+        previous = assembly.get("pending_candidate") if isinstance(assembly.get("pending_candidate"), dict) else {}
+        previous_path = Path(safe_text(previous.get("mp4_path"))).expanduser()
+        previous_hash = safe_text(previous.get("sha256"))
+        warning = None
+        if previous_path.is_file() and previous_path.resolve() != Path(final_mp4_path).resolve():
+            if previous_hash and _path_sha256(previous_path) == previous_hash:
+                retired_dir = INTERNAL_WORKSPACE_ROOT / f"project-{result.get('project_id')}" / "runs" / "superseded"
+                retired_dir.mkdir(parents=True, exist_ok=True)
+                previous_path.replace(retired_dir / previous_path.name)
+            else:
+                warning = "previous_candidate_changed_by_user_and_left_in_place"
+        assembly["pending_candidate"] = {
+            "status": "generated" if result.get("acceptance_mode") != "none" else "generated_unverified",
+            "mp4_path": final_mp4_path,
+            "run_manifest_path": str(run_manifest_path),
+            "sha256": _path_sha256(Path(final_mp4_path)) if Path(final_mp4_path).is_file() else "",
+            "created_at": now,
+            "warning": warning,
+        }
+        phases["assembly"] = assembly
+        payload["phases"] = phases
+        payload["updated_at"] = now
+        pipeline_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        return
+    confirmation = payload.get("production_confirmation") if isinstance(payload.get("production_confirmation"), dict) else {}
+    old_path = Path(safe_text(assembly.get("final_mp4_path"))).expanduser()
+    old_hash = safe_text(assembly.get("candidate_sha256"))
+    old_is_confirmed = (
+        confirmation.get("status") == "confirmed"
+        and safe_text(confirmation.get("run_manifest_path")) == safe_text(assembly.get("run_manifest_path"))
+    )
+    replacement_warning = None
+    if old_path.is_file() and old_path.resolve() != Path(final_mp4_path).resolve() and not old_is_confirmed:
+        if old_hash and _path_sha256(old_path) == old_hash:
+            retired_dir = INTERNAL_WORKSPACE_ROOT / f"project-{result.get('project_id')}" / "runs" / "superseded"
+            retired_dir.mkdir(parents=True, exist_ok=True)
+            old_path.replace(retired_dir / old_path.name)
+        else:
+            replacement_warning = "previous_candidate_not_owned_or_changed_and_left_in_place"
     assembly.update(
         {
-            "status": "done",
+            "status": "done" if result.get("acceptance_mode") != "none" else "generated_unverified",
             "account": result.get("account"),
             "product_card_template_id": result.get("product_card_template_id"),
             "product_media_mode": result.get("product_media_mode"),
@@ -643,6 +750,8 @@ def _record_final_video_pipeline(
             "top_uids": price_report.get("top_uids") or [],
             "product_order_strategy": result.get("product_order_strategy"),
             "final_mp4_path": final_mp4_path,
+            "candidate_sha256": _path_sha256(Path(final_mp4_path)) if Path(final_mp4_path).is_file() else "",
+            "candidate_replacement_warning": replacement_warning,
             "run_manifest_path": str(run_manifest_path),
             "package_path": result.get("package_path"),
             "job_package_path": result.get("job_package_path"),
@@ -659,10 +768,18 @@ def _record_final_video_pipeline(
     payload["phases"] = phases
 
     paths = payload.get("paths") if isinstance(payload.get("paths"), dict) else {}
+    final_relative = None
+    output_dir = safe_text(payload.get("output_dir"))
+    if output_dir:
+        try:
+            final_relative = str(Path(final_mp4_path).resolve().relative_to(Path(output_dir).resolve()))
+        except ValueError:
+            final_relative = None
     paths.update(
         {
             "manifest": str(run_manifest_path),
             "final_mp4": final_mp4_path,
+            "final_mp4_relative": final_relative,
             "render_package": result.get("package_path"),
             "job_package": result.get("job_package_path"),
         }
@@ -671,6 +788,8 @@ def _record_final_video_pipeline(
     payload["current_phase"] = "assembly"
     payload["next_action"] = (
         "完整 MP4 已生成；下一步进入发布准备：标题、封面文案、简介、投票、评论区材料。"
+        if result.get("acceptance_mode") != "none"
+        else "候选片尚未验收；必须重新执行带验收的正式生成，不能确认或发布。"
     )
     payload["updated_at"] = now
     pipeline_path.parent.mkdir(parents=True, exist_ok=True)
@@ -683,6 +802,8 @@ def _final_video_run_manifest_payload(
     result: dict[str, Any],
     target_mp4: Path,
     full_target_mp4: Path | None,
+    recipe_path: Path,
+    recipe_sha256: str,
     intro_video_path: Path | None,
     intro_video_source_plan_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -733,6 +854,11 @@ def _final_video_run_manifest_payload(
             "intro_video_path": str(intro_video_path) if intro_video_path else None,
             "intro_video_source_plan_path": str(intro_video_source_plan_path) if intro_video_source_plan_path else None,
             "intro_subtitles": result.get("intro_subtitles"),
+        },
+        "recipe": {
+            "path": str(recipe_path),
+            "sha256": recipe_sha256,
+            "status": "reproducible",
         },
         "outputs": {
             "product_mp4": str(target_mp4),

@@ -146,6 +146,25 @@ def test_render_intro_video_parser_registers_command():
     assert args.asset_root == "assets"
 
 
+def test_price_transition_plan_parser_defaults_to_no_sync():
+    args = cli.build_parser().parse_args(
+        [
+            "price-transition-plan",
+            "23",
+            "--plan",
+            "price-transition-plan.json",
+            "--markdown",
+            "copy.md",
+        ]
+    )
+
+    assert args.command == "price-transition-plan"
+    assert args.project_id == 23
+    assert args.plan == "price-transition-plan.json"
+    assert args.markdown == "copy.md"
+    assert args.sync is False
+
+
 def test_render_intro_video_parser_uses_production_defaults():
     args = cli.build_parser().parse_args(
         [
@@ -1330,10 +1349,11 @@ def test_cmd_render_intro_video_writes_standard_json(capsys, monkeypatch):
             self,
             project_id,
             *,
-            account_label,
-            intro_label,
-            output_path,
-            asset_root,
+                account_label,
+                intro_label,
+                output_path,
+                asset_root,
+                pipeline_path,
         ):
             calls.append(
                 {
@@ -1341,7 +1361,8 @@ def test_cmd_render_intro_video_writes_standard_json(capsys, monkeypatch):
                     "account_label": account_label,
                     "intro_label": intro_label,
                     "output_path": output_path,
-                    "asset_root": asset_root,
+                        "asset_root": asset_root,
+                        "pipeline_path": pipeline_path,
                 }
             )
             return {
@@ -1370,7 +1391,8 @@ def test_cmd_render_intro_video_writes_standard_json(capsys, monkeypatch):
             "project_id": 23,
             "account_label": "xiaobo",
             "intro_label": "intro-1",
-            "output_path": "intro.mp4",
-            "asset_root": "assets",
+                "output_path": "intro.mp4",
+                "asset_root": "assets",
+                "pipeline_path": None,
         }
     ]

@@ -7,6 +7,11 @@ from .cutme_intro import find_intro_plan_for_text
 from .db import Database
 from .md_parser import ParsedMarkdown, ScriptVariant, parse_markdown_file
 from .markdown_paths import product_copy_library_path, project_asset_markdown_path
+from .price_transition_plan import (
+    find_price_transition_plan_for_text,
+    load_price_transition_plan_set,
+    price_transition_plan_path,
+)
 from .research_pack_service import ResearchPackService
 from .repositories import Repository
 from .utils import safe_text, text_hash
@@ -97,7 +102,7 @@ def diagnose_script_flow(
                     "code": "missing_matching_intro_plan",
                     "message": "selected intro text has no matching source-intro-plan JSON; run intro-plan from slots or select a matching intro.",
                     "intro_label": selected_intro.label,
-                    "command": f"python -m bworkflow_sql intro-plan {project_id} --slots <slots.json> --label {selected_intro.label} --sync",
+                    "command": f"python -m bworkflow_sql intro-plan {project_id} --slots <slots.json> --label {selected_intro.label}",
                 }
             )
 
@@ -179,6 +184,50 @@ def diagnose_script_flow(
             }
         )
 
+    source_price_transition_plan_path = ""
+    try:
+        price_plan_set = load_price_transition_plan_set(project_id)
+    except ValueError as exc:
+        price_plan_set = None
+        source_price_transition_plan_path = str(price_transition_plan_path(project_id))
+        issues.append(
+            {
+                "level": "error",
+                "code": "invalid_price_transition_plan_set",
+                "message": str(exc),
+                "path": source_price_transition_plan_path,
+            }
+        )
+    if price_plan_set is not None:
+        source_price_transition_plan_path = str(price_transition_plan_path(project_id))
+        for price in price_transitions:
+            for script in price.scripts:
+                matched = find_price_transition_plan_for_text(
+                    project_id,
+                    price_range_label=price.label,
+                    block_label=script.label,
+                    body=script.body,
+                )
+                if matched is None:
+                    issues.append(
+                        {
+                            "level": "error",
+                            "code": "missing_matching_price_transition_plan",
+                            "message": "价格过渡正文与结构化自动剪辑计划不匹配；必须重建计划，不能退回关键词猜测。",
+                            "price_range_label": price.label,
+                            "block_label": script.label,
+                        }
+                    )
+    elif price_transition_ready and not source_price_transition_plan_path:
+        issues.append(
+            {
+                "level": "error",
+                "code": "missing_price_transition_plan_set",
+                "message": "价格过渡正文缺少结构化自动剪辑计划；必须生成计划，不能依赖通用关键词猜测。",
+                "command": f"python -m bworkflow_sql price-transition-plan {project_id} --plan <price-transition-plan.json>",
+            }
+        )
+
     markdown_sync = _markdown_sync_status(
         parsed=parsed,
         blocks=blocks,
@@ -207,11 +256,16 @@ def diagnose_script_flow(
             "price_transition_sections": len(price_transitions),
             "price_transition_ready": price_transition_ready,
             "price_transition_library_ready": library_price_transition_ready,
+            "price_transition_plan_ready": bool(price_plan_set),
             "script_blocks_synced": markdown_sync["synced_count"],
         },
         "selected_intro": {
             "label": selected_intro.label if selected_intro else "",
             "source_intro_plan_path": source_intro_plan_path,
+        },
+        "price_transition_plan": {
+            "source_path": source_price_transition_plan_path,
+            "strict": bool(source_price_transition_plan_path),
         },
         "issues": issues,
         "next": _next_hint(db, project_id, issues, markdown_sync["synced"]),
@@ -303,6 +357,9 @@ def _status(issues: list[dict[str, Any]], synced: bool) -> str:
             "intro_version_not_selected",
             "intro_version_not_found",
             "missing_matching_intro_plan",
+            "invalid_price_transition_plan_set",
+            "missing_price_transition_plan_set",
+            "missing_matching_price_transition_plan",
             "missing_product_copy",
         }
     ):
@@ -340,14 +397,28 @@ def _next_hint(db: Database, project_id: int, issues: list[dict[str, Any]], sync
             {},
         )
         command = safe_text(intro_issue.get("command")) or (
-            f"python -m bworkflow_sql intro-plan {project_id} --slots <slots.json> --label 引言1 --sync"
+            f"python -m bworkflow_sql intro-plan {project_id} --slots <slots.json> --label 引言1"
         )
         return {
             "action": "create_intro_plan",
             "task": "补引言剪辑计划",
             "command": command,
-            "requires_user_final_approval": True,
-            "note": "引言文案必须匹配 source-intro-plan JSON；从 slots JSON 生成计划后再同步入库、配音和组装。",
+            "requires_user_final_approval": False,
+            "note": "先从 slots JSON 同源生成正式 Markdown 和 source-intro-plan；用户定稿前不要加 --sync，也不要配音和组装。",
+        }
+    if codes.intersection(
+        {
+            "invalid_price_transition_plan_set",
+            "missing_price_transition_plan_set",
+            "missing_matching_price_transition_plan",
+        }
+    ):
+        return {
+            "action": "rebuild_price_transition_plan",
+            "task": "重建价格过渡自动剪辑计划",
+            "command": f"python -m bworkflow_sql price-transition-plan {project_id} --plan <price-transition-plan.json>",
+            "requires_user_final_approval": False,
+            "note": "命令同源更新正式 Markdown 和机器计划；定稿前不要加 --sync。",
         }
     if codes.intersection(
         {
@@ -362,9 +433,11 @@ def _next_hint(db: Database, project_id: int, issues: list[dict[str, Any]], sync
             "task": "写文案草稿",
             "command": f"python -m bworkflow_sql research-pack {project_id}",
             "outline_command": f"python -m bworkflow_sql outline {project_id}",
+            "intro_plan_command": f"python -m bworkflow_sql intro-plan {project_id} --slots <slots.json> --label 引言1",
+            "price_transition_plan_command": f"python -m bworkflow_sql price-transition-plan {project_id} --plan <price-transition-plan.json>",
             "research_pack_path": research_pack_path,
             "requires_user_final_approval": True,
-            "note": "先建/补资料采集包并联网填证据，再写单品文案草稿；用户定稿前不入库、不配音、不组口播稿。",
+            "note": "先建/补资料采集包并联网填证据，再写单品文案；引言和价格过渡分别通过结构化命令同源写入正式 Markdown 与机器计划。用户定稿前不入库、不配音、不组口播稿。",
         }
     if "markdown_not_synced" in codes or not synced:
         return {

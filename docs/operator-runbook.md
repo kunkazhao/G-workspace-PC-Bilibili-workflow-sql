@@ -1,5 +1,24 @@
 # B-Workflow SQL 运维手册
 
+## 媒体工作区与正式成片履历
+
+- 新建项目自动建立所有启用账号的配音目录、实际配置模板的商品图目录、品类 Roll-B 目录和引言展示视频目录。
+- 旧项目或外部盘恢复后运行 `python -m bworkflow_sql scaffold <project_id>` 幂等补齐。
+- `render-final-video` 只写生成证据。用户确认完整 MP4 是实际成品后，运行 `python -m bworkflow_sql confirm-production <project_id> --run-manifest <path> --pipeline <path>`。
+- 如果实际上传的是后续剪辑导出的版本，加 `--final-path <最终发布版.mp4>`；run manifest 继续提供模板和生成来源，履历哈希与当前路径记录最终发布版。
+- 测试、预览、模板校准和未采纳成片不得执行确认命令。
+- 下次选模板前运行 `python -m bworkflow_sql production-history <project_id> --account <账号>`，优先使用 `recommended_template`。
+- 发布后自动移动：`python -m bworkflow_sql complete-publishing <production_run_id> --pipeline <path>`。默认使用 `G:\2026项目-b站\已发布视频` 下已存在的当前月份目录；当前月份目录不存在则放根目录，不自动建月份目录。`--archive-dir` 仅用于覆盖默认目录。
+- 已手工移动：改用 `--current-path <当前完整MP4路径>`；系统校验 SHA-256 后更新现有正式成片记录和 `phases.publishing`，不修改 run manifest。
+
+## 冻结配方重渲染与修订
+
+- 先运行只读预检：`python -m bworkflow_sql rerender-production-preflight <production_run_id>`。只有结果为 `reproducible` 才能继续；`external_edit`、`sources_missing`、`version_drift` 和 `legacy_unknown` 都必须停止并说明原因。
+- 正式重渲染：`python -m bworkflow_sql rerender-production <production_run_id> --pipeline <path>`。该命令只消费已确认版本的冻结配方，不重新随机选素材，也不允许默认素材回退。
+- 重渲染只生成待确认候选，不覆盖原正式成片。已发布 pipeline 保持 `done`，候选写入 `assembly.pending_candidate`。
+- 用户验收候选后，继续使用现有 `confirm-production` 创建新修订；不得直接改写旧 `production_runs`。
+- 生产命令返回 `repair_required` 时立即停止。代码修复是独立开发任务，不能在生产命令内部自动修改代码再继续渲染。
+
 ## workflow-doctor 对外契约
 
 `workflow-doctor` 只输出 `BWorkflowObservation v1`，不再提供旧 raw JSON。
@@ -37,7 +56,7 @@ manifest 里的三件事必须一致：顶层 `display_template`、商品 `image
 | 操作 | 入口 | 关键规则 | 验证 |
 |---|---|---|---|
 | 更换用户音色 | `scripts/swap_voice.py` | 先改 CONFIG 区；IndexTTS 更新 `voice_profiles` 和 `G:\Tools\IndexTTS2.0\outputs\voices\voices.json`；MiniMax 必须克隆到一个新的 `NEW_MINIMAX_VOICE_ID`，旧 voice id 不能覆盖。 | 运行脚本后确认输出 `VERIFY_DB_JSON_OK=1` 和 `SWAP_DONE=1`。 |
-| MiniMax 小歪音色 | `accounts.minimax_voice_id`、`bworkflow_sql/workflow_service.py`、`C:\Users\zhaoer\.codex\skills\zhaoer-tools-minimax-tts\scripts\t2a_core.py` | 当前小歪 MiniMax voice id 是 `xiaowai-v6`。App 优先读账号行的 `minimax_voice_id`；中文别名也要同步，避免单独调用 MiniMax skill 时走旧音色。 | `python scripts/_check_accounts.py`，小歪应显示 `xiaowai-v6`。 |
+| MiniMax 小歪音色 | `account_voice_profiles`、兼容字段 `accounts.minimax_voice_id` | 当前小歪 MiniMax voice id 是 `xiaowai-v6`。App 优先读标准化 provider profile；换音色脚本不得字符串替换业务源码或外部 skill。 | 查询两处 voice id 均为 `xiaowai-v6`。 |
 | IndexTTS 小歪音色 | `data\bworkflow.db.voice_profiles`、IndexTTS `voices.json` | 当前小歪参考音频是 `G:\Tools\自己用的音色\小歪10秒新.mp3`。更换时必须同步 DB 和 `voices.json` 指纹。 | `python scripts/_check_xiaowai.py`，路径应指向新参考音频。 |
 | 结尾配音 | `accounts.closing_audio_path` | 生成口播 manifest 时 `_closing_manifest_entry(...)` 读取当前用户 `closing_audio_path`；文件存在才写入结尾音频。当前小歪结尾配音是 `G:\2026项目-b站\素材-配音\公共-结尾\小歪\结尾-小歪.mp3`。 | 查询 `SELECT label, closing_audio_path FROM accounts WHERE label='小歪'`；运行 `python -m pytest -q tests/test_workflow_service.py -k closing`。 |
 | 弹窗居中 | `bworkflow_sql/ui.py::_center_dialog` | 所有 `CTkToplevel` 应调用 `_center_dialog(dialog)`；该函数优先按父窗口/主窗口居中，父窗口几何不可用时才按屏幕居中。不要在新弹窗里手写 `winfo_screenwidth()` 居中。 | `python -m py_compile bworkflow_sql\ui.py` 和 `python -m pytest -q tests/test_ui_helpers.py`。 |
@@ -51,10 +70,24 @@ Remotion-first 商品图模板从 CutMe 元数据进入账号模板列表，显�
 | 步骤 | 说明 |
 |---|---|
 | 1. 准备参考音频 | 支持 `mp3` / `m4a` / `wav`；建议 10 秒到 5 分钟且小于 20MB。中文路径在 Python 脚本内部处理。 |
-| 2. 编辑脚本配置 | 修改 `scripts/swap_voice.py` 的 `ACCOUNT_LABEL`、`INDEXTTS_VOICE_ID`、`NEW_AUDIO`、`NEW_MINIMAX_VOICE_ID`、`OLD_MINIMAX_VOICE_ID`。 |
+| 2. 编辑脚本配置 | 修改 `scripts/swap_voice.py` 的 `ACCOUNT_LABEL`、`INDEXTTS_VOICE_ID`、`NEW_AUDIO`、`NEW_MINIMAX_VOICE_ID`。 |
 | 3. 运行脚本 | `G:/Tools/IndexTTS2.0/wzf310/python.exe -X utf8 scripts/swap_voice.py`。 |
-| 4. 同步别名 | 脚本会同步 `workflow_service.py`；如果独立 MiniMax skill 的中文别名没有同步，手动检查 `t2a_core.py`。 |
+| 4. 同步配置 | 脚本事务性更新 `account_voice_profiles` 和兼容字段 `accounts.minimax_voice_id`；不得自动改写 `workflow_service.py` 或外部 skill 源码。 |
 | 5. 自检 | 必须看到 `SWAP_DONE=1`。如失败，先看 `MINIMAX_REASON`，不要重复占用同一个 MiniMax voice id。 |
+
+## 配音 Provider 切换与排障
+
+| 检查 | 命令或数据 | 判定 |
+|---|---|---|
+| 待生成数量 | `python -m bworkflow_sql voice-counts <project_id> --account <账号> --voice-provider minimax|indextts` | 必须与随后 `voice` 使用同一个 provider。 |
+| 实际生成 | `python -m bworkflow_sql voice <project_id> --account <账号> --voice-provider minimax|indextts` | 省略参数时默认 `minimax`。 |
+| 账号配置 | `SELECT provider, voice_id, model, settings_json, enabled FROM account_voice_profiles WHERE account_id=<id>` | 当前 provider 必须有一条启用 profile；旧 account 字段只作兼容后备。 |
+| 复用来源 | 查询 `asset_bindings.voice_provider/voice_model/voice_id/synthesis_settings_hash/generation_fingerprint` | 任一生成身份字段变化都应重新生成，不得复用旧音频。 |
+| 写入失败 | 检查旧 ready binding 和旧文件仍存在 | 新文件先独立生成；DB 提交后才清理旧文件。 |
+
+新增第三方配音接口时，在 `tts_adapters.py` 实现统一 Provider 契约并在
+`WorkflowService._voice_provider_registry(...)` 注册；不要在生成循环、账号页面
+或换音色脚本里复制 provider 分支。
 
 ## 非价格过渡口播稿（品类过渡 / 自定义分组过渡）
 
@@ -148,7 +181,7 @@ python -m bworkflow_sql jianying <project_id> \
   --subtitle-no-vad
 ```
 
-`--subtitle-no-vad` 用于当前机器上 onnxruntime/VAD 初始化失败时的兼容路径。字幕 ASR 统一走 `bworkflow_sql.asr.service` provider 抽象；默认 provider 是 `faster_whisper`，可用 `BWORKFLOW_ASR_PROVIDER` 覆盖。默认 faster-whisper provider 会优先使用项目根目录 `.venv-asr\Scripts\python.exe`，也可用 `BWORKFLOW_ASR_PYTHON` 覆盖。
+剪映字幕默认也走 `bworkflow_sql.forced_alignment`，与最终 MP4 共用精确原文强制对齐、缓存和质量门。首次使用先运行 `scripts\setup_subtitle_forced_alignment.ps1`。`--subtitle-no-vad` 只对显式选择旧版 Whisper 调试引擎时有效，不属于正式生产路径。
 
 豆包 ASR provider 已接入同一个抽象层，启用方式：
 
@@ -213,6 +246,14 @@ CutMe 使用同一 `output.subtitles.styleId` 烧录引言、商品和结尾字�
 `audio.loudnessTarget` 归一化，成片再执行母带响度处理。结尾从
 系统从六套已确认的视频结尾模板中随机选一个：`outro-dark-line`、`outro-cool-band`、`outro-ambient-glow`、`outro-editorial-light`、`outro-red-slate`、`outro-monochrome`。选择结果和 seed 写入包内，便于复现。
 
+2026-07-13 另行验收了六条未来可用的整片结尾 MP4，存放在
+`G:\2026项目-b站\素材-自动剪辑\1-通用\整片结尾-*.mp4`。它们统一为 10 秒、
+1920×1080、30 fps、H.264 + AAC 48 kHz，包含轻提示音但不包含账号固定口播。
+**当前 `render-final-video` 尚未读取这个 MP4 素材池**，仍按上面的
+`outro.templateId + closing_audio_path` 路径生成结尾；后续修改调用逻辑时再把素材池
+接入 RenderPackage。不要把文件名含 `引导三连` 或画面含 `开始推荐` 的引言/中段素材
+当作整片结尾。
+
 标准交付目录优先使用 `--delivery-dir <dir>`，不要让 Agent 临时拼多个输出路径：
 
 ```powershell
@@ -257,7 +298,7 @@ B-Workflow 只负责选择并写入 styleId，以及生成 segment-local
 兼容由 CutMe 处理。需要先看效果时，在 CutMe 仓库运行：
 
 ```powershell
-python -m cutme --preview-subtitle-styles --output G:\workspace\赵二-工具-CutMe\render_jobs\subtitle-style-preview.png
+python -m cutme --preview-subtitle-styles --output G:\workspace\PC-Bilibili-workflow-sql\data\workspace\manual-tests\subtitle-style-preview\subtitle-style-preview.png
 ```
 
 ### 实际案例：充电宝品类（2026-06-20）
@@ -296,19 +337,21 @@ python -m cutme --preview-subtitle-styles --output G:\workspace\赵二-工具-Cu
 | 结尾配音回归 | `python -m pytest -q tests/test_workflow_service.py -k closing` |
 | 字幕断行回归 | `python -m pytest -q tests/test_workflow_service.py -k subtitle` |
 | 模板校准回归 | `python -m pytest -q tests/test_render_package_jianying.py tests/test_cli_render_package.py tests/test_jianying_engine_display_video.py` |
-| 引言场景 ASR 对齐回归 | `python -m pytest -q tests/test_cutme_intro.py tests/test_intro_timeline.py` |
+| 引言场景强制对齐回归 | `python -m pytest -q tests/test_forced_alignment.py tests/test_cutme_intro.py tests/test_intro_timeline.py` |
 | 常用服务回归 | `python -m pytest -q tests/test_workflow_service.py tests/test_ui_helpers.py tests/test_repositories.py tests/test_sync_service.py` |
 | Master 契约边界 | `python -m pytest -q tests/test_master_contracts.py tests/test_master_snapshot_sync.py tests/test_master_snapshot_repository.py tests/test_master_snapshot_cutover.py tests/test_master_catalog_cutover.py tests/test_master_raw_client_forbidden.py` |
 
 ## CutMe 引言场景时间轴
 
-`bworkflow_sql.intro_timeline.align_intro_plan_scenes_with_asr(...)` 负责把 CutMe 的
-`intro_plan.scenes[].text` 和整段引言配音做 ASR 对齐，输出 `scenes[].timing`。
+`bworkflow_sql.intro_timeline.align_intro_plan_scenes_with_asr(...)` 保留原函数名作为
+调用兼容层，实际把 CutMe 的 `intro_plan.scenes[].text` 和整段引言配音送入精确原文
+强制对齐器，输出 `scenes[].timing`。
 
 关键规则：
 
 - 对齐前必须校验 `scenes[].text` 拼接后与 `full_script` 一致，不能让 LLM 改字后继续对齐。
-- ASR 统一走 B-Workflow 的 `bworkflow_sql.asr.service` provider 抽象，并复用 `align_subtitle_text_with_units(...)`；不要在 CutMe 里重复引入 Whisper 或云端 ASR SDK。
+- 引言和正文统一走 `bworkflow_sql.forced_alignment`；自由 ASR 识别结果不得参与字幕定时，也不得在 CutMe 内另建对齐分支。
+- 首次使用先运行 `scripts\setup_subtitle_forced_alignment.ps1`。正式对齐结果按音频、精确原文、模型和切句规则缓存。
 - CutMe 只消费 `scenes[].timing`，并根据 `hook_open`、`pain_points`、`self_check`、`priority_preview` 控制产品展示和引导三连素材。
 
 ## CutMe 引言页面新链路
@@ -325,12 +368,12 @@ data\workspace\project-{project_id}\intro\intro-plan-{script_block_id}-{account}
 data\workspace\project-{project_id}\intro\cutme-config-{script_block_id}-{account}.json
 ```
 
-`cutme-config` 通过 `intro_plan_path` 交给 `python -m cutme` 渲染。页面日志会显示准备后的 `intro_plan`、CutMe 配置、素材预检结果、是否执行 ASR 对齐，以及最终选中的素材路径。
+`cutme-config` 通过 `intro_plan_path` 交给 `python -m cutme` 渲染。页面日志会显示准备后的 `intro_plan`、CutMe 配置、素材预检结果、是否执行精确原文强制对齐，以及最终选中的素材路径。
 
 `prepared intro_plan` 会写入 `pc_workflow.seed`，`cutme-config` 会写入 `"seed"`。生产 seed 每次准备 CutMe 渲染时重新生成，不按账号、品类或引言固定绑定；同一个账号/品类/引言块重复生成，也应该得到不同视觉变体。当前先走文件契约，不急着入库。
 
 当前新链路还会处理四件事：
-- 根据 `visual_event_specs[].trigger_text` 对齐引言配音 ASR，写入 `visual_events[].timing`，让文字卡片按配音逐项入场。
+- 根据 `visual_event_specs[].trigger_text` 复用同一份强制对齐锚点，写入 `visual_events[].timing`，让文字卡片按配音逐项入场。
 - 从 `G:\2026项目-b站\素材-自动剪辑\1-音效` 精确匹配 6 个 `sfx_*.wav` 文件；缺音效只 warning，不阻断渲染。
 - 引言配音会先按口播增强档 loudnorm，CutMe 成片导出后还会对最终 MP4 再做一次同目标母带：`I=-11 LUFS / TP=-1.0 dB / LRA=11`，最终音频为 AAC 48kHz。
 - CutMe 渲染时会把选中的产品展示/引导三连视频先转成 workspace 内的稳定 MP4：H.264、1920x1080 cover crop、30fps、GOP 30、yuv420p、`+faststart`，并丢弃素材原声；原始素材不修改。这个步骤用于避免 HyperFrames 因素材关键帧稀疏出现 seek 卡帧。
@@ -340,8 +383,12 @@ data\workspace\project-{project_id}\intro\cutme-config-{script_block_id}-{accoun
 临时测试视频、抽帧、探针 config、对比样片不要再直接堆在正式 `intro\` 根目录。需要测试时放到：
 
 ```text
-data\workspace\project-{project_id}\intro-test-runs\{test-name}-{date}\
+data\workspace\manual-tests\{test-name}\
 ```
+
+同一测试主题的配置、短样片、RenderPackage、ASS、抽帧、缓存和 README
+都收拢在该目录；默认不写正式 `.pipeline.json`。CutMe 如生成临时 job，验证后
+只清理该次明确生成的 job，不把 `render_jobs` 当长期验收目录。
 
 ## CutMe 引言写作链路
 
@@ -376,7 +423,7 @@ data\workspace\project-{project_id}\intro-test-runs\{test-name}-{date}\
 生成命令：
 
 ```powershell
-python -m bworkflow_sql intro-plan <project_id> --slots <slots.json> --label 引言1 --sync
+python -m bworkflow_sql intro-plan <project_id> --slots <slots.json> --label 引言1
 ```
 
 输出位置：
@@ -387,6 +434,48 @@ data\workspace\project-{project_id}\intro\source-intro-plan-引言1.json
 ```
 
 命令会把完整引言写进项目 Markdown 的 `## 引言文案 / ### 引言1`，并把 `source-intro-plan-*.json` 作为 CutMe 的源计划文件保留下来。之后进入 `工具 -> CutMe 引言` 时，如果当前引言文案与 `source-intro-plan-*.json` 的 `full_script` 一致，页面会自动匹配该计划文件，不需要手动选择。
+
+文案审稿期间不要添加 `--sync`。修改引言时必须修改槽位并重新执行
+`intro-plan`，不能只改 Markdown；用户明确说“定稿”后再单独执行 Markdown
+同步和配音。
+
+### 价格过渡结构化自动剪辑计划
+
+新写的价格过渡不要依赖通用关键词推断。先准备包含所有价位段的 JSON：
+
+```json
+{
+  "transitions": [
+    {
+      "price_range_label": "100-200元",
+      "block_label": "正文",
+      "transition_text": "一百到两百元重点看水流稳定和档位调节，适合正畸人群。",
+      "audience": "适合正畸人群",
+      "items": [
+        {"label": "水流稳定", "trigger_text": "水流稳定"},
+        {"label": "档位调节", "trigger_text": "档位调节"}
+      ]
+    }
+  ]
+}
+```
+
+写入命令：
+
+```powershell
+python -m bworkflow_sql price-transition-plan <project_id> --plan <price-transition-plan.json>
+```
+
+该命令不带 `--sync` 时只更新正式 Markdown，并保存机器计划：
+
+```text
+data\workspace\project-{project_id}\price-transitions\source-price-transition-plan-set.json
+```
+
+计划存在后进入严格模式。正文哈希、价位段、版本标签或触发词不匹配时，
+RenderPackage 会报告 `price_transition_plan` 缺失并停止。最终 MP4 使用默认
+ASR 字幕对齐结果重算画面项出现时间，CutMe 再校验
+`priceTransitionPlanVersion=1.0.0` 和 2-3 个结构化画面项。
 
 新增模板时，先在 CutMe 仓库的 `intro_templates` 中新增模板和 `visual_cues` 契约，再用本仓库 `intro-plan --template <template_id>` 生成计划文件。不要只改提示词而不更新模板契约，否则 CutMe 无法稳定知道哪些段落要插产品展示和引导三连。
 

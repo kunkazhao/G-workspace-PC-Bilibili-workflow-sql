@@ -55,6 +55,152 @@ class Repository:
     def accounts(self) -> list[dict[str, Any]]:
         return [dict(row) for row in self.db.fetchall("SELECT * FROM accounts ORDER BY enabled DESC, label")]
 
+    def upsert_account(self, payload: dict[str, Any]) -> int:
+        label = safe_text(payload.get("label"))
+        if not label:
+            raise ValueError("account label is required")
+        ts = now_iso()
+        with self.db.connect() as conn:
+            existing = conn.execute("SELECT * FROM accounts WHERE label=?", (label,)).fetchone()
+
+            def resolved(key: str) -> str:
+                if key in payload:
+                    return safe_text(payload.get(key))
+                return safe_text(existing[key]) if existing is not None and key in existing.keys() else ""
+
+            account_key = resolved("account_id")
+            indextts_voice_id = resolved("voice_id")
+            minimax_voice_id = resolved("minimax_voice_id")
+            voice_name = resolved("voice_name")
+            media_identity = resolved("media_identity")
+            closing_audio_path = resolved("closing_audio_path")
+            conn.execute(
+                """
+                INSERT INTO accounts
+                    (label, account_id, voice_id, minimax_voice_id, voice_name,
+                     media_identity, closing_audio_path, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                ON CONFLICT(label) DO UPDATE SET
+                    account_id=excluded.account_id,
+                    voice_id=excluded.voice_id,
+                    minimax_voice_id=excluded.minimax_voice_id,
+                    voice_name=excluded.voice_name,
+                    media_identity=excluded.media_identity,
+                    closing_audio_path=excluded.closing_audio_path,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    label,
+                    account_key,
+                    indextts_voice_id,
+                    minimax_voice_id,
+                    voice_name,
+                    media_identity,
+                    closing_audio_path,
+                    ts,
+                    ts,
+                ),
+            )
+            account_id = int(conn.execute("SELECT id FROM accounts WHERE label=?", (label,)).fetchone()[0])
+            for provider, voice_id in (
+                ("indextts", indextts_voice_id),
+                ("minimax", minimax_voice_id),
+            ):
+                if voice_id:
+                    conn.execute(
+                        """
+                        INSERT INTO account_voice_profiles
+                            (account_id, provider, voice_id, model, settings_json, enabled, created_at, updated_at)
+                        VALUES (?, ?, ?, '', '{}', 1, ?, ?)
+                        ON CONFLICT(account_id, provider) DO UPDATE SET
+                            voice_id=excluded.voice_id,
+                            enabled=1,
+                            updated_at=excluded.updated_at
+                        """,
+                        (account_id, provider, voice_id, ts, ts),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE account_voice_profiles
+                        SET enabled=0, updated_at=?
+                        WHERE account_id=? AND provider=?
+                        """,
+                        (ts, account_id, provider),
+                    )
+        return account_id
+
+    def account_voice_profile(self, account_id: int, provider: str) -> dict[str, Any] | None:
+        row = self.db.fetchone(
+            """
+            SELECT * FROM account_voice_profiles
+            WHERE account_id=? AND provider=? AND enabled=1
+            """,
+            (account_id, safe_text(provider).casefold()),
+        )
+        return dict(row) if row else None
+
+    def production_runs(self, project_id: int, *, account_label: str = "", category_name: str = "") -> list[dict[str, Any]]:
+        if category_name:
+            identity_clause = "category_name=?"
+            identity_params: tuple[Any, ...] = (category_name,)
+        else:
+            identity_clause = "project_id=?"
+            identity_params = (project_id,)
+        clause = " AND account_label=?" if account_label else ""
+        params = (*identity_params, account_label) if account_label else identity_params
+        return [dict(row) for row in self.db.fetchall(
+            f"SELECT * FROM production_runs WHERE {identity_clause}{clause} ORDER BY confirmed_at DESC, id DESC",
+            params,
+        )]
+
+    def confirm_production_run(self, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        existing = self.db.fetchone(
+            "SELECT * FROM production_runs WHERE run_manifest_path=?",
+            (payload["run_manifest_path"],),
+        )
+        if existing:
+            row = dict(existing)
+            if row.get("full_mp4_sha256") != payload.get("full_mp4_sha256"):
+                raise ValueError(
+                    "该生成记录已确认过另一份成片；不能静默覆盖，请保留现有正式版本并从新的生成记录创建修订"
+                )
+            return row, False
+        columns = tuple(payload)
+        with self.db.connect() as conn:
+            cursor = conn.execute(
+                f"INSERT INTO production_runs ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                tuple(payload[column] for column in columns),
+            )
+            row = conn.execute("SELECT * FROM production_runs WHERE id=?", (cursor.lastrowid,)).fetchone()
+        return dict(row), True
+
+    def production_run(self, production_run_id: int) -> dict[str, Any] | None:
+        row = self.db.fetchone("SELECT * FROM production_runs WHERE id=?", (production_run_id,))
+        return dict(row) if row else None
+
+    def mark_production_published(
+        self,
+        production_run_id: int,
+        *,
+        current_path: str,
+        published_at: str,
+        archived_at: str,
+    ) -> dict[str, Any]:
+        with self.db.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE production_runs
+                SET full_mp4_path=?, publish_status='archived', published_at=?, archived_at=?
+                WHERE id=?
+                """,
+                (current_path, published_at, archived_at, production_run_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"正式成片记录不存在: {production_run_id}")
+            row = conn.execute("SELECT * FROM production_runs WHERE id=?", (production_run_id,)).fetchone()
+        return dict(row)
+
     def upsert_products_from_master(self, project_id: int, products: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
         existing = {item["uid"]: item for item in self.products(project_id)}
         incoming = {safe_text(item.get("uid")): item for item in products if safe_text(item.get("uid"))}
