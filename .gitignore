@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .codex_tmp/
+/work/
 .venv-asr/
 .venv-align/
 scripts/jianying_engine/.venv/
