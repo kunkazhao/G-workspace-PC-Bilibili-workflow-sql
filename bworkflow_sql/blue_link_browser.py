@@ -104,21 +104,30 @@ class CdpProxyClient:
         base_url: str | None = None,
         *,
         session: requests.Session | None = None,
-        request_timeout: float = 15.0,
+        request_timeout: float = 3.0,
+        new_tab_timeout: float = 15.0,
     ) -> None:
         configured = base_url or os.getenv("BWORKFLOW_CDP_PROXY_URL") or DEFAULT_CDP_PROXY_URL
         self.base_url = _clean(configured).rstrip("/")
         self.session = session or requests.Session()
         self.request_timeout = request_timeout
+        self.new_tab_timeout = new_tab_timeout
 
-    def _request(self, method: str, path: str, *, body: str | None = None) -> Any:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: str | None = None,
+        timeout: float | None = None,
+    ) -> Any:
         try:
             response = self.session.request(
                 method,
                 f"{self.base_url}{path}",
                 data=body.encode("utf-8") if body is not None else None,
                 headers={"Content-Type": "text/plain; charset=utf-8"} if body is not None else None,
-                timeout=self.request_timeout,
+                timeout=self.request_timeout if timeout is None else timeout,
             )
             response.raise_for_status()
             payload = response.json()
@@ -133,7 +142,9 @@ class CdpProxyClient:
         return payload if isinstance(payload, list) else []
 
     def new_tab(self, url: str) -> str:
-        payload = self._request("POST", "/new", body=url)
+        # /new waits for the initial navigation, while local proxy metadata and
+        # cleanup calls should fail fast so one bad page cannot stall a batch.
+        payload = self._request("POST", "/new", body=url, timeout=self.new_tab_timeout)
         target_id = _clean(payload.get("targetId") if isinstance(payload, dict) else "")
         if not target_id:
             raise BlueLinkBrowserError("cdp_target_missing", "CDP 代理没有返回新标签页 ID")

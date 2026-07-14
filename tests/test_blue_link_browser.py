@@ -8,6 +8,7 @@ from bworkflow_sql import blue_link_browser
 from bworkflow_sql.blue_link_browser import (
     BlueLinkBrowserError,
     BrowserResolution,
+    CdpProxyClient,
     TaobaoCouponBrowserResolver,
 )
 
@@ -51,6 +52,43 @@ class FakeProxy:
 
     def close(self, target_id: str) -> None:
         self.closed.append(target_id)
+
+
+def test_cdp_proxy_uses_short_metadata_timeout_and_longer_new_tab_timeout() -> None:
+    class FakeResponse:
+        def __init__(self, payload: Any) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> Any:
+            return self.payload
+
+    class RecordingSession:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, float]] = []
+
+        def request(self, method: str, url: str, **kwargs: Any) -> FakeResponse:
+            self.calls.append((url, float(kwargs["timeout"])))
+            if url.endswith("/new"):
+                return FakeResponse({"targetId": "owned-tab"})
+            return FakeResponse([])
+
+    session = RecordingSession()
+    client = CdpProxyClient(
+        "http://127.0.0.1:3456",
+        session=session,  # type: ignore[arg-type]
+        request_timeout=2.5,
+        new_tab_timeout=12.0,
+    )
+
+    assert client.targets() == []
+    assert client.new_tab("https://example.com") == "owned-tab"
+    assert session.calls == [
+        ("http://127.0.0.1:3456/targets", 2.5),
+        ("http://127.0.0.1:3456/new", 12.0),
+    ]
 
 
 def test_coupon_resolver_clicks_only_unique_top_title_and_returns_pair() -> None:
