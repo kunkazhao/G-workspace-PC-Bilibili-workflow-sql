@@ -109,6 +109,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     minimax_voice_id TEXT NOT NULL DEFAULT '',
     voice_name TEXT NOT NULL DEFAULT '',
     media_identity TEXT NOT NULL DEFAULT '',
+    master_account_id TEXT,
+    bilibili_mid TEXT,
     closing_audio_path TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
@@ -167,6 +169,7 @@ CREATE TABLE IF NOT EXISTS account_voice_profiles (
 CREATE TABLE IF NOT EXISTS production_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    account_id INTEGER,
     category_name TEXT NOT NULL,
     scheme_id TEXT NOT NULL DEFAULT '',
     scheme_name TEXT NOT NULL DEFAULT '',
@@ -188,7 +191,15 @@ CREATE TABLE IF NOT EXISTS production_runs (
     recipe_path TEXT NOT NULL DEFAULT '',
     recipe_sha256 TEXT NOT NULL DEFAULT '',
     recipe_status TEXT NOT NULL DEFAULT 'legacy_unknown',
-    supersedes_production_run_id INTEGER REFERENCES production_runs(id) ON DELETE SET NULL
+    supersedes_production_run_id INTEGER REFERENCES production_runs(id) ON DELETE SET NULL,
+    published_video_url TEXT NOT NULL DEFAULT '',
+    bvid TEXT NOT NULL DEFAULT '',
+    aid TEXT NOT NULL DEFAULT '',
+    video_owner_mid TEXT NOT NULL DEFAULT '',
+    blue_link_backfill_id TEXT NOT NULL DEFAULT '',
+    blue_link_backfill_status TEXT NOT NULL DEFAULT '',
+    blue_link_matched_count INTEGER NOT NULL DEFAULT 0,
+    blue_link_unresolved_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -197,7 +208,14 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 """
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 10
+
+CONFIRMED_MASTER_ACCOUNT_BINDINGS = {
+    "小燃": ("c025960c-5560-4630-8344-509a5c6d92a5", "3546911325817533"),
+    "小博": ("5fe6305b-c1ca-4ee4-bfd7-9407bd4e5302", "673644511"),
+    "小歪": ("db915307-c99d-49e8-9a82-3e28df2f68c1", "1602507900"),
+    "荣荣": ("91c09fcc-b2b8-49c6-abb4-4a512f486837", "439372"),
+}
 
 
 def _script_id_slug(value: Any) -> str:
@@ -286,6 +304,8 @@ class Database:
             (6, self._migrate_v6),
             (7, self._migrate_v7),
             (8, self._migrate_v8),
+            (9, self._migrate_v9),
+            (10, self._migrate_v10),
         ]
         for version, func in migrations:
             if current < version:
@@ -333,6 +353,64 @@ class Database:
                     break
             if minimax_voice_id:
                 conn.execute("UPDATE accounts SET minimax_voice_id=? WHERE id=?", (minimax_voice_id, row[0]))
+
+    def _migrate_v9(self, conn: sqlite3.Connection) -> None:
+        """Bind local production accounts to stable Master/Bilibili identities."""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+        if "master_account_id" not in columns:
+            conn.execute("ALTER TABLE accounts ADD COLUMN master_account_id TEXT")
+        if "bilibili_mid" not in columns:
+            conn.execute("ALTER TABLE accounts ADD COLUMN bilibili_mid TEXT")
+
+        for label, (master_account_id, bilibili_mid) in CONFIRMED_MASTER_ACCOUNT_BINDINGS.items():
+            conn.execute(
+                """
+                UPDATE accounts
+                SET master_account_id=?, bilibili_mid=?
+                WHERE label=? AND (master_account_id IS NULL OR master_account_id='')
+                """,
+                (master_account_id, bilibili_mid, label),
+            )
+
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_master_account_id
+            ON accounts(master_account_id)
+            WHERE master_account_id IS NOT NULL AND master_account_id != ''
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_bilibili_mid
+            ON accounts(bilibili_mid)
+            WHERE bilibili_mid IS NOT NULL AND bilibili_mid != ''
+            """
+        )
+
+    def _migrate_v10(self, conn: sqlite3.Connection) -> None:
+        """Persist the published Bilibili identity and blue-link backfill result."""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(production_runs)").fetchall()}
+        for column, ddl in {
+            "account_id": "INTEGER",
+            "published_video_url": "TEXT NOT NULL DEFAULT ''",
+            "bvid": "TEXT NOT NULL DEFAULT ''",
+            "aid": "TEXT NOT NULL DEFAULT ''",
+            "video_owner_mid": "TEXT NOT NULL DEFAULT ''",
+            "blue_link_backfill_id": "TEXT NOT NULL DEFAULT ''",
+            "blue_link_backfill_status": "TEXT NOT NULL DEFAULT ''",
+            "blue_link_matched_count": "INTEGER NOT NULL DEFAULT 0",
+            "blue_link_unresolved_count": "INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if column not in columns:
+                conn.execute(f"ALTER TABLE production_runs ADD COLUMN {column} {ddl}")
+        conn.execute(
+            """
+            UPDATE production_runs
+            SET account_id=(SELECT accounts.id FROM accounts WHERE accounts.label=production_runs.account_label)
+            WHERE account_id IS NULL
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_production_runs_account_id ON production_runs(account_id)")
 
     def _migrate_script_hashes(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute("SELECT id, body, text_hash FROM script_blocks").fetchall()

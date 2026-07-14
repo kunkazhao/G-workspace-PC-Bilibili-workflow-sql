@@ -4,7 +4,7 @@ import json
 import sqlite3
 from typing import Any
 
-from .db import Database
+from .db import CONFIRMED_MASTER_ACCOUNT_BINDINGS, Database
 from .master_snapshot_sync import MasterSnapshotSyncPlan, ProductChange, ProductState
 from .utils import now_iso, safe_text
 
@@ -55,6 +55,10 @@ class Repository:
     def accounts(self) -> list[dict[str, Any]]:
         return [dict(row) for row in self.db.fetchall("SELECT * FROM accounts ORDER BY enabled DESC, label")]
 
+    def account_by_label(self, label: str) -> dict[str, Any] | None:
+        row = self.db.fetchone("SELECT * FROM accounts WHERE label=?", (safe_text(label),))
+        return dict(row) if row else None
+
     def upsert_account(self, payload: dict[str, Any]) -> int:
         label = safe_text(payload.get("label"))
         if not label:
@@ -73,19 +77,25 @@ class Repository:
             minimax_voice_id = resolved("minimax_voice_id")
             voice_name = resolved("voice_name")
             media_identity = resolved("media_identity")
+            confirmed_binding = CONFIRMED_MASTER_ACCOUNT_BINDINGS.get(label, (None, None))
+            master_account_id = resolved("master_account_id") or confirmed_binding[0]
+            bilibili_mid = resolved("bilibili_mid") or confirmed_binding[1]
             closing_audio_path = resolved("closing_audio_path")
             conn.execute(
                 """
                 INSERT INTO accounts
                     (label, account_id, voice_id, minimax_voice_id, voice_name,
-                     media_identity, closing_audio_path, enabled, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                     media_identity, master_account_id, bilibili_mid,
+                     closing_audio_path, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                 ON CONFLICT(label) DO UPDATE SET
                     account_id=excluded.account_id,
                     voice_id=excluded.voice_id,
                     minimax_voice_id=excluded.minimax_voice_id,
                     voice_name=excluded.voice_name,
                     media_identity=excluded.media_identity,
+                    master_account_id=excluded.master_account_id,
+                    bilibili_mid=excluded.bilibili_mid,
                     closing_audio_path=excluded.closing_audio_path,
                     updated_at=excluded.updated_at
                 """,
@@ -96,6 +106,8 @@ class Repository:
                     minimax_voice_id,
                     voice_name,
                     media_identity,
+                    master_account_id,
+                    bilibili_mid,
                     closing_audio_path,
                     ts,
                     ts,
@@ -195,6 +207,45 @@ class Repository:
                 WHERE id=?
                 """,
                 (current_path, published_at, archived_at, production_run_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"正式成片记录不存在: {production_run_id}")
+            row = conn.execute("SELECT * FROM production_runs WHERE id=?", (production_run_id,)).fetchone()
+        return dict(row)
+
+    def record_blue_link_backfill(
+        self,
+        production_run_id: int,
+        *,
+        published_video_url: str,
+        bvid: str,
+        aid: str,
+        video_owner_mid: str,
+        backfill_id: str,
+        status: str,
+        matched_count: int,
+        unresolved_count: int,
+    ) -> dict[str, Any]:
+        with self.db.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE production_runs
+                SET published_video_url=?, bvid=?, aid=?, video_owner_mid=?,
+                    blue_link_backfill_id=?, blue_link_backfill_status=?,
+                    blue_link_matched_count=?, blue_link_unresolved_count=?
+                WHERE id=?
+                """,
+                (
+                    published_video_url,
+                    bvid,
+                    aid,
+                    video_owner_mid,
+                    backfill_id,
+                    status,
+                    matched_count,
+                    unresolved_count,
+                    production_run_id,
+                ),
             )
             if cursor.rowcount != 1:
                 raise ValueError(f"正式成片记录不存在: {production_run_id}")

@@ -95,6 +95,10 @@ python -m bworkflow_sql scaffold <project_id>
 python -m bworkflow_sql confirm-production <project_id> --run-manifest <run-manifest.json> --pipeline <.pipeline.json>
 python -m bworkflow_sql production-history <project_id> --account <账号>
 python -m bworkflow_sql complete-publishing <production_run_id> --pipeline <.pipeline.json>
+python -m bworkflow_sql publishing-context <production_run_id>
+python -m bworkflow_sql record-blue-link-backfill <production_run_id> --pipeline <.pipeline.json> --video-url <B站视频URL> --bvid <BV号> --aid <AV号> --owner-mid <MID> --backfill-id <Master任务UUID> --status complete|partial --matched-count <N> --unresolved-count <N>
+python -m bworkflow_sql resolve-blue-links --source-link <待解析蓝链> [--source-link <另一条蓝链>] [--attempts 2]
+python -m bworkflow_sql resolve-blue-link-backfill <Master任务UUID> --workspace-id <Master工作空间UUID> [--attempts 2]
 ```
 
 By default the command uses the existing current-month folder under
@@ -103,6 +107,26 @@ not create a missing month folder. Use `--archive-dir` to override. For a
 manually moved file, use `--current-path
 <当前完整MP4路径>`. The command reuses `production_runs` and the existing pipeline
 publishing phase; it does not create a second publishing-status store.
+Publishing now enters `blue_link_backfill` instead of ending the workflow.
+`publishing-context` exposes the production's fixed Master account UUID,
+Bilibili MID and scheme ID. `record-blue-link-backfill` records the Master job
+result in the same `production_runs` row; only `complete` returns the pipeline
+to `done`, while `partial` preserves the unresolved count for browser retry.
+`resolve-blue-links` connects to the configured local CDP HTTP proxy, opens only
+its own tabs, retries each link at most twice by default, and returns only
+`source_link + resolved_url`. It accepts standard JD/Taobao/Tmall product pages,
+unique numeric JD activity `mainSku` values, and a unique standard JD item URL
+embedded in an official JD risk-page `returnurl`. For Taobao coupon pages it
+requires exactly one top primary product card and clicks only that card's title
+or image; it never clicks coupon controls or recommendation items. The command
+fails closed on 403/login/risk pages that expose no unique standard product ID.
+`resolve-blue-link-backfill` is the unattended batch wrapper: it fetches only
+rows that still have no product ID from Master, runs the same deterministic
+browser resolver, and submits successful `source_link + resolved_url` pairs
+back to Master automatically. Rows already carrying a product ID, including
+catalog misses and stored-link conflicts, are not reopened in Chrome.
+Set
+`BWORKFLOW_CDP_PROXY_URL` to override the default `http://127.0.0.1:3456`.
 
 Legacy migration helpers are available in `资产中心` and `用户管理`:
 

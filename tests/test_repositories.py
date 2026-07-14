@@ -95,6 +95,31 @@ def test_schema_version_table_exists(tmp_path: Path):
     db.close()
 
 
+def test_database_binds_confirmed_master_and_bilibili_account_ids(tmp_path: Path):
+    db = Database(tmp_path / "account-bindings.db")
+    repo = Repository(db)
+
+    for label in ("小燃", "小博", "小歪", "荣荣", "知了"):
+        repo.upsert_account({"label": label, "account_id": label})
+
+    # Re-run the versioned migration against rows created after initial schema setup.
+    with db.connect() as conn:
+        db._migrate_v9(conn)
+
+    accounts = {row["label"]: row for row in repo.accounts()}
+    assert accounts["小燃"]["master_account_id"] == "c025960c-5560-4630-8344-509a5c6d92a5"
+    assert accounts["小燃"]["bilibili_mid"] == "3546911325817533"
+    assert accounts["小博"]["master_account_id"] == "5fe6305b-c1ca-4ee4-bfd7-9407bd4e5302"
+    assert accounts["小博"]["bilibili_mid"] == "673644511"
+    assert accounts["小歪"]["master_account_id"] == "db915307-c99d-49e8-9a82-3e28df2f68c1"
+    assert accounts["小歪"]["bilibili_mid"] == "1602507900"
+    assert accounts["荣荣"]["master_account_id"] == "91c09fcc-b2b8-49c6-abb4-4a512f486837"
+    assert accounts["荣荣"]["bilibili_mid"] == "439372"
+    assert accounts["知了"]["master_account_id"] is None
+    assert accounts["知了"]["bilibili_mid"] is None
+    db.close()
+
+
 def test_fresh_db_has_nullable_master_snapshot_provenance(tmp_path: Path):
     db = Database(tmp_path / "fresh-v4.db")
     project_id = db.upsert_project({"name": "keyboard"})
@@ -107,7 +132,7 @@ def test_fresh_db_has_nullable_master_snapshot_provenance(tmp_path: Path):
         (project_id,),
     )
 
-    assert CURRENT_SCHEMA_VERSION == 8
+    assert CURRENT_SCHEMA_VERSION == 10
     assert "master_snapshot_id" in columns
     assert "master_snapshot_applied_at" in columns
     assert project["master_snapshot_id"] is None
@@ -145,7 +170,7 @@ def test_v3_database_upgrades_to_current_without_backfilling_existing_project(tm
         "SELECT version FROM schema_version ORDER BY version"
     )]
 
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     assert project["master_snapshot_id"] is None
     assert project["master_snapshot_applied_at"] is None
     db.close()
@@ -162,7 +187,7 @@ def test_voice_provenance_schema_and_account_profiles_are_created(tmp_path: Path
             """
         )
         conn.execute("DELETE FROM account_voice_profiles")
-        conn.execute("DELETE FROM schema_version WHERE version=8")
+        conn.execute("DELETE FROM schema_version WHERE version>=8")
     db.close()
 
     migrated = Database(tmp_path / "voice-provenance.db")

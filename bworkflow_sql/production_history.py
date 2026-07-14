@@ -70,6 +70,7 @@ class ProductionHistoryService:
             raise ValueError("运行清单缺少账号或商品卡模板")
         if safe_text(selection.get("acceptance_mode")) == "none":
             raise ValueError("未执行验收的 MP4 不能确认为正式成片")
+        local_account = self.repository.account_by_label(account)
         reports = payload.get("reports") if isinstance(payload.get("reports"), dict) else {}
         verification = reports.get("verification") if isinstance(reports.get("verification"), dict) else {}
         if not (verification.get("full_ffprobe") or verification.get("ffprobe")):
@@ -86,6 +87,7 @@ class ProductionHistoryService:
         confirmed_at = now_iso()
         record = {
             "project_id": project_id,
+            "account_id": int(local_account["id"]) if local_account else None,
             "category_name": safe_text(project.get("name")),
             "scheme_id": safe_text(project.get("scheme_id")),
             "scheme_name": safe_text(project.get("scheme_name")),
@@ -235,7 +237,17 @@ class ProductionHistoryService:
             candidate_dir = target_root.parent / ".bworkflow-staging"
             candidate_dir.mkdir(parents=True, exist_ok=True)
         candidate_path = candidate_dir / f"complete-candidate-{timestamp}.partial.mp4"
-        result = (cutme_adapter or CutMeAdapter()).render_final(package_path, output_path=candidate_path)
+        cache_dir = (
+            INTERNAL_WORKSPACE_ROOT
+            / f"project-{record['project_id']}"
+            / "render"
+            / "final-video-cache"
+        )
+        result = (cutme_adapter or CutMeAdapter()).render_final(
+            package_path,
+            output_path=candidate_path,
+            cache_dir=cache_dir,
+        )
         rendered = Path(result["artifacts"]["output_path"]).resolve()
         verification = _probe_video(rendered)
         if verification["duration"] <= 0 or not verification["has_video"] or not verification["has_audio"]:
@@ -343,16 +355,124 @@ class ProductionHistoryService:
             "archive_status": "archived",
             "current_mp4_path": str(target),
         }
+        existing_backfill = phases.get("blue_link_backfill") if isinstance(phases.get("blue_link_backfill"), dict) else {}
+        if safe_text(existing_backfill.get("status")) in {"complete", "partial"}:
+            phases["blue_link_backfill"] = existing_backfill
+        else:
+            phases["blue_link_backfill"] = {
+                "status": "pending",
+                "production_run_id": production_run_id,
+                "matched_count": 0,
+                "unresolved_count": 0,
+            }
         paths = payload.get("paths") if isinstance(payload.get("paths"), dict) else {}
         paths["final_mp4"] = str(target)
         paths["full_mp4"] = str(target)
         payload["phases"] = phases
         payload["paths"] = paths
-        payload["current_phase"] = "done"
-        payload["next_action"] = "视频已发布并归档，流程完成。"
+        backfill_status = safe_text(phases["blue_link_backfill"].get("status"))
+        if backfill_status == "complete":
+            payload["current_phase"] = "done"
+            payload["next_action"] = "视频已发布，蓝链已全部回流。"
+        elif backfill_status == "partial":
+            payload["current_phase"] = "blue_link_backfill"
+            payload["next_action"] = (
+                f"仍有 {int(phases['blue_link_backfill'].get('unresolved_count') or 0)} 条蓝链待浏览器补解析。"
+            )
+        else:
+            payload["current_phase"] = "blue_link_backfill"
+            payload["next_action"] = "视频已发布并归档；请提供 B站视频地址，提取置顶评论蓝链并回流。"
         payload["updated_at"] = timestamp
         pipeline.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"ok": True, "moved": moved, "production": stored, "pipeline_path": str(pipeline)}
+
+    def publishing_context(self, production_run_id: int) -> dict[str, Any]:
+        record = self.repository.production_run(production_run_id)
+        if not record:
+            raise ValueError(f"正式成片记录不存在: {production_run_id}")
+        account_id = int(record.get("account_id") or 0)
+        account = next((item for item in self.repository.accounts() if int(item["id"]) == account_id), None)
+        if not account:
+            raise ValueError("正式成片未绑定本地账号 ID，无法确定 Master 账号")
+        master_account_id = safe_text(account.get("master_account_id"))
+        bilibili_mid = safe_text(account.get("bilibili_mid"))
+        scheme_id = safe_text(record.get("scheme_id"))
+        if not master_account_id or not bilibili_mid:
+            raise ValueError(f"账号 {account.get('label')} 尚未绑定 Master ID 和 B站 MID")
+        if not scheme_id:
+            raise ValueError("正式成片未绑定 Master 方案 ID")
+        return {
+            "ok": True,
+            "production_run_id": production_run_id,
+            "local_account_id": account_id,
+            "account_label": safe_text(account.get("label")),
+            "master_account_id": master_account_id,
+            "bilibili_mid": bilibili_mid,
+            "scheme_id": scheme_id,
+            "category_name": safe_text(record.get("category_name")),
+        }
+
+    def record_blue_link_backfill(
+        self,
+        production_run_id: int,
+        *,
+        pipeline_path: str | Path,
+        published_video_url: str,
+        bvid: str,
+        aid: str,
+        video_owner_mid: str,
+        backfill_id: str,
+        status: str,
+        matched_count: int,
+        unresolved_count: int,
+    ) -> dict[str, Any]:
+        normalized_status = safe_text(status)
+        if normalized_status not in {"complete", "partial"}:
+            raise ValueError(f"无效的蓝链回流状态: {normalized_status}")
+        matched_total = int(matched_count)
+        unresolved_total = int(unresolved_count)
+        if matched_total < 0 or unresolved_total < 0:
+            raise ValueError("蓝链回流计数不能为负数")
+        if normalized_status == "complete" and unresolved_total:
+            raise ValueError("仍有挂起蓝链时不能记录为 complete")
+        if not all(safe_text(value) for value in (published_video_url, bvid, aid, backfill_id)):
+            raise ValueError("蓝链回流结果缺少视频或 Master 任务身份")
+        context = self.publishing_context(production_run_id)
+        if safe_text(video_owner_mid) != context["bilibili_mid"]:
+            raise ValueError("视频作者 MID 与本地账号绑定不一致")
+        stored = self.repository.record_blue_link_backfill(
+            production_run_id,
+            published_video_url=safe_text(published_video_url),
+            bvid=safe_text(bvid),
+            aid=safe_text(aid),
+            video_owner_mid=safe_text(video_owner_mid),
+            backfill_id=safe_text(backfill_id),
+            status=normalized_status,
+            matched_count=matched_total,
+            unresolved_count=unresolved_total,
+        )
+        pipeline = Path(pipeline_path).expanduser().resolve()
+        payload = json.loads(pipeline.read_text(encoding="utf-8-sig"))
+        phases = payload.get("phases") if isinstance(payload.get("phases"), dict) else {}
+        phases["blue_link_backfill"] = {
+            "status": normalized_status,
+            "production_run_id": production_run_id,
+            "backfill_id": safe_text(backfill_id),
+            "video_url": safe_text(published_video_url),
+            "bvid": safe_text(bvid),
+            "matched_count": matched_total,
+            "unresolved_count": unresolved_total,
+        }
+        payload["phases"] = phases
+        if normalized_status == "complete":
+            payload["current_phase"] = "done"
+            payload["next_action"] = "视频已发布，蓝链已全部回流。"
+        else:
+            payload["current_phase"] = "blue_link_backfill"
+            payload["next_action"] = f"已回流 {matched_count} 条，仍有 {unresolved_count} 条待浏览器补解析。"
+        payload["updated_at"] = now_iso()
+        pipeline.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"ok": True, "production": stored, "pipeline_path": str(pipeline)}
 
 
 def _probe_video(path: Path) -> dict[str, Any]:

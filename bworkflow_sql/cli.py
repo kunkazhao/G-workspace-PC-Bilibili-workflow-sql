@@ -31,7 +31,7 @@ from typing import Any
 from .cutme_intro import preflight_intro_plan_for_cutme
 from .cutme_adapter import CutMeAdapterError
 from .public_contracts import build_workflow_observation, build_workflow_observation_error
-from .settings import DEFAULT_INTRO_ASSET_ROOT
+from .settings import DEFAULT_INTRO_ASSET_ROOT, DEFAULT_MASTER_API_BASE_URL
 from .tts_helpers import VOICE_PROVIDER_INDEXTTS, VOICE_PROVIDER_MINIMAX
 from .workflow_errors import (
     AmbiguousProjectReferenceError,
@@ -569,6 +569,62 @@ def cmd_complete_publishing(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_publishing_context(args: argparse.Namespace) -> None:
+    from .production_history import ProductionHistoryService
+
+    _, repo, _, _ = _init()
+    _json_out(ProductionHistoryService(repo).publishing_context(args.production_run_id))
+
+
+def cmd_record_blue_link_backfill(args: argparse.Namespace) -> None:
+    from .production_history import ProductionHistoryService
+
+    _, repo, _, _ = _init()
+    _json_out(
+        ProductionHistoryService(repo).record_blue_link_backfill(
+            args.production_run_id,
+            pipeline_path=args.pipeline,
+            published_video_url=args.video_url,
+            bvid=args.bvid,
+            aid=args.aid,
+            video_owner_mid=args.owner_mid,
+            backfill_id=args.backfill_id,
+            status=args.status,
+            matched_count=args.matched_count,
+            unresolved_count=args.unresolved_count,
+        )
+    )
+
+
+def cmd_resolve_blue_links(args: argparse.Namespace) -> None:
+    from .blue_link_browser import resolve_blue_links
+
+    _json_out(
+        resolve_blue_links(
+            args.source_link,
+            proxy_url=args.cdp_proxy_url or None,
+            timeout=args.timeout,
+            attempts=args.attempts,
+        )
+    )
+
+
+def cmd_resolve_blue_link_backfill(args: argparse.Namespace) -> None:
+    from .blue_link_backfill import resolve_blue_link_backfill
+
+    _json_out(
+        resolve_blue_link_backfill(
+            args.backfill_id,
+            workspace_id=args.workspace_id,
+            master_url=args.master_url,
+            proxy_url=args.cdp_proxy_url or None,
+            timeout=args.timeout,
+            attempts=args.attempts,
+            master_timeout=args.master_timeout,
+        )
+    )
+
+
 # ── assets-check ──────────────────────────────────────────────────────
 
 def cmd_assets_check(args: argparse.Namespace) -> None:
@@ -960,6 +1016,51 @@ def build_parser() -> argparse.ArgumentParser:
     destination.add_argument("--archive-dir", default="", help="覆盖默认归档目录；默认优先使用已发布视频下的当前月份目录，不存在则使用根目录")
     destination.add_argument("--current-path", default="", help="成片已手工移动时传入当前完整路径")
 
+    p = sub.add_parser("publishing-context", help="读取正式成片绑定的 Master 账号 ID、B站 MID 和方案 ID")
+    p.add_argument("production_run_id", type=int)
+
+    p = sub.add_parser("record-blue-link-backfill", help="记录 Master 蓝链回流结果并更新 pipeline 状态")
+    p.add_argument("production_run_id", type=int)
+    p.add_argument("--pipeline", required=True)
+    p.add_argument("--video-url", required=True)
+    p.add_argument("--bvid", required=True)
+    p.add_argument("--aid", required=True)
+    p.add_argument("--owner-mid", required=True)
+    p.add_argument("--backfill-id", required=True)
+    p.add_argument("--status", choices=["complete", "partial"], required=True)
+    p.add_argument("--matched-count", type=int, required=True)
+    p.add_argument("--unresolved-count", type=int, required=True)
+
+    p = sub.add_parser("resolve-blue-links", help="用登录态 Chrome 确定性解析商品中转页")
+    p.add_argument("--source-link", action="append", required=True, help="待解析蓝链；可重复传入")
+    p.add_argument(
+        "--cdp-proxy-url",
+        default="",
+        help="CDP HTTP 代理；默认读取 BWORKFLOW_CDP_PROXY_URL 或 127.0.0.1:3456",
+    )
+    p.add_argument("--timeout", type=float, default=20.0, help="每条链接等待标准商品页的秒数")
+    p.add_argument("--attempts", type=int, default=2, help="每条链接最多尝试次数")
+
+    p = sub.add_parser(
+        "resolve-blue-link-backfill",
+        help="按 Master backfill_id 自动拉取、浏览器解析并回传挂起蓝链",
+    )
+    p.add_argument("backfill_id", help="Master 蓝链回流任务 UUID")
+    p.add_argument("--workspace-id", required=True, help="Master workspace UUID")
+    p.add_argument(
+        "--master-url",
+        default=DEFAULT_MASTER_API_BASE_URL,
+        help="Master API 地址",
+    )
+    p.add_argument(
+        "--cdp-proxy-url",
+        default="",
+        help="CDP HTTP 代理；默认读取 BWORKFLOW_CDP_PROXY_URL 或 127.0.0.1:3456",
+    )
+    p.add_argument("--timeout", type=float, default=20.0, help="每条链接等待标准商品页的秒数")
+    p.add_argument("--attempts", type=int, default=2, help="每条链接最多尝试次数")
+    p.add_argument("--master-timeout", type=float, default=30.0, help="Master API 请求超时秒数")
+
     # assets-check
     p = sub.add_parser("assets-check", help="素材完整性检查")
     p.add_argument("project_id", type=int)
@@ -1207,6 +1308,10 @@ DISPATCH = {
     "rerender-production-preflight": cmd_rerender_production_preflight,
     "rerender-production": cmd_rerender_production,
     "complete-publishing": cmd_complete_publishing,
+    "publishing-context": cmd_publishing_context,
+    "record-blue-link-backfill": cmd_record_blue_link_backfill,
+    "resolve-blue-links": cmd_resolve_blue_links,
+    "resolve-blue-link-backfill": cmd_resolve_blue_link_backfill,
     "assets-check": cmd_assets_check,
     "render-package": cmd_render_package,
     "render-final-video": cmd_render_final_video,

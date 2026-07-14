@@ -34,6 +34,7 @@
 | 媒体工作区 | `create-project` 自动为所有启用账号创建配音、实际配置模板商品图、Roll-B 和引言展示视频目录；旧项目用 `scaffold` 幂等修复，不手工复制目录逻辑。 |
 | 正式成片履历 | run manifest 只证明生成过。只有用户确认后执行 `confirm-production` 才写入 SQLite `production_runs`；测试、预览、校准不计入。下次选模板先查 `production-history`。 |
 | 发布完成与归档 | 复用 `production_runs` 和 `.pipeline.json` 的 `phases.publishing`。`complete-publishing` 默认移动到 `G:\2026项目-b站\已发布视频` 下已存在的当前月份目录，不存在则放根目录且不建月份目录；`--archive-dir` 可覆盖，`--current-path` 校验手工移动后的文件。 |
+| 蓝链回流 | 发布归档后进入 `phases.blue_link_backfill`，不直接结束。`publishing-context` 只通过正式成片的本地 `account_id` 读取固定 Master UUID/B站 MID/方案 ID；`resolve-blue-links` 是只返回 URL 对的底层确定性浏览器执行器，`resolve-blue-link-backfill <backfill_id> --workspace-id <uuid>` 会自动从 Master 拉取仍无商品 ID 的行、默认最多重试两次并回传成功 URL 对；库内缺商品和旧链冲突不会重复打开浏览器。`record-blue-link-backfill` 把 Master 任务、视频身份和成功/挂起计数写回同一 `production_runs` 行。 |
 | 视频组件与剪辑模板 | 进入 `zhaoer-bilibili-video-design`，按“静态预览确认 -> 动画短样片确认 -> 正式组件接入”推进。禁止把视频画面做成网页/HUD，禁止为视觉方便改写结构化槽位；正式随机必须记录稳定 id 和 seed。 |
 | 手动测试目录 | 预览、短样片、RenderPackage、ASS、抽帧和测试缓存统一放在 `data\workspace\manual-tests\{测试主题}\`，每个主题独立目录；默认不写正式 `.pipeline.json`，CutMe 临时 job 验证后只清理该次明确生成的目录。 |
 | 剪映字幕轨 | `bworkflow_sql jianying` 默认仍跳过字幕；显式加 `--with-subtitles` 才生成可编辑文本轨。当前机器如遇 onnxruntime/VAD 初始化失败，再加 `--subtitle-no-vad`。 |

@@ -49,6 +49,37 @@ def test_confirm_is_idempotent_and_history_recommends_unused_template(tmp_path: 
     db.close()
 
 
+def test_publishing_context_and_partial_blue_link_backfill_use_stable_ids(tmp_path: Path):
+    db, project_id, service = _service(tmp_path)
+    repo = service.repository
+    repo.upsert_account({"label": "小博", "account_id": "xiaobo"})
+    production = service.confirm(project_id, run_manifest_path=_manifest(tmp_path, project_id))["production"]
+    pipeline = tmp_path / ".pipeline.json"
+    pipeline.write_text(json.dumps({"phases": {"publishing": {"status": "done"}}}), encoding="utf-8")
+
+    context = service.publishing_context(production["id"])
+    result = service.record_blue_link_backfill(
+        production["id"],
+        pipeline_path=pipeline,
+        published_video_url="https://www.bilibili.com/video/BV1test",
+        bvid="BV1test",
+        aid="123",
+        video_owner_mid=context["bilibili_mid"],
+        backfill_id="backfill-1",
+        status="partial",
+        matched_count=18,
+        unresolved_count=2,
+    )
+    payload = json.loads(pipeline.read_text(encoding="utf-8"))
+
+    assert context["master_account_id"] == "5fe6305b-c1ca-4ee4-bfd7-9407bd4e5302"
+    assert context["scheme_id"] == "s1"
+    assert result["production"]["blue_link_matched_count"] == 18
+    assert payload["current_phase"] == "blue_link_backfill"
+    assert payload["phases"]["blue_link_backfill"]["unresolved_count"] == 2
+    db.close()
+
+
 def test_unaccepted_render_cannot_enter_formal_history(tmp_path: Path):
     db, project_id, service = _service(tmp_path)
     with pytest.raises(ValueError, match="未执行验收"):
@@ -131,7 +162,8 @@ def test_frozen_rerender_creates_candidate_without_demoting_published_pipeline(
     )
 
     class FakeAdapter:
-        def render_final(self, package_path, *, output_path):
+        def render_final(self, package_path, *, output_path, cache_dir=None):
+            assert cache_dir == tmp_path / "workspace" / "project-1" / "render" / "final-video-cache"
             output = Path(output_path)
             output.write_bytes(b"rerendered")
             return {"artifacts": {"output_path": str(output)}}
@@ -139,6 +171,10 @@ def test_frozen_rerender_creates_candidate_without_demoting_published_pipeline(
     monkeypatch.setattr(
         "bworkflow_sql.production_history._probe_video",
         lambda path: {"duration": 10.0, "size": path.stat().st_size, "has_video": True, "has_audio": True},
+    )
+    monkeypatch.setattr(
+        "bworkflow_sql.production_history.INTERNAL_WORKSPACE_ROOT",
+        tmp_path / "workspace",
     )
     result = service.rerender(
         confirmed["id"], pipeline_path=pipeline, cutme_adapter=FakeAdapter()
@@ -188,8 +224,9 @@ def test_complete_publishing_moves_file_and_updates_existing_pipeline_phase(tmp_
     assert target.is_file()
     assert result["production"]["publish_status"] == "archived"
     assert result["production"]["full_mp4_path"] == str(target.resolve())
-    assert payload["current_phase"] == "done"
+    assert payload["current_phase"] == "blue_link_backfill"
     assert payload["phases"]["publishing"]["status"] == "done"
+    assert payload["phases"]["blue_link_backfill"]["status"] == "pending"
     assert payload["paths"]["final_mp4"] == str(target.resolve())
 
     again = service.complete_publishing(
