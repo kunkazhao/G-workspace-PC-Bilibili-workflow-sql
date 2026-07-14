@@ -68,9 +68,10 @@ def test_publishing_context_and_partial_blue_link_backfill_use_stable_ids(tmp_pa
         backfill_id="backfill-1",
         status="partial",
         matched_count=18,
-        unresolved_count=2,
+        unresolved_count=3,
         browser_pending_count=1,
         browser_suspended_count=1,
+        title_candidate_count=1,
     )
     payload = json.loads(pipeline.read_text(encoding="utf-8"))
 
@@ -78,8 +79,9 @@ def test_publishing_context_and_partial_blue_link_backfill_use_stable_ids(tmp_pa
     assert context["scheme_id"] == "s1"
     assert result["production"]["blue_link_matched_count"] == 18
     assert payload["current_phase"] == "blue_link_backfill"
-    assert payload["phases"]["blue_link_backfill"]["unresolved_count"] == 2
+    assert payload["phases"]["blue_link_backfill"]["unresolved_count"] == 3
     assert payload["phases"]["blue_link_backfill"]["browser_suspended_count"] == 1
+    assert payload["phases"]["blue_link_backfill"]["title_candidate_count"] == 1
     db.close()
 
 

@@ -5,6 +5,8 @@ from typing import Any
 from bworkflow_sql import blue_link_backfill
 from bworkflow_sql.blue_link_backfill import (
     MasterBlueLinkBackfillClient,
+    confirm_blue_link_title_candidates,
+    get_blue_link_backfill_report,
     resolve_blue_link_backfill,
 )
 from bworkflow_sql.cli import build_parser
@@ -67,11 +69,13 @@ def test_master_client_fetches_pending_and_submits_only_url_pairs() -> None:
     result = client.submit_resolutions(
         "job/1",
         [
-            {
-                "source_link": "https://b23.tv/a",
-                "resolved_url": "https://item.jd.com/123456.html",
-            }
-        ],
+                {
+                    "source_link": "https://b23.tv/a",
+                    "resolved_url": "https://item.jd.com/123456.html",
+                    "lease_token": "lease-a",
+                }
+            ],
+            expected_scan_revision=3,
     )
 
     assert pending["browser_pending"][0]["source_link"] == "https://b23.tv/a"
@@ -79,10 +83,82 @@ def test_master_client_fetches_pending_and_submits_only_url_pairs() -> None:
     assert session.calls[0]["url"].endswith("/api/blue-link-backfills/job%2F1/pending")
     assert session.calls[0]["headers"] == {"X-Workspace-Id": "workspace-1"}
     assert session.calls[1]["json"] == {
+        "expected_scan_revision": 3,
         "resolutions": [
             {
                 "source_link": "https://b23.tv/a",
                 "resolved_url": "https://item.jd.com/123456.html",
+                "lease_token": "lease-a",
+            }
+        ]
+    }
+
+
+def test_backfill_report_returns_persisted_groups_and_all_unresolved_items() -> None:
+    payload = {
+        "backfill_id": "job-1",
+        "status": "partial",
+        "browser_pending": [],
+        "unresolved_item_count": 1,
+        "unresolved_groups": [
+            {
+                "group_type": "browser_deferred",
+                "code": "jd_login_required",
+                "reason": "京东要求重新登录",
+                "count": 1,
+                "sample_links": [{"source_link": "https://b23.tv/a"}],
+            }
+        ],
+        "unresolved_items": [
+            {
+                "source_link": "https://b23.tv/a",
+                "browser_last_code": "jd_login_required",
+            }
+        ],
+    }
+    session = FakeSession([FakeResponse(payload)])
+
+    result = get_blue_link_backfill_report(
+        "job-1",
+        workspace_id="workspace-1",
+        master_url="http://master.test",
+        session=session,
+    )
+
+    assert result["unresolved_item_count"] == 1
+    assert result["unresolved_groups"][0]["sample_links"][0]["source_link"].endswith("/a")
+    assert result["unresolved_items"][0]["browser_last_code"] == "jd_login_required"
+
+
+def test_title_decisions_are_submitted_as_one_user_approved_batch() -> None:
+    session = FakeSession([FakeResponse({"status": "complete", "confirmed_count": 1})])
+
+    result = confirm_blue_link_title_candidates(
+        "job-1",
+        [
+            {
+                "source_link": "https://b23.tv/a",
+                "action": "confirm",
+                "product_id": "p1",
+            }
+        ],
+        workspace_id="workspace-1",
+        expected_scan_revision=4,
+        decision_batch_id="batch-1",
+        master_url="http://master.test",
+        session=session,
+    )
+
+    assert result["confirmed_count"] == 1
+    assert session.calls[0]["url"].endswith("/title-decisions")
+    assert session.calls[0]["json"] == {
+        "expected_scan_revision": 4,
+        "decision_batch_id": "batch-1",
+        "decisions": [
+            {
+                "source_link": "https://b23.tv/a",
+                "action": "confirm",
+                "product_id": "p1",
             }
         ]
     }
@@ -95,12 +171,17 @@ def test_unattended_backfill_resolves_batch_and_submits_successes(monkeypatch) -
                 {
                     "backfill_id": "job-1",
                     "status": "partial",
-                    "browser_pending": [
-                        {"source_link": "https://b23.tv/a", "platform": "jd"},
-                        {"source_link": "https://b23.tv/b", "platform": "tb"},
-                    ],
+                    "scan_revision": 2,
+                    "title_candidates": [],
+                    "browser_pending": [],
                 }
             ),
+            FakeResponse({
+                "browser_pending": [
+                    {"source_link": "https://b23.tv/a", "platform": "jd", "lease_token": "lease-a"},
+                    {"source_link": "https://b23.tv/b", "platform": "tb", "lease_token": "lease-b"},
+                ]
+            }),
             FakeResponse({"backfill_id": "job-1", "status": "partial"}),
             FakeResponse({"backfill_id": "job-1", "status": "partial"}),
             FakeResponse(
@@ -146,9 +227,11 @@ def test_unattended_backfill_resolves_batch_and_submits_successes(monkeypatch) -
     assert result["attempted_count"] == 2
     assert result["resolved_count"] == 1
     assert result["failed_count"] == 1
-    assert len(session.calls) == 4
-    assert session.calls[1]["json"]["resolutions"][0]["source_link"].endswith("/a")
-    assert session.calls[2]["json"]["attempts"][0]["code"] == "standard_product_not_reached"
+    assert len(session.calls) == 5
+    assert session.calls[0]["url"].endswith("/title-candidates")
+    assert session.calls[1]["url"].endswith("/browser-leases")
+    assert session.calls[2]["json"]["resolutions"][0]["lease_token"] == "lease-a"
+    assert session.calls[3]["json"]["attempts"][0]["code"] == "standard_product_not_reached"
 
 
 def test_unattended_backfill_does_not_post_when_no_browser_rows(monkeypatch) -> None:
@@ -158,10 +241,13 @@ def test_unattended_backfill_does_not_post_when_no_browser_rows(monkeypatch) -> 
                 {
                     "backfill_id": "job-1",
                     "status": "partial",
+                    "scan_revision": 2,
+                    "title_candidates": [],
                     "browser_pending": [],
                     "pending_count": 4,
                 }
             ),
+            FakeResponse({"browser_pending": []}),
             FakeResponse(
                 {
                     "backfill_id": "job-1",
@@ -182,21 +268,25 @@ def test_unattended_backfill_does_not_post_when_no_browser_rows(monkeypatch) -> 
 
     assert result["attempted_count"] == 0
     assert result["master"]["pending_count"] == 4
-    assert len(session.calls) == 2
+    assert len(session.calls) == 3
 
 
 def test_jd_risk_opens_circuit_skips_later_jd_but_continues_taobao(monkeypatch) -> None:
     pending = {
         "backfill_id": "job-1",
         "status": "partial",
+        "scan_revision": 2,
+        "title_candidates": [],
         "browser_pending": [
-            {"source_link": "https://b23.tv/jd-1", "platform": "jd"},
-            {"source_link": "https://b23.tv/jd-2", "platform": "jd"},
-            {"source_link": "https://b23.tv/tb-1", "platform": "tb"},
+            {"source_link": "https://b23.tv/jd-1", "platform": "jd", "lease_token": "lease-jd-1"},
+            {"source_link": "https://b23.tv/jd-2", "platform": "jd", "lease_token": "lease-jd-2"},
+            {"source_link": "https://b23.tv/tb-1", "platform": "tb", "lease_token": "lease-tb-1"},
         ],
     }
     session = FakeSession([
+        FakeResponse({**pending, "browser_pending": []}),
         FakeResponse(pending),
+        FakeResponse({"status": "partial"}),
         FakeResponse({"status": "partial"}),
         FakeResponse({"status": "partial"}),
         FakeResponse({**pending, "browser_pending": []}),
@@ -233,4 +323,5 @@ def test_jd_risk_opens_circuit_skips_later_jd_but_continues_taobao(monkeypatch) 
     )
 
     assert opened == ["https://b23.tv/jd-1", "https://b23.tv/tb-1"]
-    assert result["skipped"] == [{"source_link": "https://b23.tv/jd-2", "code": "jd_circuit_open"}]
+    assert result["skipped"][0]["source_link"] == "https://b23.tv/jd-2"
+    assert result["skipped"][0]["code"] == "jd_circuit_open"

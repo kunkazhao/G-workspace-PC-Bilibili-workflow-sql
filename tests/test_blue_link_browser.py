@@ -54,6 +54,27 @@ class FakeProxy:
         self.closed.append(target_id)
 
 
+class FakeJdActivityProxy(FakeProxy):
+    def __init__(self, *, cards: int = 1) -> None:
+        super().__init__(cards=cards)
+        self.current_url = (
+            "https://pro.m.jd.com/mall/active/example/index.html?sku=encrypted"
+        )
+
+    def evaluate(self, _target_id: str, _expression: str) -> dict[str, int]:
+        return {
+            "recommendation_markers": 1,
+            "primary_images": self.cards,
+            "primary_cards": self.cards,
+        }
+
+    def click(self, target_id: str, selector: str) -> None:
+        self.clicked.append((target_id, selector))
+        self.current_url = (
+            "https://item.m.jd.com/ware/view.action?wareId=100254195691"
+        )
+
+
 def test_cdp_proxy_uses_short_metadata_timeout_and_longer_new_tab_timeout() -> None:
     class FakeResponse:
         def __init__(self, payload: Any) -> None:
@@ -152,6 +173,80 @@ def test_resolver_extracts_unique_jd_main_sku_without_clicking() -> None:
     result = resolver.resolve("https://b23.tv/mall-example")
 
     assert result.resolved_url == "https://item.jd.com/100081966294.html"
+    assert proxy.clicked == []
+    assert proxy.closed == ["root"]
+
+
+def test_resolver_clicks_only_unique_jd_activity_primary_image() -> None:
+    proxy = FakeJdActivityProxy()
+    resolver = TaobaoCouponBrowserResolver(proxy, navigation_timeout=0.1, poll_interval=0)
+
+    result = resolver.resolve("https://b23.tv/mall-jd-example")
+
+    assert result.resolved_url == (
+        "https://item.m.jd.com/ware/view.action?wareId=100254195691"
+    )
+    assert proxy.clicked == [
+        ("root", '[data-bworkflow-jd-primary-image="1"]')
+    ]
+    assert proxy.closed == ["root"]
+
+
+def test_resolver_accepts_unique_jd_primary_image_without_recommendation_marker() -> None:
+    class NoRecommendationMarkerProxy(FakeJdActivityProxy):
+        def evaluate(self, target_id: str, expression: str) -> dict[str, int]:
+            state = super().evaluate(target_id, expression)
+            state["recommendation_markers"] = 0
+            return state
+
+    proxy = NoRecommendationMarkerProxy()
+    resolver = TaobaoCouponBrowserResolver(proxy, navigation_timeout=0.1, poll_interval=0)
+
+    result = resolver.resolve("https://b23.tv/mall-jd-no-recommendation-marker")
+
+    assert "wareId=100254195691" in result.resolved_url
+    assert proxy.clicked == [
+        ("root", '[data-bworkflow-jd-primary-image="1"]')
+    ]
+
+
+def test_resolver_waits_for_jd_activity_primary_card_to_render() -> None:
+    class DelayedJdActivityProxy(FakeJdActivityProxy):
+        def __init__(self) -> None:
+            super().__init__()
+            self.evaluate_calls = 0
+
+        def evaluate(self, target_id: str, expression: str) -> dict[str, int]:
+            self.evaluate_calls += 1
+            if self.evaluate_calls == 1:
+                return {
+                    "recommendation_markers": 0,
+                    "primary_images": 0,
+                    "primary_cards": 0,
+                }
+            return super().evaluate(target_id, expression)
+
+    proxy = DelayedJdActivityProxy()
+    resolver = TaobaoCouponBrowserResolver(proxy, navigation_timeout=0.1, poll_interval=0)
+
+    result = resolver.resolve("https://b23.tv/mall-jd-example")
+
+    assert "wareId=100254195691" in result.resolved_url
+    assert proxy.evaluate_calls == 2
+    assert proxy.clicked == [
+        ("root", '[data-bworkflow-jd-primary-image="1"]')
+    ]
+
+
+@pytest.mark.parametrize("cards", [0, 2])
+def test_resolver_suspends_when_jd_activity_primary_card_is_not_unique(cards: int) -> None:
+    proxy = FakeJdActivityProxy(cards=cards)
+    resolver = TaobaoCouponBrowserResolver(proxy, navigation_timeout=0.1, poll_interval=0)
+
+    with pytest.raises(BlueLinkBrowserError) as exc_info:
+        resolver.resolve("https://b23.tv/mall-jd-example")
+
+    assert exc_info.value.code == "jd_primary_product_ambiguous"
     assert proxy.clicked == []
     assert proxy.closed == ["root"]
 

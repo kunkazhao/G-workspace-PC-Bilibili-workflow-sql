@@ -98,7 +98,9 @@ python -m bworkflow_sql complete-publishing <production_run_id> --pipeline <.pip
 python -m bworkflow_sql publishing-context <production_run_id>
 python -m bworkflow_sql record-blue-link-backfill <production_run_id> --pipeline <.pipeline.json> --backfill-id <Master任务UUID> --workspace-id <Master工作空间UUID>
 python -m bworkflow_sql resolve-blue-links --source-link <待解析蓝链> [--source-link <另一条蓝链>] [--attempts 1]
+python -m bworkflow_sql blue-link-backfill-report <Master任务UUID> --workspace-id <Master工作空间UUID>
 python -m bworkflow_sql resolve-blue-link-backfill <Master任务UUID> --workspace-id <Master工作空间UUID> [--max-links 5]
+python -m bworkflow_sql confirm-blue-link-title-candidates <Master任务UUID> --workspace-id <Master工作空间UUID> --decision-file <UTF-8 JSON>
 ```
 
 By default the command uses the existing current-month folder under
@@ -118,16 +120,39 @@ browser-pending, deferred, suspended, and Master-data counts separate.
 its own tabs, attempts each link once by default, and returns only
 `source_link + resolved_url`. It accepts standard JD/Taobao/Tmall product pages,
 unique numeric JD activity `mainSku` values, and a unique standard JD item URL
-embedded in an official JD risk-page `returnurl`. For Taobao coupon pages it
+embedded in an official JD risk-page `returnurl`. On an official JD activity
+page without either ID, it may click the single large `imagetools` product image
+only when that image belongs to exactly one visible price-bearing primary card;
+recommendation-grid images are excluded and ambiguity fails closed. For Taobao
+coupon pages it
 requires exactly one top primary product card and clicks only that card's title
 or image; it never clicks coupon controls or recommendation items. The command
 fails closed on 403/login/risk pages that expose no unique standard product ID.
 `resolve-blue-link-backfill` is the unattended scheduler: it fetches only
-Master-authorized browser rows, processes at most five links per run, and writes
+Master-authorized work. It first asks Master to batch-run normalized strict title
+matching and then bounded fuzzy matching only for known-platform rows without a
+parsed product ID. Persisted title candidates are returned
+together at the end and are never opened in Chrome or written automatically.
+Known-ID catalog misses/conflicts stay in Master. Only rows with no title candidate
+continue to the browser queue; the command atomically leases them for the current
+scan revision and
+processes at most five browser links per run and writes
 each success or failure back immediately. JD links are spaced by default; the
 first exact JD 403 risk page opens a persistent two-hour JD circuit without
 blocking Taobao. Rows carrying a product ID, catalog misses, stored-link
 conflicts, suspended failures, and future deferred retries are not opened.
+`blue-link-backfill-report` is read-only and never opens Chrome. It returns all
+persisted unresolved items plus `unresolved_groups`; every group includes its
+count, reason, and up to three source links for direct user verification. The
+same report is included in the scheduler's final Master snapshot.
+After the user reviews the complete candidate batch, write one decision JSON
+with `expected_scan_revision`, a stable `decision_batch_id`, and `decisions`, then run
+containing `confirm` selections and `reject` rows and submit it through
+`confirm-blue-link-title-candidates`. Master validates every selected product
+against the persisted candidate set and current category before committing the
+whole batch atomically; replaying the same batch ID is safe. Rerun
+`resolve-blue-link-backfill` after rejections so only those rejected/no-candidate
+rows continue to the deterministic browser fallback.
 Set
 `BWORKFLOW_CDP_PROXY_URL` to override the default `http://127.0.0.1:3456`.
 

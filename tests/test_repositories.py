@@ -132,7 +132,7 @@ def test_fresh_db_has_nullable_master_snapshot_provenance(tmp_path: Path):
         (project_id,),
     )
 
-    assert CURRENT_SCHEMA_VERSION == 11
+    assert CURRENT_SCHEMA_VERSION == 12
     assert "master_snapshot_id" in columns
     assert "master_snapshot_applied_at" in columns
     assert project["master_snapshot_id"] is None
@@ -170,7 +170,7 @@ def test_v3_database_upgrades_to_current_without_backfilling_existing_project(tm
         "SELECT version FROM schema_version ORDER BY version"
     )]
 
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     assert project["master_snapshot_id"] is None
     assert project["master_snapshot_applied_at"] is None
     db.close()

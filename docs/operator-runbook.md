@@ -27,8 +27,40 @@
 python -m bworkflow_sql resolve-blue-link-backfill <backfill_id> --workspace-id <Master工作空间UUID> --max-links 5
 ```
 
-- 命令先从 Master `GET /api/blue-link-backfills/{backfill_id}/pending` 拉取仍无商品 ID 的行，再调用本机确定性浏览器执行器，最后把成功的 `source_link + resolved_url` 自动提交给 Master。
+只查看已有失败记录、给用户列链接或准备下一次重跑时，不打开浏览器：
+
+```powershell
+python -m bworkflow_sql blue-link-backfill-report <backfill_id> --workspace-id <Master工作空间UUID>
+```
+
+日常批处理顺序固定为：Master 商品 ID 唯一匹配自动写库；已知 ID 的库内缺失/重复
+保持 Master 数据挂起，标题和浏览器均不得覆盖。`resolve-blue-link-backfill` 只对无 ID
+且平台已知的剩余项批量执行严格标题匹配，再对严格失败项执行模糊匹配；有候选的
+全部留到最终 JSON 一次性让用户确认，没有候选的按扫描版本领取浏览器租约。不得逐条打断用户。
+
+用户一次性确认或拒绝后，把决定写入 UTF-8 JSON：
+
+```json
+{
+  "expected_scan_revision": 3,
+  "decision_batch_id": "blue-link-job-1-review-1",
+  "decisions": [
+    {"source_link": "https://b23.tv/example", "action": "confirm", "product_id": "Master商品UUID"},
+    {"source_link": "https://b23.tv/reject", "action": "reject"}
+  ]
+}
+```
+
+然后批量提交；确认写库由 Master 完成，拒绝项在下一次调度中继续浏览器兜底：
+
+```powershell
+python -m bworkflow_sql confirm-blue-link-title-candidates <backfill_id> --workspace-id <Master工作空间UUID> --decision-file <decisions.json>
+python -m bworkflow_sql resolve-blue-link-backfill <backfill_id> --workspace-id <Master工作空间UUID> --max-links 5
+```
+
+- 命令先调用 Master 标题候选接口，再原子领取既无商品 ID、也无待确认标题候选的浏览器行；成功和失败回传都携带当前扫描版本与租约令牌。
 - `resolve-blue-links --source-link ...` 只用于不连接 Master 的单条诊断，不是日常回流入口。
+- 报告读取 Master 已持久化的完整 `unresolved_items`，并按失败类型返回 `unresolved_groups`；面向用户汇报时必须逐组说明数量和原因，并把该组 `sample_links` 中最多三条源链接写成可点击链接。不得只报数量而不给链接。
 - 批处理每条只打开一次，成功和失败都立即回写 Master；不要在同一进程里循环重试。
 - 京东默认至少间隔 20 秒；遇到 `pc-frequent-pro.pf.jd.com/?reason=403` 后本地持久熔断两小时，后续京东不再打开，淘宝任务仍可继续。
 - `record-blue-link-backfill` 需要 `--workspace-id`，状态、视频身份和四类挂起计数全部以 Master 快照为准。
@@ -42,7 +74,7 @@ python -m bworkflow_sql resolve-blue-link-backfill <backfill_id> --workspace-id 
 
 | 现象 | 处理 |
 |---|---|
-| Master 返回的 `browser_pending` 为空 | 当前剩余项已有商品 ID，属于商品库缺失、重复 ID 或旧蓝链冲突；在 Master 处理，不要打开浏览器。 |
+| Master 返回的 `browser_pending` 为空 | 当前剩余项可能有标题候选，或已有商品 ID 且属于商品库缺失、重复 ID、旧蓝链冲突；在 Master 处理，不要打开浏览器。浏览器执行必须使用 `browser-leases` 返回的当前版本租约。 |
 | 页面出现多个候选商品 | 保持挂起并记录原因，禁止点击推荐位或凭标题猜测。 |
 | 只有部分 URL 成功 | 已成功 URL 已逐条写回；失败证据也已写回。只重跑 Master 重新释放为 `browser_pending` 的行，不直接重试 `deferred/suspended`。 |
 | Master 任务仍为 `partial` | 只有全部行进入 `matched`、`existing` 或 `ignored_non_product` 才是 `complete`。 |

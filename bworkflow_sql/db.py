@@ -203,6 +203,7 @@ CREATE TABLE IF NOT EXISTS production_runs (
     blue_link_browser_pending_count INTEGER NOT NULL DEFAULT 0,
     blue_link_browser_deferred_count INTEGER NOT NULL DEFAULT 0,
     blue_link_browser_suspended_count INTEGER NOT NULL DEFAULT 0,
+    blue_link_title_candidate_count INTEGER NOT NULL DEFAULT 0,
     blue_link_master_pending_count INTEGER NOT NULL DEFAULT 0
 );
 
@@ -212,7 +213,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 """
 
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 12
 
 CONFIRMED_MASTER_ACCOUNT_BINDINGS = {
     "小燃": ("c025960c-5560-4630-8344-509a5c6d92a5", "3546911325817533"),
@@ -311,6 +312,7 @@ class Database:
             (9, self._migrate_v9),
             (10, self._migrate_v10),
             (11, self._migrate_v11),
+            (12, self._migrate_v12),
         ]
         for version, func in migrations:
             if current < version:
@@ -430,6 +432,15 @@ class Database:
                 conn.execute(
                     f"ALTER TABLE production_runs ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
                 )
+
+    def _migrate_v12(self, conn: sqlite3.Connection) -> None:
+        """Persist the batch of title candidates awaiting one user confirmation."""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(production_runs)").fetchall()}
+        if "blue_link_title_candidate_count" not in columns:
+            conn.execute(
+                "ALTER TABLE production_runs ADD COLUMN "
+                "blue_link_title_candidate_count INTEGER NOT NULL DEFAULT 0"
+            )
 
     def _migrate_script_hashes(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute("SELECT id, body, text_hash FROM script_blocks").fetchall()

@@ -630,6 +630,7 @@ def cmd_record_blue_link_backfill(args: argparse.Namespace) -> None:
             browser_pending_count=int(snapshot.get("browser_pending_count") or 0),
             browser_deferred_count=int(snapshot.get("browser_deferred_count") or 0),
             browser_suspended_count=int(snapshot.get("browser_suspended_count") or 0),
+            title_candidate_count=int(snapshot.get("title_candidate_count") or 0),
             master_pending_count=int(snapshot.get("master_data_pending_count") or 0),
         )
     )
@@ -644,6 +645,45 @@ def cmd_resolve_blue_links(args: argparse.Namespace) -> None:
             proxy_url=args.cdp_proxy_url or None,
             timeout=args.timeout,
             attempts=args.attempts,
+        )
+    )
+
+
+def cmd_blue_link_backfill_report(args: argparse.Namespace) -> None:
+    from .blue_link_backfill import get_blue_link_backfill_report
+
+    _json_out(
+        get_blue_link_backfill_report(
+            args.backfill_id,
+            workspace_id=args.workspace_id,
+            master_url=args.master_url,
+            master_timeout=args.master_timeout,
+        )
+    )
+
+
+def cmd_confirm_blue_link_title_candidates(args: argparse.Namespace) -> None:
+    from .blue_link_backfill import confirm_blue_link_title_candidates
+
+    payload = json.loads(Path(args.decision_file).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("decision-file 必须是包含版本号、批次 ID 和 decisions 的 JSON 对象")
+    decisions = payload.get("decisions")
+    if not isinstance(decisions, list) or any(not isinstance(row, dict) for row in decisions):
+        raise ValueError("decision-file 必须是决定数组或包含 decisions 数组的 JSON 对象")
+    if int(payload.get("expected_scan_revision") or 0) <= 0:
+        raise ValueError("decision-file 缺少有效的 expected_scan_revision")
+    if not str(payload.get("decision_batch_id") or "").strip():
+        raise ValueError("decision-file 缺少 decision_batch_id")
+    _json_out(
+        confirm_blue_link_title_candidates(
+            args.backfill_id,
+            decisions,
+            expected_scan_revision=int(payload.get("expected_scan_revision") or 0),
+            decision_batch_id=str(payload.get("decision_batch_id") or "").strip(),
+            workspace_id=args.workspace_id,
+            master_url=args.master_url,
+            master_timeout=args.master_timeout,
         )
     )
 
@@ -1088,6 +1128,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--attempts", type=int, default=1, help="单链接诊断尝试次数；默认 1")
 
     p = sub.add_parser(
+        "blue-link-backfill-report",
+        help="只读查询已持久化的未完成蓝链，并按类型返回每类最多三条样本",
+    )
+    p.add_argument("backfill_id", help="Master 蓝链回流任务 UUID")
+    p.add_argument("--workspace-id", required=True, help="Master workspace UUID")
+    p.add_argument("--master-url", default=DEFAULT_MASTER_API_BASE_URL, help="Master API 地址")
+    p.add_argument("--master-timeout", type=float, default=30.0, help="Master API 请求超时秒数")
+
+    p = sub.add_parser(
+        "confirm-blue-link-title-candidates",
+        help="批量提交用户确认或拒绝的标题候选；不直接写本地数据库",
+    )
+    p.add_argument("backfill_id", help="Master 蓝链回流任务 UUID")
+    p.add_argument("--workspace-id", required=True, help="Master workspace UUID")
+    p.add_argument("--decision-file", required=True, help="UTF-8 JSON 决定文件")
+    p.add_argument("--master-url", default=DEFAULT_MASTER_API_BASE_URL, help="Master API 地址")
+    p.add_argument("--master-timeout", type=float, default=30.0, help="Master API 请求超时秒数")
+
+    p = sub.add_parser(
         "resolve-blue-link-backfill",
         help="按 Master backfill_id 自动拉取、浏览器解析并回传挂起蓝链",
     )
@@ -1360,6 +1419,8 @@ DISPATCH = {
     "publishing-context": cmd_publishing_context,
     "record-blue-link-backfill": cmd_record_blue_link_backfill,
     "resolve-blue-links": cmd_resolve_blue_links,
+    "blue-link-backfill-report": cmd_blue_link_backfill_report,
+    "confirm-blue-link-title-candidates": cmd_confirm_blue_link_title_candidates,
     "resolve-blue-link-backfill": cmd_resolve_blue_link_backfill,
     "assets-check": cmd_assets_check,
     "render-package": cmd_render_package,

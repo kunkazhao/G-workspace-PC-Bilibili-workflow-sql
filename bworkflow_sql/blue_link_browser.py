@@ -21,6 +21,7 @@ JD_FREQUENT_RISK_HOST = "pc-frequent-pro.pf.jd.com"
 JD_LOGIN_HOST = "plogin.m.jd.com"
 TOP_TITLE_SELECTOR = ".item-info-con > a .title"
 TOP_IMAGE_SELECTOR = ".item-info-con > a .item-img"
+JD_PRIMARY_IMAGE_SELECTOR = '[data-bworkflow-jd-primary-image="1"]'
 
 
 class BlueLinkBrowserError(ValueError):
@@ -98,6 +99,11 @@ def _canonical_product_url(raw_url: str) -> str:
 def _is_coupon_page(raw_url: str) -> bool:
     parsed = urlparse(_clean(raw_url))
     return (parsed.hostname or "").lower() == COUPON_HOST and parsed.path == COUPON_PATH
+
+
+def _is_jd_activity_page(raw_url: str) -> bool:
+    parsed = urlparse(_clean(raw_url))
+    return (parsed.hostname or "").lower() == JD_ACTIVITY_HOST and "/mall/active/" in parsed.path
 
 
 def _platform(raw_url: str) -> str:
@@ -278,6 +284,66 @@ class TaobaoCouponBrowserResolver:
             return TOP_IMAGE_SELECTOR
         raise BlueLinkBrowserError("tb_product_id_missing", "唯一主商品卡没有唯一可点击标题或图片")
 
+    def _jd_primary_image_click_selector(self, target_id: str) -> str:
+        # JD activity pages use generated class names. Identify the primary card
+        # by stable CDN/size semantics: one large imagetools product image inside
+        # one visible card carrying a price. Recommendation grids use /img/, not
+        # /imagetools/, and some activity templates have no recommendation title.
+        expression = """(() => {
+          const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
+          const visible = element => {
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return rect.width > 0 && rect.height > 0
+              && style.display !== 'none' && style.visibility !== 'hidden';
+          };
+          document.querySelectorAll('[data-bworkflow-jd-primary-image]')
+            .forEach(element => element.removeAttribute('data-bworkflow-jd-primary-image'));
+          const primaryImages = Array.from(document.images)
+            .filter(visible)
+            .filter(image => {
+              const rect = image.getBoundingClientRect();
+              return rect.width >= 180 && rect.height >= 180;
+            })
+            .filter(image => /^https:\\/\\/img\\d+\\.360buyimg\\.com\\/imagetools\\/(?:s\\d+x\\d+_)?jfs\\//.test(image.currentSrc || image.src));
+          const cards = new Set();
+          for (const image of primaryImages) {
+            let node = image.parentElement;
+            for (let depth = 0; node && depth < 5; depth += 1, node = node.parentElement) {
+              const text = normalize(node.innerText || node.textContent);
+              if (visible(node) && text.length > 5 && /[￥¥]\\s*\\d/.test(text)) {
+                cards.add(node);
+                break;
+              }
+            }
+          }
+          if (primaryImages.length === 1 && cards.size === 1) {
+            primaryImages[0].setAttribute('data-bworkflow-jd-primary-image', '1');
+          }
+          return {
+            primary_images: primaryImages.length,
+            primary_cards: cards.size
+          };
+        })()"""
+        deadline = time.monotonic() + self.navigation_timeout
+        images = cards = 0
+        while True:
+            state = self.client.evaluate(target_id, expression)
+            images = int(state.get("primary_images") or 0) if isinstance(state, dict) else 0
+            cards = int(state.get("primary_cards") or 0) if isinstance(state, dict) else 0
+            if images == 1 and cards == 1:
+                return JD_PRIMARY_IMAGE_SELECTOR
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(self.poll_interval)
+        landing_url = _clean(self.client.info(target_id).get("url"))
+        raise BlueLinkBrowserError(
+            "jd_primary_product_ambiguous",
+            f"京东活动页顶部主商品卡不唯一：images={images}, cards={cards}",
+            landing_url=landing_url,
+            platform="jd",
+        )
+
     def resolve(self, source_link: str) -> BrowserResolution:
         source = _clean(source_link)
         parsed = urlparse(source)
@@ -296,6 +362,18 @@ class TaobaoCouponBrowserResolver:
             canonical_landing = _canonical_product_url(landing_url)
             if canonical_landing:
                 return BrowserResolution(source, canonical_landing)
+            if _is_jd_activity_page(landing_url):
+                selector = self._jd_primary_image_click_selector(target_id)
+                self.client.click(target_id, selector)
+                resolved_url = self._wait_for_landing(owned)
+                if not _jd_item_id(resolved_url):
+                    raise BlueLinkBrowserError(
+                        "jd_product_id_missing",
+                        "京东活动页唯一主商品卡没有进入标准京东商品页",
+                        landing_url=resolved_url,
+                        platform="jd",
+                    )
+                return BrowserResolution(source, resolved_url)
             if not _is_coupon_page(landing_url):
                 resolved_url = self._wait_for_landing(owned)
                 return BrowserResolution(source, resolved_url)

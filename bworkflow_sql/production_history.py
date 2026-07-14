@@ -430,6 +430,7 @@ class ProductionHistoryService:
         browser_pending_count: int = 0,
         browser_deferred_count: int = 0,
         browser_suspended_count: int = 0,
+        title_candidate_count: int = 0,
         master_pending_count: int = 0,
     ) -> dict[str, Any]:
         normalized_status = safe_text(status)
@@ -443,6 +444,7 @@ class ProductionHistoryService:
             int(browser_pending_count),
             int(browser_deferred_count),
             int(browser_suspended_count),
+            int(title_candidate_count),
             int(master_pending_count),
         ]
         if any(value < 0 for value in breakdown) or sum(breakdown) != unresolved_total:
@@ -468,6 +470,7 @@ class ProductionHistoryService:
             "browser_pending_count": int(browser_pending_count),
             "browser_deferred_count": int(browser_deferred_count),
             "browser_suspended_count": int(browser_suspended_count),
+            "title_candidate_count": int(title_candidate_count),
             "master_pending_count": int(master_pending_count),
         }
         payload["phases"] = phases
@@ -479,6 +482,7 @@ class ProductionHistoryService:
             payload["next_action"] = (
                 f"已回流 {matched_total} 条；浏览器可处理 {int(browser_pending_count)} 条，"
                 f"延后 {int(browser_deferred_count)} 条，安全挂起 {int(browser_suspended_count)} 条，"
+                f"待批量确认标题候选 {int(title_candidate_count)} 条，"
                 f"Master 数据待处理 {int(master_pending_count)} 条。"
             )
         payload["updated_at"] = now_iso()
@@ -499,6 +503,7 @@ class ProductionHistoryService:
                 browser_pending_count=int(browser_pending_count),
                 browser_deferred_count=int(browser_deferred_count),
                 browser_suspended_count=int(browser_suspended_count),
+                title_candidate_count=int(title_candidate_count),
                 master_pending_count=int(master_pending_count),
             )
             os.replace(staged, pipeline)
@@ -519,6 +524,7 @@ class ProductionHistoryService:
                     browser_pending_count=int(previous.get("blue_link_browser_pending_count") or 0),
                     browser_deferred_count=int(previous.get("blue_link_browser_deferred_count") or 0),
                     browser_suspended_count=int(previous.get("blue_link_browser_suspended_count") or 0),
+                    title_candidate_count=int(previous.get("blue_link_title_candidate_count") or 0),
                     master_pending_count=int(previous.get("blue_link_master_pending_count") or 0),
                 )
             raise

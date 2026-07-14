@@ -20,6 +20,57 @@ def _args() -> object:
     )
 
 
+def test_backfill_report_cli_requires_task_and_workspace() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "blue-link-backfill-report",
+            "job-1",
+            "--workspace-id",
+            "workspace-1",
+        ]
+    )
+
+    assert args.backfill_id == "job-1"
+    assert args.workspace_id == "workspace-1"
+
+
+def test_title_confirmation_cli_accepts_one_batch_decision_file(tmp_path, monkeypatch) -> None:
+    decision_file = tmp_path / "decisions.json"
+    decision_file.write_text(
+        '{"expected_scan_revision":3,"decision_batch_id":"batch-1","decisions":[{"source_link":"https://b23.tv/a","action":"reject"}]}',
+        encoding="utf-8",
+    )
+    args = cli.build_parser().parse_args(
+        [
+            "confirm-blue-link-title-candidates",
+            "job-1",
+            "--workspace-id",
+            "workspace-1",
+            "--decision-file",
+            str(decision_file),
+        ]
+    )
+    captured = {}
+    monkeypatch.setattr(
+        blue_link_backfill,
+        "confirm_blue_link_title_candidates",
+        lambda backfill_id, decisions, **kwargs: captured.update(
+            {"backfill_id": backfill_id, "decisions": decisions, **kwargs}
+        )
+        or {"status": "partial"},
+    )
+    monkeypatch.setattr(cli, "_json_out", lambda _payload: None)
+
+    cli.cmd_confirm_blue_link_title_candidates(args)
+
+    assert captured["backfill_id"] == "job-1"
+    assert captured["decisions"] == [
+        {"source_link": "https://b23.tv/a", "action": "reject"}
+    ]
+    assert captured["expected_scan_revision"] == 3
+    assert captured["decision_batch_id"] == "batch-1"
+
+
 def test_record_backfill_uses_master_snapshot_not_manual_counts(monkeypatch) -> None:
     recorded = {}
 
@@ -53,10 +104,11 @@ def test_record_backfill_uses_master_snapshot_not_manual_counts(monkeypatch) -> 
                 "aid": 123,
                 "status": "partial",
                 "matched_count": 8,
-                "unresolved_count": 4,
+                "unresolved_count": 5,
                 "browser_pending_count": 1,
                 "browser_deferred_count": 1,
                 "browser_suspended_count": 1,
+                "title_candidate_count": 1,
                 "master_data_pending_count": 1,
                 "browser_pending": [],
             }
@@ -69,8 +121,9 @@ def test_record_backfill_uses_master_snapshot_not_manual_counts(monkeypatch) -> 
     cli.cmd_record_blue_link_backfill(_args())
 
     assert recorded["matched_count"] == 8
-    assert recorded["unresolved_count"] == 4
+    assert recorded["unresolved_count"] == 5
     assert recorded["browser_suspended_count"] == 1
+    assert recorded["title_candidate_count"] == 1
     assert recorded["master_pending_count"] == 1
 
 

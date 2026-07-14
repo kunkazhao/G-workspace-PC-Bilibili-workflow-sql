@@ -228,6 +228,7 @@ class Repository:
         browser_pending_count: int = 0,
         browser_deferred_count: int = 0,
         browser_suspended_count: int = 0,
+        title_candidate_count: int = 0,
         master_pending_count: int = 0,
     ) -> dict[str, Any]:
         with self.db.connect() as conn:
@@ -238,7 +239,8 @@ class Repository:
                     blue_link_backfill_id=?, blue_link_backfill_status=?,
                     blue_link_matched_count=?, blue_link_unresolved_count=?,
                     blue_link_browser_pending_count=?, blue_link_browser_deferred_count=?,
-                    blue_link_browser_suspended_count=?, blue_link_master_pending_count=?
+                    blue_link_browser_suspended_count=?, blue_link_title_candidate_count=?,
+                    blue_link_master_pending_count=?
                 WHERE id=?
                 """,
                 (
@@ -253,6 +255,7 @@ class Repository:
                     browser_pending_count,
                     browser_deferred_count,
                     browser_suspended_count,
+                    title_candidate_count,
                     master_pending_count,
                     production_run_id,
                 ),
