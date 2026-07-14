@@ -19,6 +19,31 @@
 - 用户验收候选后，继续使用现有 `confirm-production` 创建新修订；不得直接改写旧 `production_runs`。
 - 生产命令返回 `repair_required` 时立即停止。代码修复是独立开发任务，不能在生产命令内部自动修改代码再继续渲染。
 
+## 发布后蓝链回流
+
+发布归档后，优先使用按任务闭环的一键命令，不要让操作者逐条复制 URL：
+
+```powershell
+python -m bworkflow_sql resolve-blue-link-backfill <backfill_id> --workspace-id <Master工作空间UUID> --attempts 2
+```
+
+- 命令先从 Master `GET /api/blue-link-backfills/{backfill_id}/pending` 拉取仍无商品 ID 的行，再调用本机确定性浏览器执行器，最后把成功的 `source_link + resolved_url` 自动提交给 Master。
+- `resolve-blue-links --source-link ...` 只用于不连接 Master 的单条诊断，不是日常回流入口。
+- 运行前必须启动授权的 CDP HTTP 代理并复用现有登录态 Chrome。执行器只创建和关闭自己的标签页，同时监听当前页跳转和新标签页；不得读取 Cookie、localStorage、密码或浏览器配置。
+- 淘宝券页只能点击顶部唯一主商品卡的标题或图片，禁止点击“立即领券”和“更多宝贝推荐”。主商品不唯一、最终没有标准商品 ID 或页面仍是活动专区时保持挂起。
+- 京东只接受标准商品页、官方活动页唯一数字 `mainSku`，或官方风控页中唯一的标准商品 `returnurl`；不得从任意域名的 `sku/mainSku` 参数猜商品。
+- 浏览器执行器不能指定数据库商品记录。商品库缺失、分类内重复商品 ID、现有蓝链冲突由 Master 保持挂起，不会再次交给浏览器。
+- 京东/淘宝红包只有标题和对应活动页域名同时成立时才记为 `ignored_non_product`，不写蓝链且不计入挂起。
+
+常见排障：
+
+| 现象 | 处理 |
+|---|---|
+| Master 返回的 `browser_pending` 为空 | 当前剩余项已有商品 ID，属于商品库缺失、重复 ID 或旧蓝链冲突；在 Master 处理，不要打开浏览器。 |
+| 页面出现多个候选商品 | 保持挂起并记录原因，禁止点击推荐位或凭标题猜测。 |
+| 只有部分 URL 成功 | 命令只回传成功 URL；失败项继续挂起，可以在登录态或页面恢复后重试。 |
+| Master 任务仍为 `partial` | 只有全部行进入 `matched`、`existing` 或 `ignored_non_product` 才是 `complete`。 |
+
 ## workflow-doctor 对外契约
 
 `workflow-doctor` 只输出 `BWorkflowObservation v1`，不再提供旧 raw JSON。
