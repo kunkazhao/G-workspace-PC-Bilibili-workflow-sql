@@ -577,21 +577,60 @@ def cmd_publishing_context(args: argparse.Namespace) -> None:
 
 
 def cmd_record_blue_link_backfill(args: argparse.Namespace) -> None:
+    from .blue_link_backfill import MasterBlueLinkBackfillClient
     from .production_history import ProductionHistoryService
 
     _, repo, _, _ = _init()
+    service = ProductionHistoryService(repo)
+    context = service.publishing_context(args.production_run_id)
+    snapshot = MasterBlueLinkBackfillClient(
+        workspace_id=args.workspace_id,
+        api_base_url=args.master_url,
+    ).fetch_browser_pending(args.backfill_id)
+    if str(snapshot.get("account_id") or "") != context["master_account_id"]:
+        raise ValueError("Master 回流任务账号与本地正式成片账号不一致")
+    if str(snapshot.get("scheme_id") or "") != context["scheme_id"]:
+        raise ValueError("Master 回流任务方案与本地正式成片方案不一致")
+    if str(snapshot.get("video_owner_mid") or "") != context["bilibili_mid"]:
+        raise ValueError("Master 回流任务视频作者 MID 与本地账号绑定不一致")
+    if snapshot.get("production_run_id") not in (None, "", str(args.production_run_id)):
+        raise ValueError("Master 回流任务绑定了另一条本地正式成片记录")
+    master_values = {
+        "video_url": str(snapshot.get("video_url") or ""),
+        "bvid": str(snapshot.get("bvid") or ""),
+        "aid": str(snapshot.get("aid") or ""),
+        "video_owner_mid": str(snapshot.get("video_owner_mid") or ""),
+        "status": str(snapshot.get("status") or ""),
+        "matched_count": int(snapshot.get("matched_count") or 0),
+        "unresolved_count": int(snapshot.get("unresolved_count") or 0),
+    }
+    for key, value in {
+        "video_url": args.video_url,
+        "bvid": args.bvid,
+        "aid": args.aid,
+        "video_owner_mid": args.owner_mid,
+        "status": args.status,
+        "matched_count": args.matched_count,
+        "unresolved_count": args.unresolved_count,
+    }.items():
+        if value not in (None, "") and str(value) != str(master_values[key]):
+            raise ValueError(f"命令参数 {key} 与 Master 当前结果不一致")
     _json_out(
-        ProductionHistoryService(repo).record_blue_link_backfill(
+        service.record_blue_link_backfill(
             args.production_run_id,
             pipeline_path=args.pipeline,
-            published_video_url=args.video_url,
-            bvid=args.bvid,
-            aid=args.aid,
-            video_owner_mid=args.owner_mid,
+            published_video_url=master_values["video_url"],
+            bvid=master_values["bvid"],
+            aid=master_values["aid"],
+            video_owner_mid=master_values["video_owner_mid"],
             backfill_id=args.backfill_id,
-            status=args.status,
-            matched_count=args.matched_count,
-            unresolved_count=args.unresolved_count,
+            status=master_values["status"],
+            matched_count=master_values["matched_count"],
+            unresolved_count=master_values["unresolved_count"],
+            browser_pending_count=int(snapshot.get("browser_pending_count") or 0),
+            browser_deferred_count=int(snapshot.get("browser_deferred_count") or 0),
+            browser_suspended_count=int(snapshot.get("browser_suspended_count") or 0),
+            master_pending_count=int(snapshot.get("master_data_pending_count") or 0),
         )
     )
 
@@ -612,6 +651,7 @@ def cmd_resolve_blue_links(args: argparse.Namespace) -> None:
 def cmd_resolve_blue_link_backfill(args: argparse.Namespace) -> None:
     from .blue_link_backfill import resolve_blue_link_backfill
 
+    db, _, _, _ = _init()
     _json_out(
         resolve_blue_link_backfill(
             args.backfill_id,
@@ -621,6 +661,10 @@ def cmd_resolve_blue_link_backfill(args: argparse.Namespace) -> None:
             timeout=args.timeout,
             attempts=args.attempts,
             master_timeout=args.master_timeout,
+            max_links=args.max_links,
+            jd_min_interval=args.jd_min_interval,
+            jd_cooldown_seconds=args.jd_cooldown_seconds,
+            database=db,
         )
     )
 
@@ -1022,14 +1066,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("record-blue-link-backfill", help="记录 Master 蓝链回流结果并更新 pipeline 状态")
     p.add_argument("production_run_id", type=int)
     p.add_argument("--pipeline", required=True)
-    p.add_argument("--video-url", required=True)
-    p.add_argument("--bvid", required=True)
-    p.add_argument("--aid", required=True)
-    p.add_argument("--owner-mid", required=True)
     p.add_argument("--backfill-id", required=True)
-    p.add_argument("--status", choices=["complete", "partial"], required=True)
-    p.add_argument("--matched-count", type=int, required=True)
-    p.add_argument("--unresolved-count", type=int, required=True)
+    p.add_argument("--workspace-id", required=True, help="Master workspace UUID")
+    p.add_argument("--master-url", default=DEFAULT_MASTER_API_BASE_URL)
+    p.add_argument("--video-url", default="", help="兼容校验参数；真实值以 Master 为准")
+    p.add_argument("--bvid", default="", help="兼容校验参数；真实值以 Master 为准")
+    p.add_argument("--aid", default="", help="兼容校验参数；真实值以 Master 为准")
+    p.add_argument("--owner-mid", default="", help="兼容校验参数；真实值以 Master 为准")
+    p.add_argument("--status", choices=["complete", "partial"], default=None)
+    p.add_argument("--matched-count", type=int, default=None)
+    p.add_argument("--unresolved-count", type=int, default=None)
 
     p = sub.add_parser("resolve-blue-links", help="用登录态 Chrome 确定性解析商品中转页")
     p.add_argument("--source-link", action="append", required=True, help="待解析蓝链；可重复传入")
@@ -1039,7 +1085,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="CDP HTTP 代理；默认读取 BWORKFLOW_CDP_PROXY_URL 或 127.0.0.1:3456",
     )
     p.add_argument("--timeout", type=float, default=20.0, help="每条链接等待标准商品页的秒数")
-    p.add_argument("--attempts", type=int, default=2, help="每条链接最多尝试次数")
+    p.add_argument("--attempts", type=int, default=1, help="单链接诊断尝试次数；默认 1")
 
     p = sub.add_parser(
         "resolve-blue-link-backfill",
@@ -1058,8 +1104,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="CDP HTTP 代理；默认读取 BWORKFLOW_CDP_PROXY_URL 或 127.0.0.1:3456",
     )
     p.add_argument("--timeout", type=float, default=20.0, help="每条链接等待标准商品页的秒数")
-    p.add_argument("--attempts", type=int, default=2, help="每条链接最多尝试次数")
+    p.add_argument("--attempts", type=int, default=1, help="兼容参数；批处理固定每条一次")
     p.add_argument("--master-timeout", type=float, default=30.0, help="Master API 请求超时秒数")
+    p.add_argument("--max-links", type=int, default=5, help="单次任务最多实际打开的链接数")
+    p.add_argument("--jd-min-interval", type=float, default=20.0, help="京东链接最小访问间隔秒数")
+    p.add_argument("--jd-cooldown-seconds", type=float, default=7200.0, help="京东 403 熔断时长")
 
     # assets-check
     p = sub.add_parser("assets-check", help="素材完整性检查")

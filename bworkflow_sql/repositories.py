@@ -225,6 +225,10 @@ class Repository:
         status: str,
         matched_count: int,
         unresolved_count: int,
+        browser_pending_count: int = 0,
+        browser_deferred_count: int = 0,
+        browser_suspended_count: int = 0,
+        master_pending_count: int = 0,
     ) -> dict[str, Any]:
         with self.db.connect() as conn:
             cursor = conn.execute(
@@ -232,7 +236,9 @@ class Repository:
                 UPDATE production_runs
                 SET published_video_url=?, bvid=?, aid=?, video_owner_mid=?,
                     blue_link_backfill_id=?, blue_link_backfill_status=?,
-                    blue_link_matched_count=?, blue_link_unresolved_count=?
+                    blue_link_matched_count=?, blue_link_unresolved_count=?,
+                    blue_link_browser_pending_count=?, blue_link_browser_deferred_count=?,
+                    blue_link_browser_suspended_count=?, blue_link_master_pending_count=?
                 WHERE id=?
                 """,
                 (
@@ -244,6 +250,10 @@ class Repository:
                     status,
                     matched_count,
                     unresolved_count,
+                    browser_pending_count,
+                    browser_deferred_count,
+                    browser_suspended_count,
+                    master_pending_count,
                     production_run_id,
                 ),
             )

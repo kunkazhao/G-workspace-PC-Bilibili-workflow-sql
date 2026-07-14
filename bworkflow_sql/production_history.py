@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .repositories import Repository
 from .settings import DEFAULT_PUBLISHED_VIDEO_ROOT
@@ -425,6 +427,10 @@ class ProductionHistoryService:
         status: str,
         matched_count: int,
         unresolved_count: int,
+        browser_pending_count: int = 0,
+        browser_deferred_count: int = 0,
+        browser_suspended_count: int = 0,
+        master_pending_count: int = 0,
     ) -> dict[str, Any]:
         normalized_status = safe_text(status)
         if normalized_status not in {"complete", "partial"}:
@@ -433,6 +439,14 @@ class ProductionHistoryService:
         unresolved_total = int(unresolved_count)
         if matched_total < 0 or unresolved_total < 0:
             raise ValueError("蓝链回流计数不能为负数")
+        breakdown = [
+            int(browser_pending_count),
+            int(browser_deferred_count),
+            int(browser_suspended_count),
+            int(master_pending_count),
+        ]
+        if any(value < 0 for value in breakdown) or sum(breakdown) != unresolved_total:
+            raise ValueError("Master 挂起明细之和必须等于 unresolved_count")
         if normalized_status == "complete" and unresolved_total:
             raise ValueError("仍有挂起蓝链时不能记录为 complete")
         if not all(safe_text(value) for value in (published_video_url, bvid, aid, backfill_id)):
@@ -440,17 +454,6 @@ class ProductionHistoryService:
         context = self.publishing_context(production_run_id)
         if safe_text(video_owner_mid) != context["bilibili_mid"]:
             raise ValueError("视频作者 MID 与本地账号绑定不一致")
-        stored = self.repository.record_blue_link_backfill(
-            production_run_id,
-            published_video_url=safe_text(published_video_url),
-            bvid=safe_text(bvid),
-            aid=safe_text(aid),
-            video_owner_mid=safe_text(video_owner_mid),
-            backfill_id=safe_text(backfill_id),
-            status=normalized_status,
-            matched_count=matched_total,
-            unresolved_count=unresolved_total,
-        )
         pipeline = Path(pipeline_path).expanduser().resolve()
         payload = json.loads(pipeline.read_text(encoding="utf-8-sig"))
         phases = payload.get("phases") if isinstance(payload.get("phases"), dict) else {}
@@ -462,6 +465,10 @@ class ProductionHistoryService:
             "bvid": safe_text(bvid),
             "matched_count": matched_total,
             "unresolved_count": unresolved_total,
+            "browser_pending_count": int(browser_pending_count),
+            "browser_deferred_count": int(browser_deferred_count),
+            "browser_suspended_count": int(browser_suspended_count),
+            "master_pending_count": int(master_pending_count),
         }
         payload["phases"] = phases
         if normalized_status == "complete":
@@ -469,9 +476,52 @@ class ProductionHistoryService:
             payload["next_action"] = "视频已发布，蓝链已全部回流。"
         else:
             payload["current_phase"] = "blue_link_backfill"
-            payload["next_action"] = f"已回流 {matched_count} 条，仍有 {unresolved_count} 条待浏览器补解析。"
+            payload["next_action"] = (
+                f"已回流 {matched_total} 条；浏览器可处理 {int(browser_pending_count)} 条，"
+                f"延后 {int(browser_deferred_count)} 条，安全挂起 {int(browser_suspended_count)} 条，"
+                f"Master 数据待处理 {int(master_pending_count)} 条。"
+            )
         payload["updated_at"] = now_iso()
-        pipeline.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        staged = pipeline.with_name(f".{pipeline.name}.{uuid4().hex}.tmp")
+        staged.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        previous = self.repository.production_run(production_run_id)
+        try:
+            stored = self.repository.record_blue_link_backfill(
+                production_run_id,
+                published_video_url=safe_text(published_video_url),
+                bvid=safe_text(bvid),
+                aid=safe_text(aid),
+                video_owner_mid=safe_text(video_owner_mid),
+                backfill_id=safe_text(backfill_id),
+                status=normalized_status,
+                matched_count=matched_total,
+                unresolved_count=unresolved_total,
+                browser_pending_count=int(browser_pending_count),
+                browser_deferred_count=int(browser_deferred_count),
+                browser_suspended_count=int(browser_suspended_count),
+                master_pending_count=int(master_pending_count),
+            )
+            os.replace(staged, pipeline)
+        except BaseException:
+            if staged.exists():
+                staged.unlink()
+            if previous:
+                self.repository.record_blue_link_backfill(
+                    production_run_id,
+                    published_video_url=safe_text(previous.get("published_video_url")),
+                    bvid=safe_text(previous.get("bvid")),
+                    aid=safe_text(previous.get("aid")),
+                    video_owner_mid=safe_text(previous.get("video_owner_mid")),
+                    backfill_id=safe_text(previous.get("blue_link_backfill_id")),
+                    status=safe_text(previous.get("blue_link_backfill_status")),
+                    matched_count=int(previous.get("blue_link_matched_count") or 0),
+                    unresolved_count=int(previous.get("blue_link_unresolved_count") or 0),
+                    browser_pending_count=int(previous.get("blue_link_browser_pending_count") or 0),
+                    browser_deferred_count=int(previous.get("blue_link_browser_deferred_count") or 0),
+                    browser_suspended_count=int(previous.get("blue_link_browser_suspended_count") or 0),
+                    master_pending_count=int(previous.get("blue_link_master_pending_count") or 0),
+                )
+            raise
         return {"ok": True, "production": stored, "pipeline_path": str(pipeline)}
 
 

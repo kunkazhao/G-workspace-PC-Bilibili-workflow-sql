@@ -24,11 +24,14 @@
 发布归档后，优先使用按任务闭环的一键命令，不要让操作者逐条复制 URL：
 
 ```powershell
-python -m bworkflow_sql resolve-blue-link-backfill <backfill_id> --workspace-id <Master工作空间UUID> --attempts 2
+python -m bworkflow_sql resolve-blue-link-backfill <backfill_id> --workspace-id <Master工作空间UUID> --max-links 5
 ```
 
 - 命令先从 Master `GET /api/blue-link-backfills/{backfill_id}/pending` 拉取仍无商品 ID 的行，再调用本机确定性浏览器执行器，最后把成功的 `source_link + resolved_url` 自动提交给 Master。
 - `resolve-blue-links --source-link ...` 只用于不连接 Master 的单条诊断，不是日常回流入口。
+- 批处理每条只打开一次，成功和失败都立即回写 Master；不要在同一进程里循环重试。
+- 京东默认至少间隔 20 秒；遇到 `pc-frequent-pro.pf.jd.com/?reason=403` 后本地持久熔断两小时，后续京东不再打开，淘宝任务仍可继续。
+- `record-blue-link-backfill` 需要 `--workspace-id`，状态、视频身份和四类挂起计数全部以 Master 快照为准。
 - 运行前必须启动授权的 CDP HTTP 代理并复用现有登录态 Chrome。执行器只创建和关闭自己的标签页，同时监听当前页跳转和新标签页；不得读取 Cookie、localStorage、密码或浏览器配置。
 - 淘宝券页只能点击顶部唯一主商品卡的标题或图片，禁止点击“立即领券”和“更多宝贝推荐”。主商品不唯一、最终没有标准商品 ID 或页面仍是活动专区时保持挂起。
 - 京东只接受标准商品页、官方活动页唯一数字 `mainSku`，或官方风控页中唯一的标准商品 `returnurl`；不得从任意域名的 `sku/mainSku` 参数猜商品。
@@ -41,7 +44,7 @@ python -m bworkflow_sql resolve-blue-link-backfill <backfill_id> --workspace-id 
 |---|---|
 | Master 返回的 `browser_pending` 为空 | 当前剩余项已有商品 ID，属于商品库缺失、重复 ID 或旧蓝链冲突；在 Master 处理，不要打开浏览器。 |
 | 页面出现多个候选商品 | 保持挂起并记录原因，禁止点击推荐位或凭标题猜测。 |
-| 只有部分 URL 成功 | 命令只回传成功 URL；失败项继续挂起，可以在登录态或页面恢复后重试。 |
+| 只有部分 URL 成功 | 已成功 URL 已逐条写回；失败证据也已写回。只重跑 Master 重新释放为 `browser_pending` 的行，不直接重试 `deferred/suspended`。 |
 | Master 任务仍为 `partial` | 只有全部行进入 `matched`、`existing` 或 `ignored_non_product` 才是 `complete`。 |
 
 ## workflow-doctor 对外契约

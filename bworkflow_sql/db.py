@@ -199,7 +199,11 @@ CREATE TABLE IF NOT EXISTS production_runs (
     blue_link_backfill_id TEXT NOT NULL DEFAULT '',
     blue_link_backfill_status TEXT NOT NULL DEFAULT '',
     blue_link_matched_count INTEGER NOT NULL DEFAULT 0,
-    blue_link_unresolved_count INTEGER NOT NULL DEFAULT 0
+    blue_link_unresolved_count INTEGER NOT NULL DEFAULT 0,
+    blue_link_browser_pending_count INTEGER NOT NULL DEFAULT 0,
+    blue_link_browser_deferred_count INTEGER NOT NULL DEFAULT 0,
+    blue_link_browser_suspended_count INTEGER NOT NULL DEFAULT 0,
+    blue_link_master_pending_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -208,7 +212,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 """
 
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 11
 
 CONFIRMED_MASTER_ACCOUNT_BINDINGS = {
     "小燃": ("c025960c-5560-4630-8344-509a5c6d92a5", "3546911325817533"),
@@ -306,6 +310,7 @@ class Database:
             (8, self._migrate_v8),
             (9, self._migrate_v9),
             (10, self._migrate_v10),
+            (11, self._migrate_v11),
         ]
         for version, func in migrations:
             if current < version:
@@ -411,6 +416,20 @@ class Database:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_production_runs_account_id ON production_runs(account_id)")
+
+    def _migrate_v11(self, conn: sqlite3.Connection) -> None:
+        """Persist Master-authoritative unresolved-state breakdown."""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(production_runs)").fetchall()}
+        for column in (
+            "blue_link_browser_pending_count",
+            "blue_link_browser_deferred_count",
+            "blue_link_browser_suspended_count",
+            "blue_link_master_pending_count",
+        ):
+            if column not in columns:
+                conn.execute(
+                    f"ALTER TABLE production_runs ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                )
 
     def _migrate_script_hashes(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute("SELECT id, body, text_hash FROM script_blocks").fetchall()

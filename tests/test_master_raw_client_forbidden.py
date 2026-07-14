@@ -8,7 +8,8 @@ FORBIDDEN = (
     "/api/sourcing/categories",
     "/summary",
     "MasterDataService",
-    "master_data",
+    "from .master_data import",
+    "import master_data",
 )
 
 

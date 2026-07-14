@@ -17,14 +17,25 @@ COUPON_HOST = "uland.taobao.com"
 COUPON_PATH = "/ccoupon/edetail"
 JD_ACTIVITY_HOST = "pro.m.jd.com"
 JD_RISK_HOST = "cfe.m.jd.com"
+JD_FREQUENT_RISK_HOST = "pc-frequent-pro.pf.jd.com"
+JD_LOGIN_HOST = "plogin.m.jd.com"
 TOP_TITLE_SELECTOR = ".item-info-con > a .title"
 TOP_IMAGE_SELECTOR = ".item-info-con > a .item-img"
 
 
 class BlueLinkBrowserError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        landing_url: str = "",
+        platform: str = "",
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.landing_url = str(landing_url or "").strip()
+        self.platform = str(platform or "").strip()
 
 
 def _clean(value: Any) -> str:
@@ -87,6 +98,34 @@ def _canonical_product_url(raw_url: str) -> str:
 def _is_coupon_page(raw_url: str) -> bool:
     parsed = urlparse(_clean(raw_url))
     return (parsed.hostname or "").lower() == COUPON_HOST and parsed.path == COUPON_PATH
+
+
+def _platform(raw_url: str) -> str:
+    host = (urlparse(_clean(raw_url)).hostname or "").lower()
+    if host.endswith("jd.com"):
+        return "jd"
+    if host.endswith("taobao.com") or host.endswith("tmall.com"):
+        return "tb"
+    return ""
+
+
+def _raise_known_block(raw_url: str) -> None:
+    parsed = urlparse(_clean(raw_url))
+    host = (parsed.hostname or "").lower()
+    if host == JD_FREQUENT_RISK_HOST and "403" in parse_qs(parsed.query).get("reason", []):
+        raise BlueLinkBrowserError(
+            "jd_risk_blocked",
+            "京东返回频繁访问 403 风控页",
+            landing_url=raw_url,
+            platform="jd",
+        )
+    if host == JD_LOGIN_HOST:
+        raise BlueLinkBrowserError(
+            "jd_login_required",
+            "京东要求重新登录，当前链接未到达唯一商品页",
+            landing_url=raw_url,
+            platform="jd",
+        )
 
 
 @dataclass(frozen=True)
@@ -200,6 +239,7 @@ class TaobaoCouponBrowserResolver:
                 url = _clean(self.client.info(target_id).get("url"))
                 if url:
                     last_urls.append(url)
+                    _raise_known_block(url)
                 candidate = _canonical_product_url(url)
                 if candidate:
                     candidates.append(candidate)
@@ -209,8 +249,14 @@ class TaobaoCouponBrowserResolver:
             if len(unique_urls) > 1:
                 raise BlueLinkBrowserError("ambiguous_product_landing", "点击顶部主商品后出现多个标准商品页")
             time.sleep(self.poll_interval)
-        suffix = f"；最后页面：{' | '.join(last_urls)}" if last_urls else ""
-        raise BlueLinkBrowserError("standard_product_not_reached", f"未进入含唯一商品 ID 的标准京东/淘宝/天猫商品页{suffix}")
+        last_url = last_urls[-1] if last_urls else ""
+        code = "jd_product_id_missing" if _platform(last_url) == "jd" else "standard_product_not_reached"
+        raise BlueLinkBrowserError(
+            code,
+            "最终页面没有唯一标准商品 ID",
+            landing_url=last_url,
+            platform=_platform(last_url),
+        )
 
     def _main_card_click_selector(self, target_id: str) -> str:
         expression = """(() => {
@@ -225,12 +271,12 @@ class TaobaoCouponBrowserResolver:
         state = self.client.evaluate(target_id, expression)
         if not isinstance(state, dict) or int(state.get("cards") or 0) != 1:
             count = state.get("cards") if isinstance(state, dict) else "unknown"
-            raise BlueLinkBrowserError("ambiguous_main_product", f"优惠券页顶部主商品卡数量不是 1：{count}")
+            raise BlueLinkBrowserError("tb_primary_product_ambiguous", f"优惠券页顶部主商品卡数量不是 1：{count}")
         if int(state.get("titles") or 0) == 1:
             return TOP_TITLE_SELECTOR
         if int(state.get("images") or 0) == 1:
             return TOP_IMAGE_SELECTOR
-        raise BlueLinkBrowserError("main_product_target_missing", "唯一主商品卡没有唯一可点击标题或图片")
+        raise BlueLinkBrowserError("tb_product_id_missing", "唯一主商品卡没有唯一可点击标题或图片")
 
     def resolve(self, source_link: str) -> BrowserResolution:
         source = _clean(source_link)
@@ -246,6 +292,7 @@ class TaobaoCouponBrowserResolver:
         owned.add(target_id)
         try:
             landing_url = _clean(self.client.info(target_id).get("url"))
+            _raise_known_block(landing_url)
             canonical_landing = _canonical_product_url(landing_url)
             if canonical_landing:
                 return BrowserResolution(source, canonical_landing)
@@ -257,7 +304,7 @@ class TaobaoCouponBrowserResolver:
             self.client.click(target_id, selector)
             resolved_url = self._wait_for_landing(owned)
             if not _canonical_product_url(resolved_url):
-                raise BlueLinkBrowserError("product_id_missing", "最终标准商品页没有唯一商品 ID")
+                raise BlueLinkBrowserError("tb_product_id_missing", "最终标准商品页没有唯一商品 ID")
             return BrowserResolution(source, resolved_url)
         finally:
             owned.update(self._owned_children(owned))
@@ -265,12 +312,38 @@ class TaobaoCouponBrowserResolver:
                 self.client.close(owned_target)
 
 
+def resolve_blue_link(
+    source_link: str,
+    *,
+    resolver: TaobaoCouponBrowserResolver | None = None,
+    proxy_url: str | None = None,
+    timeout: float = 20.0,
+) -> dict[str, Any]:
+    active_resolver = resolver or TaobaoCouponBrowserResolver(
+        CdpProxyClient(proxy_url), navigation_timeout=timeout
+    )
+    try:
+        return {"ok": True, "resolution": active_resolver.resolve(source_link).as_dict()}
+    except BlueLinkBrowserError as exc:
+        return {
+            "ok": False,
+            "failure": {
+                "source_link": _clean(source_link),
+                "code": exc.code,
+                "reason": str(exc),
+                "landing_url": exc.landing_url,
+                "platform": exc.platform,
+                "attempts": 1,
+            },
+        }
+
+
 def resolve_blue_links(
     source_links: Iterable[str],
     *,
     proxy_url: str | None = None,
     timeout: float = 20.0,
-    attempts: int = 2,
+    attempts: int = 1,
     retry_delay: float = 1.0,
 ) -> dict[str, Any]:
     resolver = TaobaoCouponBrowserResolver(
@@ -280,26 +353,22 @@ def resolve_blue_links(
     resolutions: list[dict[str, str]] = []
     unresolved: list[dict[str, Any]] = []
     for source_link in source_links:
-        last_error: BlueLinkBrowserError | None = None
+        outcome: dict[str, Any] = {}
         for attempt in range(max(1, attempts)):
-            try:
-                resolutions.append(resolver.resolve(source_link).as_dict())
-                last_error = None
+            outcome = resolve_blue_link(source_link, resolver=resolver)
+            if outcome["ok"]:
                 break
-            except BlueLinkBrowserError as exc:
-                last_error = exc
-                if attempt + 1 < max(1, attempts) and retry_delay > 0:
-                    time.sleep(retry_delay)
-        if last_error is not None:
-            unresolved.append(
-                {
-                    "source_link": _clean(source_link),
-                    "status": "suspended",
-                    "code": last_error.code,
-                    "reason": str(last_error),
-                    "attempts": max(1, attempts),
-                }
-            )
+            code = _clean(outcome["failure"].get("code"))
+            if code in {"jd_risk_blocked", "jd_login_required"}:
+                break
+            if attempt + 1 < max(1, attempts) and retry_delay > 0:
+                time.sleep(retry_delay)
+        if outcome.get("ok"):
+            resolutions.append(outcome["resolution"])
+        else:
+            failure = dict(outcome["failure"])
+            failure["attempts"] = attempt + 1
+            unresolved.append(failure)
     return {
         "ok": not unresolved,
         "status": "complete" if not unresolved else "partial",

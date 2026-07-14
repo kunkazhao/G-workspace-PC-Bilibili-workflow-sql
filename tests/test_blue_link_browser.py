@@ -123,7 +123,7 @@ def test_coupon_resolver_suspends_when_main_product_is_not_unique(cards: int) ->
     with pytest.raises(BlueLinkBrowserError) as exc_info:
         resolver.resolve("https://b23.tv/mall-example")
 
-    assert exc_info.value.code == "ambiguous_main_product"
+    assert exc_info.value.code == "tb_primary_product_ambiguous"
     assert proxy.clicked == []
     assert proxy.closed == ["root"]
 
@@ -208,7 +208,7 @@ def test_batch_keeps_successes_and_suspends_only_failed_links(monkeypatch) -> No
         "resolved_url": "https://detail.tmall.com/item.htm?id=123456",
     }]
     assert result["unresolved"][0]["code"] == "ambiguous_main_product"
-    assert result["unresolved"][0]["attempts"] == 2
+    assert result["unresolved"][0]["attempts"] == 1
 
 
 def test_batch_retries_transient_browser_failure(monkeypatch) -> None:
@@ -234,3 +234,32 @@ def test_batch_retries_transient_browser_failure(monkeypatch) -> None:
     assert result["status"] == "complete"
     assert result["resolutions"][0]["resolved_url"] == "https://item.jd.com/123456.html"
     assert FakeRetryResolver.calls == 2
+
+
+def test_jd_403_is_classified_immediately_and_never_retried(monkeypatch) -> None:
+    class RiskResolver:
+        calls = 0
+
+        def __init__(self, _client, *, navigation_timeout: float) -> None:
+            pass
+
+        def resolve(self, _source_link: str) -> BrowserResolution:
+            self.__class__.calls += 1
+            raise BlueLinkBrowserError(
+                "jd_risk_blocked",
+                "403",
+                landing_url="https://pc-frequent-pro.pf.jd.com/?reason=403",
+                platform="jd",
+            )
+
+    monkeypatch.setattr(blue_link_browser, "CdpProxyClient", lambda _url: object())
+    monkeypatch.setattr(blue_link_browser, "TaobaoCouponBrowserResolver", RiskResolver)
+
+    result = blue_link_browser.resolve_blue_links(
+        ["https://b23.tv/risk"], attempts=3, retry_delay=0
+    )
+
+    assert result["unresolved"][0]["code"] == "jd_risk_blocked"
+    assert result["unresolved"][0]["landing_url"].endswith("reason=403")
+    assert result["unresolved"][0]["attempts"] == 1
+    assert RiskResolver.calls == 1
