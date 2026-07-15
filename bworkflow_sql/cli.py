@@ -499,6 +499,7 @@ def cmd_scaffold(args: argparse.Namespace) -> None:
 
 
 def cmd_confirm_production(args: argparse.Namespace) -> None:
+    from .artifact_approvals import write_production_confirmation
     from .production_history import ProductionHistoryService
 
     _, repo, _, _ = _init()
@@ -509,23 +510,29 @@ def cmd_confirm_production(args: argparse.Namespace) -> None:
     )
     if args.pipeline:
         pipeline_path = Path(args.pipeline).expanduser().resolve()
-        payload = json.loads(pipeline_path.read_text(encoding="utf-8-sig"))
-        payload["production_confirmation"] = {
-            "status": "confirmed",
-            "production_run_id": result["production"]["id"],
-            "run_manifest_path": result["production"]["run_manifest_path"],
-            "confirmed_at": result["production"]["confirmed_at"],
-        }
-        phases = payload.get("phases") if isinstance(payload.get("phases"), dict) else {}
-        assembly = phases.get("assembly") if isinstance(phases.get("assembly"), dict) else {}
-        pending = assembly.get("pending_candidate") if isinstance(assembly.get("pending_candidate"), dict) else {}
-        if str(pending.get("run_manifest_path") or "") == result["production"]["run_manifest_path"]:
-            assembly.pop("pending_candidate", None)
-            phases["assembly"] = assembly
-            payload["phases"] = phases
-        pipeline_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_production_confirmation(pipeline_path, result["production"])
         result["pipeline_path"] = str(pipeline_path)
     _json_out(result)
+
+
+def cmd_confirm_intro_video(args: argparse.Namespace) -> None:
+    from .artifact_approvals import confirm_intro_video, sha256_file
+    from .utils import now_iso
+
+    source_revision = ""
+    if args.source_plan:
+        source_plan = Path(args.source_plan).expanduser().resolve()
+        if not source_plan.is_file():
+            raise ValueError(f"引言 source plan 不存在: {source_plan}")
+        source_revision = sha256_file(source_plan)
+    approval = confirm_intro_video(
+        args.pipeline,
+        args.intro_video,
+        approved_at=now_iso(),
+        source_revision=source_revision,
+        source_plan_path=source_plan if args.source_plan else None,
+    )
+    _json_out({"ok": True, "pipeline_path": str(Path(args.pipeline).resolve()), "approval": approval})
 
 
 def cmd_production_history(args: argparse.Namespace) -> None:
@@ -1081,6 +1088,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--final-path", default="", help="显式确认后续剪辑导出的最终发布版 MP4；模板与生成来源仍取 run manifest")
     p.add_argument("--pipeline", default="", help="可选 .pipeline.json；写入正式确认凭证")
 
+    p = sub.add_parser("confirm-intro-video", help="将用户验收的引言 MP4 绑定到哈希确认凭证")
+    p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json")
+    p.add_argument("--intro-video", required=True, help="已验收引言 MP4 路径")
+    p.add_argument("--source-plan", default="", help="可选 source-intro-plan JSON；写入来源版本哈希")
+
     p = sub.add_parser("production-history", help="查询正式成片模板历史与未使用模板推荐")
     p.add_argument("project_id", type=int)
     p.add_argument("--account", required=True)
@@ -1412,6 +1424,7 @@ DISPATCH = {
     "render-intro-video": cmd_render_intro_video,
     "scaffold": cmd_scaffold,
     "confirm-production": cmd_confirm_production,
+    "confirm-intro-video": cmd_confirm_intro_video,
     "production-history": cmd_production_history,
     "rerender-production-preflight": cmd_rerender_production_preflight,
     "rerender-production": cmd_rerender_production,

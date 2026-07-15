@@ -14,6 +14,17 @@ The project treats SQLite as the local source of truth:
 - `production_runs` contains only user-confirmed complete MP4 productions;
   run manifests alone are generation evidence and tests do not count.
 
+## Bound Artifact Confirmation
+
+```powershell
+python -m bworkflow_sql confirm-intro-video --pipeline <.pipeline.json> --intro-video <intro.mp4> --source-plan <source-intro-plan.json>
+python -m bworkflow_sql confirm-production <project_id> --run-manifest <run-manifest.json> --pipeline <.pipeline.json>
+```
+
+These commands keep legacy phase fields and also write hash-bound approval
+evidence plus a stable `episode_id`. Replacing an approved file invalidates the
+bound approval in TotalControl.
+
 ## Run
 
 Install the UI theme dependency first:

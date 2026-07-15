@@ -1,5 +1,12 @@
 # B-Workflow SQL 运维手册
 
+## 按产物身份确认
+
+不要通过手工修改 `status` 验收引言。用户确认后运行
+`confirm-intro-video`，原子记录路径、SHA-256、大小、source plan 版本和确认时间。
+完整成片继续使用 `confirm-production`；传入 `--final-path` 时，哈希绑定的是实际
+确认的后期剪辑版。文件内容变化后 TotalControl 会要求重新确认。
+
 ## 媒体工作区与正式成片履历
 
 - 新建项目自动建立所有启用账号的配音目录、实际配置模板的商品图目录、品类 Roll-B 目录和引言展示视频目录。
