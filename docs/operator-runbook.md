@@ -61,6 +61,12 @@ python -m bworkflow_sql resolve-blue-link-backfill <backfill_id> --workspace-id 
 - 命令先调用 Master 标题候选接口，再原子领取既无商品 ID、也无待确认标题候选的浏览器行；成功和失败回传都携带当前扫描版本与租约令牌。
 - `resolve-blue-links --source-link ...` 只用于不连接 Master 的单条诊断，不是日常回流入口。
 - 报告读取 Master 已持久化的完整 `unresolved_items`，并按失败类型返回 `unresolved_groups`；面向用户汇报时必须逐组说明数量和原因，并把该组 `sample_links` 中最多三条源链接写成可点击链接。不得只报数量而不给链接。
+- 标题决定按单个回流任务整批事务提交。若返回
+  `409 stored_slot_conflict:<source_link>`，说明该批一条也没写入；重新读取
+  Master 报告，保留已有槽位，排除冲突决定，并用新的稳定
+  `decision_batch_id` 提交其余安全项。禁止修改决定内容后复用旧批次 ID。
+- 模糊候选最高分并列时不能按列表顺序猜选。用户笼统确认整张清单也不能确定
+  具体 UID；该行继续挂起，其他唯一最高分或单候选行仍可整批提交。
 - 批处理每条只打开一次，成功和失败都立即回写 Master；不要在同一进程里循环重试。
 - 京东默认至少间隔 20 秒；遇到 `pc-frequent-pro.pf.jd.com/?reason=403` 后本地持久熔断两小时，后续京东不再打开，淘宝任务仍可继续。
 - `record-blue-link-backfill` 需要 `--workspace-id`，状态、视频身份和四类挂起计数全部以 Master 快照为准。

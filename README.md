@@ -146,13 +146,18 @@ persisted unresolved items plus `unresolved_groups`; every group includes its
 count, reason, and up to three source links for direct user verification. The
 same report is included in the scheduler's final Master snapshot.
 After the user reviews the complete candidate batch, write one decision JSON
-with `expected_scan_revision`, a stable `decision_batch_id`, and `decisions`, then run
-containing `confirm` selections and `reject` rows and submit it through
+with `expected_scan_revision`, a stable `decision_batch_id`, and `decisions`
+containing `confirm` selections and `reject` rows, then submit it through
 `confirm-blue-link-title-candidates`. Master validates every selected product
 against the persisted candidate set and current category before committing the
 whole batch atomically; replaying the same batch ID is safe. Rerun
 `resolve-blue-link-backfill` after rejections so only those rejected/no-candidate
 rows continue to the deterministic browser fallback.
+If Master returns `stored_slot_conflict`, that whole job batch was rolled
+back. Refetch the report, preserve the existing slot, remove the conflicting
+decision, and submit the safe remainder with a new batch ID. Never change a
+decision file and reuse its old ID. Equal highest-scoring candidates remain
+pending until the user chooses one exact UID.
 Set
 `BWORKFLOW_CDP_PROXY_URL` to override the default `http://127.0.0.1:3456`.
 
