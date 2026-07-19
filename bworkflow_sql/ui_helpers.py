@@ -33,7 +33,7 @@ from .sync_service import AUDIO_SUFFIXES
 from .template_config import image_set_for_template
 from .utils import compact_path, safe_text, text_hash
 
-DEFAULT_SPOKEN_MONTH_PREFIX = "7月"
+DEFAULT_SPOKEN_MONTH_PREFIX = f"{datetime.now().month}月"
 
 
 @dataclass

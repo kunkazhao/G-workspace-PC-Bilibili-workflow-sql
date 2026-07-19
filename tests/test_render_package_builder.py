@@ -1221,7 +1221,7 @@ def test_build_package_passes_rongrong_2_video_overlay_slot_to_cutme():
 
     assert product_card is not None
     assert product_card["templateId"] == "muban-rongrong-2"
-    assert product_card["coverMediaSlot"]["height"] == 232
+    assert product_card["coverMediaSlot"]["height"] == 340
     assert product_card["videoOverlaySlot"]["height"] == 260
 
 
@@ -1385,6 +1385,26 @@ def test_remote_cover_cache_path_changes_when_url_changes_but_suffix_does_not(
     assert new_path.name.startswith("ZMYX005-")
     assert old_path.suffix == ".jpg"
     assert new_path.suffix == ".jpg"
+
+
+def test_remote_cover_cache_uses_detected_webp_suffix_when_url_ends_with_jpg(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", tmp_path / "cover-cache")
+    webp_bytes = b"RIFF\x08\x00\x00\x00WEBPVP8 "
+    monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: webp_bytes)
+
+    cover_path = builder._ensure_remote_cover_cached(
+        "https://img.example.com/covers/P001.jpg",
+        category="keyboard",
+        uid="P001",
+    )
+
+    assert cover_path.suffix == ".webp"
+    assert cover_path.read_bytes() == webp_bytes
 
 
 def test_build_product_recommendation_package_reports_missing_required_assets(

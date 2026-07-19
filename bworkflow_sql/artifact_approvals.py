@@ -120,6 +120,62 @@ def confirm_intro_video(
     return approval
 
 
+def resolve_approved_intro_video(
+    pipeline_path: str | Path,
+    *,
+    intro_video_path: str | Path | None = None,
+    source_plan_path: str | Path | None = None,
+) -> tuple[Path, Path | None]:
+    """Resolve and verify the exact intro artifact approved by the pipeline."""
+    pipeline = Path(pipeline_path).expanduser().resolve()
+    payload = json.loads(pipeline.read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict):
+        raise ValueError("pipeline must contain a JSON object")
+    approvals = payload.get("artifact_approvals")
+    approval = approvals.get("intro_video") if isinstance(approvals, dict) else None
+    if not isinstance(approval, dict):
+        raise ValueError("formal final-video generation requires an approved intro_video artifact")
+
+    approved_path = Path(str(approval.get("path") or "")).expanduser().resolve()
+    if not approved_path.is_file():
+        raise FileNotFoundError(f"approved intro video does not exist: {approved_path}")
+    if str(approval.get("artifact_type") or "") != "intro_video":
+        raise ValueError("pipeline intro approval has the wrong artifact_type")
+    expected_size = int(approval.get("size") or 0)
+    if expected_size <= 0 or approved_path.stat().st_size != expected_size:
+        raise ValueError("approved intro video size has changed; confirm it again before rendering")
+    expected_hash = str(approval.get("sha256") or "")
+    if not expected_hash or sha256_file(approved_path) != expected_hash:
+        raise ValueError("approved intro video hash has changed; confirm it again before rendering")
+
+    if intro_video_path is not None:
+        explicit = Path(intro_video_path).expanduser().resolve()
+        if explicit != approved_path:
+            raise ValueError("explicit intro video does not match the pipeline-approved artifact")
+
+    paths = payload.get("paths") if isinstance(payload.get("paths"), dict) else {}
+    phases = payload.get("phases") if isinstance(payload.get("phases"), dict) else {}
+    intro_phase = phases.get("intro_video") if isinstance(phases.get("intro_video"), dict) else {}
+    recorded_plan = str(
+        intro_phase.get("source_intro_plan_path")
+        or paths.get("source_intro_plan")
+        or ""
+    ).strip()
+    approved_plan = Path(recorded_plan).expanduser().resolve() if recorded_plan else None
+    if source_plan_path is not None:
+        explicit_plan = Path(source_plan_path).expanduser().resolve()
+        if approved_plan is not None and explicit_plan != approved_plan:
+            raise ValueError("explicit intro source plan does not match the pipeline-approved source plan")
+        approved_plan = explicit_plan
+    source_revision = str(approval.get("source_revision") or "")
+    if source_revision:
+        if approved_plan is None or not approved_plan.is_file():
+            raise ValueError("approved intro source plan is missing")
+        if sha256_file(approved_plan) != source_revision:
+            raise ValueError("approved intro source plan has changed; confirm the intro again before rendering")
+    return approved_path, approved_plan
+
+
 def write_production_confirmation(
     pipeline_path: str | Path,
     production: dict[str, Any],

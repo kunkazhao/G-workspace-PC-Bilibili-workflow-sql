@@ -22,6 +22,7 @@ from .utils import now_iso, safe_text
 from .production_recipe import sha256_file, validate_production_recipe
 from .cutme_adapter import CutMeAdapter
 from .settings import INTERNAL_WORKSPACE_ROOT
+from .final_spoken_script import validate_spoken_script_evidence
 
 
 def _sha256(path: Path) -> str:
@@ -72,6 +73,8 @@ class ProductionHistoryService:
             raise ValueError("运行清单缺少账号或商品卡模板")
         if safe_text(selection.get("acceptance_mode")) == "none":
             raise ValueError("未执行验收的 MP4 不能确认为正式成片")
+        if safe_text(payload.get("schemaVersion")) >= "1.1.0":
+            validate_spoken_script_evidence(payload)
         local_account = self.repository.account_by_label(account)
         reports = payload.get("reports") if isinstance(payload.get("reports"), dict) else {}
         verification = reports.get("verification") if isinstance(reports.get("verification"), dict) else {}

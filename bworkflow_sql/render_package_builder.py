@@ -1272,12 +1272,23 @@ def _is_remote_url(value: str) -> bool:
 def _ensure_remote_cover_cached(url: str, *, category: str, uid: str) -> Path:
     target = _cover_cache_path(category=category, uid=uid, url=url)
     if target.is_file():
+        data = target.read_bytes()
+        detected_suffix = _image_suffix_from_bytes(data)
+        if detected_suffix and detected_suffix != target.suffix.lower():
+            corrected_target = target.with_suffix(detected_suffix)
+            if not corrected_target.is_file() or corrected_target.read_bytes() != data:
+                corrected_target.write_bytes(data)
+            return corrected_target
         return target
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        target.write_bytes(_download_url_bytes(url))
+        data = _download_url_bytes(url)
     except Exception as exc:  # pragma: no cover - exercised through caller behavior.
         raise ValueError(f"failed to download product cover for {uid}: {url}: {exc}") from exc
+    detected_suffix = _image_suffix_from_bytes(data)
+    if detected_suffix and detected_suffix != target.suffix.lower():
+        target = target.with_suffix(detected_suffix)
+    target.write_bytes(data)
     return target
 
 
@@ -1297,6 +1308,16 @@ def _cover_cache_path(*, category: str, uid: str, url: str) -> Path:
 def _download_url_bytes(url: str) -> bytes:
     with urllib.request.urlopen(url, timeout=30) as response:
         return response.read()
+
+
+def _image_suffix_from_bytes(data: bytes) -> str:
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    return ""
 
 
 def _safe_path_component(value: str) -> str:

@@ -13,6 +13,8 @@
   python -m bworkflow_sql product-images 3 --account 小博 --mode stale --product-uid P001
   python -m bworkflow_sql product-images 3 --account 小博 --mode missing
   python -m bworkflow_sql template-calibrate 3 --account 小燃 --product-uid R001
+  python -m bworkflow_sql copy-lint 3
+  python -m bworkflow_sql copy-audit 3 --voice-profile zhaoer
   python -m bworkflow_sql render-final-video 3 --account 小燃 --product-media-mode video_preferred
 
 所有命令输出 JSON 到 stdout，错误输出 JSON 到 stderr。
@@ -31,6 +33,11 @@ from typing import Any
 from .cutme_intro import preflight_intro_plan_for_cutme
 from .cutme_adapter import CutMeAdapterError
 from .public_contracts import build_workflow_observation, build_workflow_observation_error
+from .phase7_selection import (
+    Phase7SelectionError,
+    confirm_phase7_selection,
+    validated_phase7_selection,
+)
 from .settings import DEFAULT_INTRO_ASSET_ROOT, DEFAULT_MASTER_API_BASE_URL
 from .tts_helpers import VOICE_PROVIDER_INDEXTTS, VOICE_PROVIDER_MINIMAX
 from .workflow_errors import (
@@ -535,11 +542,72 @@ def cmd_confirm_intro_video(args: argparse.Namespace) -> None:
     _json_out({"ok": True, "pipeline_path": str(Path(args.pipeline).resolve()), "approval": approval})
 
 
+def cmd_materialize_final_script(args: argparse.Namespace) -> None:
+    from .final_spoken_script import backfill_final_spoken_script
+
+    _, repo, _, _ = _init()
+    _json_out(
+        backfill_final_spoken_script(
+            repo,
+            run_manifest_path=args.run_manifest,
+            pipeline_path=args.pipeline or None,
+        )
+    )
+
+
 def cmd_production_history(args: argparse.Namespace) -> None:
     from .production_history import ProductionHistoryService
 
     _, repo, _, _ = _init()
     _json_out(ProductionHistoryService(repo).history(args.project_id, account_label=args.account))
+
+
+def cmd_cover_context(args: argparse.Namespace) -> None:
+    from .cover_workflow import cover_context
+
+    _json_out(cover_context(args.pipeline))
+
+
+def cmd_record_cover_copy_options(args: argparse.Namespace) -> None:
+    from .cover_workflow import record_cover_copy_options
+
+    _json_out(record_cover_copy_options(args.pipeline, options_file=args.options_file))
+
+
+def cmd_confirm_cover_copy(args: argparse.Namespace) -> None:
+    from .cover_workflow import confirm_cover_copy
+
+    _json_out(confirm_cover_copy(args.pipeline, index=args.index))
+
+
+def cmd_prepare_cover_generation(args: argparse.Namespace) -> None:
+    from .cover_workflow import prepare_cover_generation
+
+    _json_out(prepare_cover_generation(args.pipeline))
+
+
+def cmd_record_cover_image(args: argparse.Namespace) -> None:
+    from .cover_workflow import record_cover_image
+
+    _json_out(
+        record_cover_image(
+            args.pipeline,
+            cover_package_path=args.cover_package,
+            image_path=args.image,
+        )
+    )
+
+
+def cmd_confirm_cover_image(args: argparse.Namespace) -> None:
+    from .cover_workflow import confirm_cover_image
+
+    _json_out(confirm_cover_image(args.pipeline))
+
+
+def cmd_reject_cover_image(args: argparse.Namespace) -> None:
+    from .cover_workflow import reject_cover_image
+
+    _json_out(reject_cover_image(args.pipeline, reason=args.reason))
 
 
 def cmd_rerender_production_preflight(args: argparse.Namespace) -> None:
@@ -766,6 +834,16 @@ def cmd_assets_check(args: argparse.Namespace) -> None:
 # ── parser ────────────────────────────────────────────────────────────
 
 def cmd_render_package(args: argparse.Namespace) -> None:
+    validated_phase7_selection(
+        args.pipeline,
+        required_output=args.output_mode,
+        account=args.account,
+        product_card_template_id=args.product_card_template_id,
+        product_media_mode=args.product_media_mode,
+        product_order_strategy=args.product_order_strategy,
+        mode=args.mode,
+        top_uids=args.top_uids,
+    )
     _, _, _, wf = _init()
     result = wf.prepare_product_recommendation_output(
         project_id=args.project_id,
@@ -861,6 +939,26 @@ def cmd_script_doctor(args: argparse.Namespace) -> None:
     _json_out(result)
 
 
+def cmd_copy_lint(args: argparse.Namespace) -> None:
+    from .product_copy_lint import diagnose_product_copy_lint
+
+    db, _, _, _ = _init()
+    _json_out(diagnose_product_copy_lint(db, project_id=args.project_id))
+
+
+def cmd_copy_audit(args: argparse.Namespace) -> None:
+    from .product_copy_audit import diagnose_product_copy_audit
+
+    db, _, _, _ = _init()
+    _json_out(
+        diagnose_product_copy_audit(
+            db,
+            project_id=args.project_id,
+            voice_profile=args.voice_profile,
+        )
+    )
+
+
 def cmd_workflow_doctor(args: argparse.Namespace) -> None:
     exit_code = 0
     try:
@@ -945,6 +1043,20 @@ def cmd_render_final_video(args: argparse.Namespace) -> None:
         pipeline_path=getattr(args, "pipeline", "") or None,
         acceptance_mode=args.acceptance_mode,
         subtitle_alignment=getattr(args, "subtitle_alignment", "asr"),
+    )
+    _json_out(result)
+
+
+def cmd_confirm_phase7_selection(args: argparse.Namespace) -> None:
+    result = confirm_phase7_selection(
+        args.pipeline,
+        output_branch=args.output_branch,
+        account=args.account,
+        product_card_template_id=args.product_card_template_id,
+        product_media_mode=args.product_media_mode,
+        product_order_strategy=args.product_order_strategy,
+        mode=args.mode,
+        top_uids=args.top_uids,
     )
     _json_out(result)
 
@@ -1076,6 +1188,36 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--asset-root", default=str(DEFAULT_INTRO_ASSET_ROOT), help="intro material root")
     p.add_argument("--pipeline", default="", help=".pipeline.json path; creates/reuses its project delivery directory")
 
+    p = sub.add_parser("materialize-final-script", help="从最终 RenderPackage 生成并绑定成片完整口播稿")
+    p.add_argument("--run-manifest", required=True, help="final-video run manifest 路径")
+    p.add_argument("--pipeline", default="", help="可选 .pipeline.json；同步写入完整稿证据")
+
+    p = sub.add_parser("cover-context", help="Read confirmed production and final spoken script for cover-copy generation")
+    p.add_argument("--pipeline", required=True)
+
+    p = sub.add_parser("record-cover-copy-options", help="Persist exactly five AI-generated cover-copy options")
+    p.add_argument("--pipeline", required=True)
+    p.add_argument("--options-file", required=True, help="UTF-8 JSON array or object containing options")
+
+    p = sub.add_parser("confirm-cover-copy", help="Confirm one cover-copy option")
+    p.add_argument("--pipeline", required=True)
+    p.add_argument("--index", required=True, type=int, help="1-based option index")
+
+    p = sub.add_parser("prepare-cover-generation", help="Freeze portrait, account style, and model-native cover prompt")
+    p.add_argument("--pipeline", required=True)
+
+    p = sub.add_parser("record-cover-image", help="Record the single generated 4:3 cover candidate")
+    p.add_argument("--pipeline", required=True)
+    p.add_argument("--cover-package", required=True)
+    p.add_argument("--image", required=True)
+
+    p = sub.add_parser("confirm-cover-image", help="Accept the cover image and release publishing preparation")
+    p.add_argument("--pipeline", required=True)
+
+    p = sub.add_parser("reject-cover-image", help="Reject the current cover candidate and regenerate")
+    p.add_argument("--pipeline", required=True)
+    p.add_argument("--reason", required=True)
+
     # scaffold
     p = sub.add_parser("scaffold", help="建立或修复完整媒体工作区")
     p.add_argument("project_id", type=int)
@@ -1092,6 +1234,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json")
     p.add_argument("--intro-video", required=True, help="已验收引言 MP4 路径")
     p.add_argument("--source-plan", default="", help="可选 source-intro-plan JSON；写入来源版本哈希")
+
+    p = sub.add_parser("confirm-phase7-selection", help="记录用户明确确认的阶段 7 输出、媒体、排序和模板选择")
+    p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json")
+    p.add_argument("--output-branch", choices=["jianying_draft", "final_mp4", "both"], required=True)
+    p.add_argument("--account", required=True)
+    p.add_argument("--product-card-template-id", required=True)
+    p.add_argument("--product-media-mode", choices=["cover_only", "video_preferred"], required=True)
+    p.add_argument(
+        "--product-order-strategy",
+        choices=["price_segment_shuffle", "stable"],
+        default="price_segment_shuffle",
+    )
+    p.add_argument("--mode", choices=["standard", "top"], default="standard")
+    p.add_argument("--top-uids", default="", help="top 模式商品 UID，逗号分隔")
 
     p = sub.add_parser("production-history", help="查询正式成片模板历史与未使用模板推荐")
     p.add_argument("project_id", type=int)
@@ -1188,6 +1344,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("render-package", help="Generate Remotion RenderPackage")
     p.add_argument("project_id", type=int)
     p.add_argument("--account", required=True)
+    p.add_argument("--pipeline", required=True, help="包含用户阶段 7 选择确认的 .pipeline.json")
     p.add_argument(
         "--output-mode",
         choices=["jianying_draft", "final_mp4"],
@@ -1196,7 +1353,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--product-media-mode",
         choices=["cover_only", "video_preferred"],
-        default="video_preferred",
+        required=True,
         help="product display media: cover_only uses only the cover image; video_preferred uses product video when available",
     )
     p.add_argument(
@@ -1220,8 +1377,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top-uids", default="", help="top mode product UIDs, comma separated")
     p.add_argument(
         "--product-card-template-id",
-        default="",
-        help="Remotion-first product-card template id or display name; defaults to the account template",
+        required=True,
+        help="explicitly confirmed Remotion-first product-card template id or display name",
     )
     p.add_argument(
         "--subtitle-alignment",
@@ -1237,7 +1394,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--product-media-mode",
         choices=["cover_only", "video_preferred"],
-        default="video_preferred",
+        required=True,
         help="cover_only uses only the cover image; video_preferred uses product video when available",
     )
     p.add_argument(
@@ -1267,8 +1424,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top-uids", default="", help="top mode product UIDs, comma separated")
     p.add_argument(
         "--product-card-template-id",
-        default="",
-        help="Remotion-first product-card template id or display name; defaults to the account template",
+        required=True,
+        help="explicitly confirmed Remotion-first product-card template id or display name",
     )
     p.add_argument("--package-output", help="render-package.json output path")
     p.add_argument("--output", "-o", help="final mp4 output path")
@@ -1282,7 +1439,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--intro-video-text-file", default="", help="UTF-8 intro text file for the final video's unified subtitles")
     p.add_argument("--intro-video-source-plan", default="", help="source-intro-plan JSON; preferred for intro subtitle scene splitting")
     p.add_argument("--full-output", help="full MP4 output path when --intro-video is provided")
-    p.add_argument("--pipeline", default="", help="optional .pipeline.json path to record the latest final MP4 run")
+    p.add_argument("--pipeline", required=True, help=".pipeline.json with an explicit user-confirmed phase 7 selection")
     p.add_argument(
         "--subtitle-alignment",
         choices=["proportional", "asr"],
@@ -1308,7 +1465,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--product-uid", default="", help="只重生成指定商品 UID 的商品图")
     p.add_argument(
         "--product-card-template-id",
-        default="",
+        required=True,
         help="Remotion-first product-card template id or display name; required for still/product-image generation",
     )
 
@@ -1374,6 +1531,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="media mode to diagnose; video_preferred checks video-slot readiness",
     )
 
+    p = sub.add_parser("copy-lint", help="Check product narration for internal labels and research-process wording")
+    p.add_argument("project_id", type=int)
+
+    p = sub.add_parser("copy-audit", help="Report non-blocking product-copy voice and document-structure warnings")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--voice-profile", default="zhaoer", help="soft-audit voice profile id")
+
     p = sub.add_parser("script-doctor", help="Diagnose phase-3 copy units, intro plan matching, and script_blocks sync")
     p.add_argument("project_id", type=int)
     p.add_argument("--intro-label", default="", help="selected intro version label, for example 引言1")
@@ -1425,6 +1589,15 @@ DISPATCH = {
     "scaffold": cmd_scaffold,
     "confirm-production": cmd_confirm_production,
     "confirm-intro-video": cmd_confirm_intro_video,
+    "materialize-final-script": cmd_materialize_final_script,
+    "cover-context": cmd_cover_context,
+    "record-cover-copy-options": cmd_record_cover_copy_options,
+    "confirm-cover-copy": cmd_confirm_cover_copy,
+    "prepare-cover-generation": cmd_prepare_cover_generation,
+    "record-cover-image": cmd_record_cover_image,
+    "confirm-cover-image": cmd_confirm_cover_image,
+    "reject-cover-image": cmd_reject_cover_image,
+    "confirm-phase7-selection": cmd_confirm_phase7_selection,
     "production-history": cmd_production_history,
     "rerender-production-preflight": cmd_rerender_production_preflight,
     "rerender-production": cmd_rerender_production,
@@ -1443,6 +1616,8 @@ DISPATCH = {
     "template-calibrate": cmd_template_calibrate,
     "template-calibrate-runner": cmd_template_calibrate_runner,
     "template-doctor": cmd_template_doctor,
+    "copy-lint": cmd_copy_lint,
+    "copy-audit": cmd_copy_audit,
     "script-doctor": cmd_script_doctor,
     "workflow-doctor": cmd_workflow_doctor,
     "materialize-episode": cmd_materialize_episode,
@@ -1464,6 +1639,19 @@ def main() -> None:
 
     try:
         DISPATCH[args.command](args)
+    except Phase7SelectionError as exc:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "status": "blocked",
+                    "error": {"code": exc.code, "message": str(exc), "retryable": False},
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
     except (ValueError, FileNotFoundError) as exc:
         _json_err(str(exc))
     except CutMeAdapterError as exc:

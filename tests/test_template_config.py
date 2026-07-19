@@ -1,3 +1,8 @@
+import hashlib
+import json
+from pathlib import Path
+
+import bworkflow_sql.template_config as template_config
 from bworkflow_sql.template_config import (
     available_templates,
     display_video_slot_for_product_card_template_id,
@@ -6,9 +11,67 @@ from bworkflow_sql.template_config import (
     get_template_slot,
     get_remotion_template_metadata,
     image_set_for_template,
+    product_card_text_capacity_certification_issues,
     resolve_product_card_template,
     user_for_template,
 )
+
+
+def _sha256(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_text_capacity_certification_is_hash_bound(tmp_path, monkeypatch) -> None:
+    renderer_root = tmp_path / "remotion-renderer"
+    source = renderer_root / "src" / "components" / "product-card.tsx"
+    source.parent.mkdir(parents=True)
+    source.write_text("export const Card = () => null;\n", encoding="utf-8")
+    supporting_source = source.parent / "MeasuredFitText.tsx"
+    supporting_source.write_text("export const Fit = () => null;\n", encoding="utf-8")
+    baseline = renderer_root / "product-card-text-capacity-baseline.json"
+    baseline.write_text(json.dumps({"schemaVersion": 1}), encoding="utf-8")
+    metadata_path = renderer_root / "product-card-templates.json"
+    metadata_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(template_config, "REMOTION_TEMPLATE_METADATA_PATH", metadata_path)
+    metadata = {
+        "templateId": "muban-test-1",
+        "templateVersion": "1.2.0",
+        "textCapacityCertification": {
+            "status": "approved",
+            "templateVersion": "1.2.0",
+            "baselineSchemaVersion": 1,
+            "baselineSha256": _sha256(baseline),
+            "componentSource": "src/components/product-card.tsx",
+            "sourceSha256": _sha256(source),
+            "supportingSources": [
+                {
+                    "path": "src/components/MeasuredFitText.tsx",
+                    "sha256": _sha256(supporting_source),
+                }
+            ],
+        },
+    }
+
+    assert product_card_text_capacity_certification_issues(metadata) == []
+
+    source.write_text("export const Card = () => 'changed';\n", encoding="utf-8")
+    issues = product_card_text_capacity_certification_issues(metadata)
+    assert [item["code"] for item in issues] == ["text_capacity_source_hash_mismatch"]
+
+    source.write_text("export const Card = () => null;\n", encoding="utf-8")
+    supporting_source.write_text("export const Fit = () => 'changed';\n", encoding="utf-8")
+    issues = product_card_text_capacity_certification_issues(metadata)
+    assert [item["code"] for item in issues] == [
+        "text_capacity_supporting_source_hash_mismatch"
+    ]
+
+
+def test_text_capacity_certification_is_required() -> None:
+    issues = product_card_text_capacity_certification_issues(
+        {"templateId": "muban-test-1", "templateVersion": "1.0.0"}
+    )
+
+    assert [item["code"] for item in issues] == ["text_capacity_uncertified"]
 
 
 def test_zhiliao_template_preset_available() -> None:
@@ -75,7 +138,7 @@ def test_rongrong_remotion_template_1_video_slot_is_projected_from_metadata() ->
         "sourceHeight": 1080,
         "coordinate_mode": "canvas_rect",
         "templateId": "muban-rongrong-1",
-        "templateVersion": "1.0.0",
+        "templateVersion": "1.1.0",
         "display_scale": 0.52,
     }
 
@@ -260,7 +323,16 @@ def test_xiaowai_template_2_uses_html_cover_stage_slot() -> None:
 
 def test_muban_rongrong_2_uses_video_overlay_slot_for_calibration_height() -> None:
     metadata = get_remotion_template_metadata("muban-rongrong-2")
-    assert metadata["coverMediaSlot"]["height"] == 232
+    assert metadata["coverMediaSlot"] == {
+        "x": 549,
+        "y": 62,
+        "width": 412,
+        "height": 340,
+        "sourceWidth": 970,
+        "sourceHeight": 480,
+        "fitMode": "contain",
+        "anchor": "center",
+    }
     assert metadata["videoOverlaySlot"]["height"] == 260
 
     assert display_video_slot_for_product_card_template_id("muban-rongrong-2") == {
@@ -272,7 +344,7 @@ def test_muban_rongrong_2_uses_video_overlay_slot_for_calibration_height() -> No
         "sourceHeight": 1080,
         "coordinate_mode": "canvas_rect",
         "templateId": "muban-rongrong-2",
-        "templateVersion": "1.0.2",
+        "templateVersion": "1.1.0",
     }
 
 

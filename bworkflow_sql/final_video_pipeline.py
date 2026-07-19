@@ -16,7 +16,10 @@ from .settings import CUTME_ROOT, INTERNAL_WORKSPACE_ROOT
 from .utils import safe_text
 from .workflow_service import safe_path_component
 from .production_delivery import resolve_pipeline_output_dir, resolve_project_delivery_dir
+from .phase7_selection import validated_phase7_selection
 from .production_recipe import build_production_recipe, write_production_recipe
+from .artifact_approvals import resolve_approved_intro_video
+from .final_spoken_script import materialize_final_spoken_script
 
 Runner = Callable[..., Any]
 ProbeVideo = Callable[[Path], dict[str, Any]]
@@ -88,6 +91,18 @@ def run_final_video_pipeline(
     acceptance = safe_text(acceptance_mode) or "full"
     if acceptance not in {"none", "quick", "visual", "full"}:
         raise ValueError(f"unsupported acceptance_mode: {acceptance}")
+    phase7_selection = None
+    if pipeline_path:
+        phase7_selection = validated_phase7_selection(
+            pipeline_path,
+            required_output="final_mp4",
+            account=account,
+            product_card_template_id=product_card_template_id,
+            product_media_mode=product_media_mode,
+            product_order_strategy=product_order_strategy,
+            mode=mode,
+            top_uids=top_uids,
+        )
     timings = _TimingCollector()
 
     render_root = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "render"
@@ -121,6 +136,12 @@ def run_final_video_pipeline(
     target_mp4 = _absolute_path(output_path) if output_path else package_path.with_suffix(".mp4")
     intro_mp4 = _absolute_path(intro_video_path) if intro_video_path else None
     intro_source_plan_path = _absolute_path(intro_video_source_plan_path) if intro_video_source_plan_path else None
+    if pipeline_path:
+        intro_mp4, intro_source_plan_path = resolve_approved_intro_video(
+            pipeline_path,
+            intro_video_path=intro_mp4,
+            source_plan_path=intro_source_plan_path,
+        )
     resolved_intro_text = safe_text(intro_video_text).strip()
     if (pipeline_path or delivery_layout) and not intro_mp4:
         raise ValueError(
@@ -302,9 +323,11 @@ def run_final_video_pipeline(
         "full_output_mp4_link": _markdown_link("打开完整 MP4", full_target_mp4) if full_target_mp4 else None,
         "intro_video_path": str(intro_mp4) if intro_mp4 else None,
         "intro_subtitle_ass_path": str(intro_subtitle_ass_path) if intro_subtitle_ass_path else None,
-        "intro_subtitle_source_plan_path": str(_absolute_path(intro_video_source_plan_path)) if intro_video_source_plan_path else None,
+        "intro_subtitle_source_plan_path": str(intro_source_plan_path) if intro_source_plan_path else None,
         "intro_subtitles": intro_subtitle_report,
         "acceptance_mode": acceptance,
+        "phase7_selection_hash": (phase7_selection or {}).get("selection_hash"),
+        "phase7_selection_source": (phase7_selection or {}).get("source"),
         "product_images": product_images,
         "render_package": package_result,
         "cutme": {
@@ -326,6 +349,18 @@ def run_final_video_pipeline(
     if delivery_layout:
         result["delivery"] = _delivery_result(delivery_layout)
     result["timings"] = timings.finish()
+    repository = getattr(workflow, "repo", None)
+    if repository is not None:
+        result["spoken_script"] = materialize_final_spoken_script(
+            repository,
+            project_id=project_id,
+            account=account,
+            package=package_payload,
+            package_path=package_path,
+            run_id=timestamp,
+            snapshot_path=package_path.parent / "完整口播稿.md",
+            generated_at=datetime.strptime(timestamp, "%Y%m%d_%H%M%S"),
+        )
     run_manifest_path = _write_final_video_run_manifest(
         project_id=project_id,
         timestamp=timestamp,
@@ -335,8 +370,8 @@ def run_final_video_pipeline(
         full_target_mp4=full_target_mp4,
         recipe_path=recipe_path,
         recipe_sha256=recipe["recipeSha256"],
-        intro_video_path=_absolute_path(intro_video_path) if intro_video_path else None,
-        intro_video_source_plan_path=_absolute_path(intro_video_source_plan_path) if intro_video_source_plan_path else None,
+        intro_video_path=intro_mp4,
+        intro_video_source_plan_path=intro_source_plan_path,
     )
     result["run_manifest_path"] = str(run_manifest_path)
     result["run_manifest_link"] = _markdown_link("打开本次生成记录", run_manifest_path)
@@ -729,6 +764,7 @@ def _record_final_video_pipeline(
             "sha256": _path_sha256(Path(final_mp4_path)) if Path(final_mp4_path).is_file() else "",
             "created_at": now,
             "warning": warning,
+            "spoken_script": result.get("spoken_script"),
         }
         phases["assembly"] = assembly
         payload["phases"] = phases
@@ -771,6 +807,7 @@ def _record_final_video_pipeline(
             "clip_cache": result.get("cutme", {}).get("clip_cache"),
             "cutme_timings": result.get("cutme", {}).get("timings") or {},
             "timings": result.get("timings") or {},
+            "spoken_script": result.get("spoken_script"),
             "updated_at": now,
         }
     )
@@ -792,6 +829,8 @@ def _record_final_video_pipeline(
             "final_mp4_relative": final_relative,
             "render_package": result.get("package_path"),
             "job_package": result.get("job_package_path"),
+            "spoken_script": safe_text(result.get("spoken_script", {}).get("current_path")),
+            "spoken_script_snapshot": safe_text(result.get("spoken_script", {}).get("snapshot_path")),
         }
     )
     payload["paths"] = paths
@@ -829,11 +868,17 @@ def _final_video_run_manifest_payload(
         ("product_mp4", target_mp4),
         ("full_mp4", full_target_mp4),
         ("clip_cache_manifest", Path(clip_cache_manifest) if clip_cache_manifest else None),
+        (
+            "spoken_script_snapshot",
+            Path(safe_text(result.get("spoken_script", {}).get("snapshot_path")))
+            if safe_text(result.get("spoken_script", {}).get("snapshot_path"))
+            else None,
+        ),
     ]
     fingerprint_targets.extend((f"acceptance_frame:{path.stem}", path) for path in frame_paths)
 
     return {
-        "schemaVersion": "1.0.0",
+        "schemaVersion": "1.1.0" if result.get("spoken_script") else "1.0.0",
         "kind": "bworkflow.final_video_run",
         "createdAt": datetime.now().isoformat(timespec="seconds"),
         "asset_model": {
@@ -857,6 +902,8 @@ def _final_video_run_manifest_payload(
             "mode": _safe_text_or_default(result.get("price_transition_report", {}).get("mode"), result.get("mode")),
             "top_uids": result.get("price_transition_report", {}).get("top_uids") or [],
             "acceptance_mode": result.get("acceptance_mode"),
+            "phase7_selection_hash": result.get("phase7_selection_hash"),
+            "phase7_selection_source": result.get("phase7_selection_source"),
         },
         "inputs": {
             "render_package_path": result.get("package_path"),
@@ -875,6 +922,7 @@ def _final_video_run_manifest_payload(
             "full_mp4": str(full_target_mp4) if full_target_mp4 else None,
             "acceptance_frames": result.get("frames") or [],
         },
+        "spoken_script": result.get("spoken_script"),
         "delivery": result.get("delivery") or None,
         "segments": _run_manifest_segments(package),
         "segment_fingerprints": _segment_fingerprints(package),

@@ -1,7 +1,14 @@
 import json
 from pathlib import Path
 
-from bworkflow_sql.artifact_approvals import confirm_intro_video, write_production_confirmation
+import pytest
+
+from bworkflow_sql.artifact_approvals import (
+    confirm_intro_video,
+    resolve_approved_intro_video,
+    sha256_file,
+    write_production_confirmation,
+)
 
 
 def test_confirm_intro_video_writes_bound_approval_atomically(tmp_path: Path) -> None:
@@ -62,3 +69,24 @@ def test_production_confirmation_binds_mp4_to_manifest_revision(tmp_path: Path) 
     assert payload["production_confirmation"]["production_run_id"] == 7
     assert payload["artifact_approvals"]["full_mp4"] == approval
     assert "pending_candidate" not in payload["phases"]["assembly"]
+
+
+def test_resolve_approved_intro_video_verifies_video_and_source_plan(tmp_path: Path) -> None:
+    pipeline = tmp_path / ".pipeline.json"
+    pipeline.write_text(json.dumps({"paths": {}, "phases": {}}), encoding="utf-8")
+    intro = tmp_path / "intro.mp4"
+    intro.write_bytes(b"intro")
+    source_plan = tmp_path / "source.json"
+    source_plan.write_text("{}", encoding="utf-8")
+    confirm_intro_video(
+        pipeline,
+        intro,
+        approved_at="2026-07-15T00:00:00Z",
+        source_revision=sha256_file(source_plan),
+        source_plan_path=source_plan,
+    )
+
+    assert resolve_approved_intro_video(pipeline) == (intro.resolve(), source_plan.resolve())
+    intro.write_bytes(b"changed")
+    with pytest.raises(ValueError, match="size has changed|hash has changed"):
+        resolve_approved_intro_video(pipeline)

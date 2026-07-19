@@ -9,6 +9,15 @@ import bworkflow_sql.workflow_service as workflow_service
 from bworkflow_sql.workflow_service import WorkflowService
 
 
+@pytest.fixture(autouse=True)
+def _certified_product_card_template(monkeypatch):
+    monkeypatch.setattr(
+        workflow_service,
+        "_product_card_text_capacity_issues",
+        lambda **_kwargs: [],
+    )
+
+
 def _service(db: object = "db") -> WorkflowService:
     service = WorkflowService.__new__(WorkflowService)
     service.db = db

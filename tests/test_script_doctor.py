@@ -180,6 +180,77 @@ Beta 的单品文案。
     assert any(issue["code"] == "missing_price_transition_copy" for issue in result["issues"])
 
 
+def test_script_doctor_blocks_product_copy_lint_failures(tmp_path: Path):
+    db, project_id, md_path = _seed_project(tmp_path)
+    md_path.write_text(
+        """
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha Keyboard，预算三百元左右可以优先看。
+
+### 399元-P002-Beta Keyboard
+
+#### 正文
+
+Beta Keyboard，是这期三百到五百档的主推，页面标注支持三模连接。
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = diagnose_script_flow(db, project_id=project_id)
+    lint_issues = [issue for issue in result["issues"] if issue["code"] == "product_copy_lint_failed"]
+
+    assert result["ok"] is False
+    assert result["status"] == "content_incomplete"
+    assert result["summary"]["product_copy_ready"] == 1
+    assert result["summary"]["product_copy_lint_failed_products"] == 1
+    assert result["summary"]["product_copy_lint_findings"] == 3
+    assert {issue["rule_id"] for issue in lint_issues} == {
+        "internal_role_label",
+        "internal_price_tier",
+        "source_page_reference",
+    }
+    assert all(issue["uid"] == "P002" for issue in lint_issues)
+    assert result["next"]["action"] == "fix_product_copy_language"
+    assert result["next"]["command"] == f"python -m bworkflow_sql copy-lint {project_id}"
+
+
+def test_script_doctor_reports_product_copy_style_without_blocking_status_rule(tmp_path: Path):
+    from bworkflow_sql.script_doctor import _status
+
+    db, project_id, md_path = _seed_project(tmp_path)
+    md_path.write_text(
+        """
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+Alpha Keyboard 有独立方向键。需要频繁改表格，这件更对路。
+
+### 399元-P002-Beta Keyboard
+
+#### 正文
+
+Beta Keyboard 支持三模连接。桌面设备多，这件很实在。
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = diagnose_script_flow(db, project_id=project_id)
+    style_issues = [issue for issue in result["issues"] if issue["code"] == "product_copy_style_warning"]
+
+    assert result["summary"]["product_copy_style_findings"] == 2
+    assert {issue["rule_id"] for issue in style_issues} == {"voice_phrase_rejected"}
+    assert all(issue["blocking"] is False for issue in style_issues)
+    assert _status(style_issues, True) == "ready_for_downstream"
+
+
 def test_script_doctor_reports_reusable_library_copy_when_episode_is_missing(tmp_path: Path, monkeypatch):
     import bworkflow_sql.markdown_paths as markdown_paths_module
 

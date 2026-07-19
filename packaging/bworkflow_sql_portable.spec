@@ -16,6 +16,11 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(customtkinter_root), "customtkinter"),
+        (
+            str(project_root / "config" / "product-copy-voice-profiles"),
+            "config/product-copy-voice-profiles",
+        ),
+        (str(project_root / "config" / "cover-prompts.json"), "config"),
     ],
     hiddenimports=[
         "PIL._tkinter_finder",

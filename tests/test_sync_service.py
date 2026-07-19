@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from bworkflow_sql import master_contracts as contracts
 from bworkflow_sql.db import Database
 from bworkflow_sql.md_parser import parse_markdown_text
@@ -97,7 +99,7 @@ def test_markdown_sync_only_imports_master_products(tmp_path: Path):
 正文 A
 
 ### 多余商品-YXEJ999-999元
-不应该导入
+不应该导入，页面标注的内部资料也不应影响当前方案
 """.strip()
     )
     result = SyncService(db).sync_markdown_payload(project_id, parsed)
@@ -131,6 +133,31 @@ def test_script_hash_matches_legacy_voice_registry_format(tmp_path: Path):
 
     assert row["text_hash"] == text_hash("正常配音文案")
     assert len(row["text_hash"]) == 40
+
+
+def test_markdown_sync_rejects_product_copy_lint_failures_before_writing_blocks(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    project_id = db.upsert_project({"name": "家居-防晒衣"})
+    repo.upsert_products_from_master(
+        project_id,
+        [{"uid": "FSY033", "title": "海上公路轻薄男款", "price_label": "178元"}],
+    )
+    parsed = parse_markdown_text(
+        """
+## 商品文案
+
+### 178元-FSY033-海上公路轻薄男款
+#### 正文
+海上公路轻薄男款，也是这期一百到两百档的主推，页面标注 UPF 一百加。
+""".strip()
+    )
+
+    with pytest.raises(ValueError, match="商品正文口播校验失败") as exc_info:
+        SyncService(db).sync_markdown_payload(project_id, parsed)
+
+    assert "copy-lint" in str(exc_info.value)
+    assert repo.script_blocks(project_id) == []
 
 
 def test_voice_asset_sync_refreshes_markdown_and_preserves_existing_voice_hash(tmp_path: Path):

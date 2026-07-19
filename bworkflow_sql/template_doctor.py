@@ -14,6 +14,7 @@ from .repositories import Repository
 from .template_config import (
     display_video_slot_for_product_card_template_id,
     image_set_for_template,
+    product_card_text_capacity_certification_issues,
     resolve_product_card_template,
 )
 from .utils import safe_text
@@ -63,6 +64,7 @@ def diagnose_template_flow(
             media_mode=media_mode,
             template={},
             products_checked=0,
+            media_inventory=_media_inventory([], []),
             issues=issues,
             next_hint={
                 "action": "confirm_product_card_template",
@@ -102,9 +104,17 @@ def diagnose_template_flow(
     assets = repo.asset_bindings(project_id)
     products = repo.products(project_id, include_removed=False)
     product_count = 0
+    video_ready_items: list[dict[str, Any]] = []
+    video_missing_items: list[dict[str, Any]] = []
     for product in products:
         product_count += 1
         uid = safe_text(product.get("uid"))
+        title = safe_text(product.get("title"))
+        video = _ready_video_asset(assets, uid=uid)
+        if video:
+            video_ready_items.append({"uid": uid, "title": title, "path": safe_text(video.get("path"))})
+        else:
+            video_missing_items.append({"uid": uid, "title": title})
         image = _ready_image_asset(
             assets,
             uid=uid,
@@ -196,6 +206,7 @@ def diagnose_template_flow(
         media_mode=media_mode,
         template=template,
         products_checked=product_count,
+        media_inventory=_media_inventory(video_ready_items, video_missing_items),
         issues=issues,
         next_hint=_next_hint(project_id, account, template_id, issues),
     )
@@ -208,6 +219,7 @@ def _payload(
     media_mode: str,
     template: dict[str, Any],
     products_checked: int,
+    media_inventory: dict[str, Any],
     issues: list[dict[str, Any]],
     next_hint: dict[str, Any],
 ) -> dict[str, Any]:
@@ -225,6 +237,7 @@ def _payload(
             "warnings": warnings,
             "products_checked": products_checked,
         },
+        "media_inventory": media_inventory,
         "issues": issues,
         "next": next_hint,
     }
@@ -249,6 +262,7 @@ def _template_metadata_issues(metadata: dict[str, Any]) -> list[dict[str, Any]]:
                     "message": f"Remotion template metadata is missing or invalid: {key}",
                 }
             )
+    issues.extend(product_card_text_capacity_certification_issues(metadata))
     return issues
 
 
@@ -263,6 +277,28 @@ def _next_hint(
         return {
             "action": "continue_phase_7",
             "command": f"python -m bworkflow_sql render-package {project_id} --account {account} --product-card-template-id {template_id}",
+        }
+    if codes.intersection(
+        {
+            "text_capacity_uncertified",
+            "text_capacity_template_version_mismatch",
+            "text_capacity_component_source_missing",
+            "text_capacity_source_hash_mismatch",
+            "text_capacity_supporting_source_invalid",
+            "text_capacity_supporting_source_missing",
+            "text_capacity_supporting_source_hash_mismatch",
+            "text_capacity_baseline_missing",
+            "text_capacity_baseline_hash_mismatch",
+            "text_capacity_baseline_version_mismatch",
+        }
+    ):
+        return {
+            "action": "run_product_card_text_capacity_gate",
+            "command": (
+                "node remotion-renderer/scripts/audit-product-card-text-capacity.mjs "
+                f"&& python -m bworkflow_sql template-doctor {project_id} --account {account} "
+                f"--product-card-template-id {template_id}"
+            ),
         }
     if codes.intersection(
         {
@@ -336,6 +372,38 @@ def _ready_image_asset(
             safe_text(item.get("path")),
         ),
     )[0]
+
+
+def _ready_video_asset(assets: list[dict[str, Any]], *, uid: str) -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
+    for asset in assets:
+        if safe_text(asset.get("asset_type")) != "video":
+            continue
+        if safe_text(asset.get("status")) != "ready" or safe_text(asset.get("uid")) != uid:
+            continue
+        path = Path(safe_text(asset.get("path")))
+        if path.is_file():
+            candidates.append(asset)
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: safe_text(item.get("path")))[0]
+
+
+def _media_inventory(
+    video_ready_items: list[dict[str, Any]],
+    video_missing_items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "total_products": len(video_ready_items) + len(video_missing_items),
+        "video_ready": len(video_ready_items),
+        "video_missing": len(video_missing_items),
+        "video_items": video_ready_items,
+        "missing_video_items": video_missing_items,
+        "mode_explanation": {
+            "cover_only": "all products use product-card images",
+            "video_preferred": "ready product videos are used; missing videos fall back to product-card images",
+        },
+    }
 
 
 def _image_path_uses_template(path: Path | None, *, account_label: str, image_set: str) -> bool:

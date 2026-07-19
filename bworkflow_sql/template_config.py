@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -99,6 +100,166 @@ def get_remotion_template_metadata(template_id: str) -> dict[str, Any]:
     if metadata is None:
         raise ValueError(f"未知 Remotion 商品图模板：{template_id}")
     return dict(metadata)
+
+
+def product_card_text_capacity_certification_issues(
+    metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Validate the hash-bound text-capacity approval for a product-card template."""
+    template_id = str(metadata.get("templateId") or "").strip()
+    template_version = str(metadata.get("templateVersion") or "").strip()
+    certification = metadata.get("textCapacityCertification")
+    if not isinstance(certification, dict) or certification.get("status") != "approved":
+        return [
+            {
+                "level": "error",
+                "code": "text_capacity_uncertified",
+                "template_id": template_id,
+                "message": (
+                    "Product-card template has no approved text-capacity certification; "
+                    "formal image/video rendering is blocked."
+                ),
+            }
+        ]
+
+    issues: list[dict[str, Any]] = []
+    certified_version = str(certification.get("templateVersion") or "").strip()
+    if not template_version or certified_version != template_version:
+        issues.append(
+            {
+                "level": "error",
+                "code": "text_capacity_template_version_mismatch",
+                "template_id": template_id,
+                "expected": template_version,
+                "certified": certified_version,
+                "message": "Text-capacity certification does not match the registered template version.",
+            }
+        )
+
+    renderer_root = REMOTION_TEMPLATE_METADATA_PATH.parent.resolve()
+    component_source = str(certification.get("componentSource") or "").strip()
+    source_path = (renderer_root / component_source).resolve() if component_source else None
+    if source_path is None or renderer_root not in source_path.parents or not source_path.is_file():
+        issues.append(
+            {
+                "level": "error",
+                "code": "text_capacity_component_source_missing",
+                "template_id": template_id,
+                "component_source": component_source,
+                "message": "Certified product-card component source is missing or outside CutMe.",
+            }
+        )
+    else:
+        actual_source_hash = _sha256_prefixed(source_path)
+        certified_source_hash = str(certification.get("sourceSha256") or "").strip()
+        if certified_source_hash != actual_source_hash:
+            issues.append(
+                {
+                    "level": "error",
+                    "code": "text_capacity_source_hash_mismatch",
+                    "template_id": template_id,
+                    "expected": certified_source_hash,
+                    "actual": actual_source_hash,
+                    "message": "Product-card component changed after text-capacity approval.",
+                }
+            )
+
+    supporting_sources = certification.get("supportingSources", [])
+    if not isinstance(supporting_sources, list):
+        issues.append(
+            {
+                "level": "error",
+                "code": "text_capacity_supporting_source_invalid",
+                "template_id": template_id,
+                "message": "Certified supportingSources must be a list of path/hash records.",
+            }
+        )
+    else:
+        for index, supporting_source in enumerate(supporting_sources):
+            record = supporting_source if isinstance(supporting_source, dict) else {}
+            relative_path = str(record.get("path") or "").strip()
+            resolved_path = (renderer_root / relative_path).resolve() if relative_path else None
+            if (
+                resolved_path is None
+                or renderer_root not in resolved_path.parents
+                or not resolved_path.is_file()
+            ):
+                issues.append(
+                    {
+                        "level": "error",
+                        "code": "text_capacity_supporting_source_missing",
+                        "template_id": template_id,
+                        "source_index": index,
+                        "path": relative_path,
+                        "message": "A certified text-fit supporting source is missing or outside CutMe.",
+                    }
+                )
+                continue
+            actual_hash = _sha256_prefixed(resolved_path)
+            certified_hash = str(record.get("sha256") or "").strip()
+            if certified_hash != actual_hash:
+                issues.append(
+                    {
+                        "level": "error",
+                        "code": "text_capacity_supporting_source_hash_mismatch",
+                        "template_id": template_id,
+                        "source_index": index,
+                        "path": relative_path,
+                        "expected": certified_hash,
+                        "actual": actual_hash,
+                        "message": "A text-fit supporting source changed after text-capacity approval.",
+                    }
+                )
+
+    baseline_path = renderer_root / "product-card-text-capacity-baseline.json"
+    if not baseline_path.is_file():
+        issues.append(
+            {
+                "level": "error",
+                "code": "text_capacity_baseline_missing",
+                "template_id": template_id,
+                "message": "Product-card text-capacity baseline is missing.",
+            }
+        )
+    else:
+        actual_baseline_hash = _sha256_prefixed(baseline_path)
+        certified_baseline_hash = str(certification.get("baselineSha256") or "").strip()
+        if certified_baseline_hash != actual_baseline_hash:
+            issues.append(
+                {
+                    "level": "error",
+                    "code": "text_capacity_baseline_hash_mismatch",
+                    "template_id": template_id,
+                    "expected": certified_baseline_hash,
+                    "actual": actual_baseline_hash,
+                    "message": "Text-capacity baseline changed after template approval.",
+                }
+            )
+        try:
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            baseline = {}
+        baseline_schema = baseline.get("schemaVersion") if isinstance(baseline, dict) else None
+        if certification.get("baselineSchemaVersion") != baseline_schema:
+            issues.append(
+                {
+                    "level": "error",
+                    "code": "text_capacity_baseline_version_mismatch",
+                    "template_id": template_id,
+                    "expected": baseline_schema,
+                    "certified": certification.get("baselineSchemaVersion"),
+                    "message": "Text-capacity certification targets another baseline schema version.",
+                }
+            )
+    return issues
+
+
+def _sha256_prefixed(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _remotion_template_by_display_name(template_name: str) -> dict[str, Any] | None:

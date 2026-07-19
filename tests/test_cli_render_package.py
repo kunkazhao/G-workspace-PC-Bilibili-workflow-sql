@@ -24,6 +24,8 @@ def test_render_package_parser_registers_command():
             "3",
             "--account",
             "xiaobo",
+            "--pipeline",
+            ".pipeline.json",
             "--output-mode",
             "final_mp4",
             "--product-media-mode",
@@ -243,6 +245,21 @@ def test_script_doctor_parser_registers_command():
     assert args.command == "script-doctor"
     assert args.project_id == 3
     assert args.intro_label == "引言1"
+
+
+def test_copy_lint_parser_registers_command():
+    args = cli.build_parser().parse_args(["copy-lint", "3"])
+
+    assert args.command == "copy-lint"
+    assert args.project_id == 3
+
+
+def test_copy_audit_parser_registers_voice_profile():
+    args = cli.build_parser().parse_args(["copy-audit", "3", "--voice-profile", "zhaoer"])
+
+    assert args.command == "copy-audit"
+    assert args.project_id == 3
+    assert args.voice_profile == "zhaoer"
 
 
 def test_materialize_episode_parser_registers_command():
@@ -477,6 +494,12 @@ def test_render_final_video_parser_accepts_visual_acceptance_mode():
             "3",
             "--account",
             "小博",
+            "--product-media-mode",
+            "video_preferred",
+            "--product-card-template-id",
+            "muban-xiaobo-1",
+            "--pipeline",
+            ".pipeline.json",
             "--acceptance-mode",
             "visual",
         ]
@@ -1121,6 +1144,7 @@ def test_cmd_render_package_writes_success_json_and_package(
 
     output = tmp_path / "render-package.json"
     monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
+    monkeypatch.setattr(cli, "validated_phase7_selection", lambda *_args, **_kwargs: {})
 
     cli.cmd_render_package(
         Namespace(
@@ -1133,6 +1157,7 @@ def test_cmd_render_package_writes_success_json_and_package(
             mode="standard",
             top_uids="",
             product_card_template_id="muban-xiaobo-1",
+            pipeline=".pipeline.json",
             output=str(output),
         )
     )
@@ -1201,6 +1226,7 @@ def test_cmd_render_package_reports_missing_without_writing_package(
 
     output = tmp_path / "render-package.json"
     monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
+    monkeypatch.setattr(cli, "validated_phase7_selection", lambda *_args, **_kwargs: {})
 
     cli.cmd_render_package(
         Namespace(
@@ -1213,6 +1239,7 @@ def test_cmd_render_package_reports_missing_without_writing_package(
             mode="standard",
             top_uids="",
             product_card_template_id="muban-xiaobo-1",
+            pipeline=".pipeline.json",
             output=str(output),
         )
     )
@@ -1234,7 +1261,9 @@ def test_cmd_render_package_keeps_final_mp4_next_step_structured(tmp_path, capsy
     service = WorkflowService.__new__(WorkflowService)
     service.db = "db"
     monkeypatch.setattr(workflow_service, "build_product_recommendation_package", fake_build)
+    monkeypatch.setattr(workflow_service, "_product_card_text_capacity_issues", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, service))
+    monkeypatch.setattr(cli, "validated_phase7_selection", lambda *_args, **_kwargs: {})
     output = tmp_path / "render-package.json"
 
     cli.cmd_render_package(
@@ -1248,6 +1277,7 @@ def test_cmd_render_package_keeps_final_mp4_next_step_structured(tmp_path, capsy
             mode="standard",
             top_uids="",
             product_card_template_id="muban-xiaobo-1",
+            pipeline=".pipeline.json",
             output=str(output),
         )
     )

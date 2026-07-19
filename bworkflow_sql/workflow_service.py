@@ -51,6 +51,7 @@ from .template_config import (
     display_template_from_image_path,
     display_template_for_product_card_template_id,
     image_set_for_template,
+    product_card_text_capacity_certification_issues,
     resolve_product_card_template,
     user_for_template,
 )
@@ -157,6 +158,21 @@ class WorkflowRunResult:
     returncode: int = 0
     stdout: str = ""
     stderr: str = ""
+
+
+def _product_card_text_capacity_issues(
+    *,
+    account_label: str,
+    product_card_template_id: str,
+) -> list[dict[str, Any]]:
+    if not safe_text(product_card_template_id):
+        return []
+    metadata = resolve_product_card_template(
+        account_label,
+        product_card_template_id,
+        require_explicit=True,
+    )
+    return product_card_text_capacity_certification_issues(metadata)
 
 
 @dataclass
@@ -389,6 +405,22 @@ class WorkflowService:
             split_csv(product_uids) if isinstance(product_uids, str) else list(product_uids or [])
         )
 
+        certification_issues = _product_card_text_capacity_issues(
+            account_label=account_label,
+            product_card_template_id=product_card_template_id,
+        )
+        if certification_issues:
+            return {
+                "ok": False,
+                "stage": "product_card_text_capacity_gate",
+                "project_id": project_id,
+                "account": account_label,
+                "product_card_template_id": safe_text(product_card_template_id) or None,
+                "product_media_mode": media_mode,
+                "issues": certification_issues,
+                "next": {"action": "run_product_card_text_capacity_gate"},
+            }
+
         build_kwargs: dict[str, Any] = {}
         if intro_video_path:
             build_kwargs["intro_video_path"] = intro_video_path
@@ -484,6 +516,20 @@ class WorkflowService:
         product_uid: str = "",
         product_card_template_id: str = "",
     ) -> dict[str, Any]:
+        certification_issues = _product_card_text_capacity_issues(
+            account_label=account_label,
+            product_card_template_id=product_card_template_id,
+        )
+        if certification_issues:
+            return {
+                "ok": False,
+                "stage": "product_card_text_capacity_gate",
+                "project_id": project_id,
+                "account": account_label,
+                "product_card_template_id": safe_text(product_card_template_id) or None,
+                "issues": certification_issues,
+                "next": {"action": "run_product_card_text_capacity_gate"},
+            }
         return regenerate_product_card_images(
             self.db,
             project_id=project_id,

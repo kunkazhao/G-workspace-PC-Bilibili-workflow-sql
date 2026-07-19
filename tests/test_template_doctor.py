@@ -74,6 +74,21 @@ def _insert_ready_image(
         )
 
 
+def _insert_ready_video(db: Database, project_id: int, *, uid: str, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"video")
+    ts = now_iso()
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, asset_type, account_label, path, status, source_kind, text_hash, created_at, updated_at)
+            VALUES (?, ?, 'video', '', ?, 'ready', 'test', '', ?, ?)
+            """,
+            (project_id, uid, str(path), ts, ts),
+        )
+
+
 def _diagnose_template_flow():
     try:
         module = importlib.import_module("bworkflow_sql.template_doctor")
@@ -137,8 +152,9 @@ def test_template_doctor_reports_wrong_binding_and_unknown_legacy_hash(tmp_path:
     assert result["template"]["selectionSource"] == "explicit"
     assert issues[("wrong_template_binding", "P001")]["level"] == "error"
     assert issues[("unknown_legacy_image_hash", "P002")]["level"] == "warning"
-    assert "product-images" in result["next"]["command"]
-    assert "--product-card-template-id muban-xiaobo-1" in result["next"]["command"]
+    assert result["next"]["action"] == "run_product_card_text_capacity_gate"
+    assert "audit-product-card-text-capacity" in result["next"]["command"]
+    assert issues[("text_capacity_uncertified", None)]["level"] == "error"
 
 
 def test_template_doctor_prefers_ready_binding_for_selected_template(tmp_path: Path):
@@ -174,3 +190,26 @@ def test_template_doctor_prefers_ready_binding_for_selected_template(tmp_path: P
 
     assert not any(item["code"] == "wrong_template_binding" for item in p001_issues)
     assert any(item["code"] == "stale_product_image" for item in p001_issues)
+
+
+def test_template_doctor_reports_product_video_coverage_before_media_choice(tmp_path: Path):
+    db, project_id = _seed_template_doctor_project(tmp_path)
+    diagnose_template_flow = _diagnose_template_flow()
+    account_label = get_remotion_template_metadata("muban-xiaobo-1")["account"]
+    _insert_ready_video(db, project_id, uid="P001", path=tmp_path / "videos" / "P001.mp4")
+
+    result = diagnose_template_flow(
+        db,
+        project_id=project_id,
+        account_label=account_label,
+        product_card_template_id="muban-xiaobo-1",
+        product_media_mode="cover_only",
+    )
+
+    inventory = result["media_inventory"]
+    assert inventory["total_products"] == 2
+    assert inventory["video_ready"] == 1
+    assert inventory["video_missing"] == 1
+    assert [item["uid"] for item in inventory["video_items"]] == ["P001"]
+    assert [item["uid"] for item in inventory["missing_video_items"]] == ["P002"]
+    assert "fall back" in inventory["mode_explanation"]["video_preferred"]

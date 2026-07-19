@@ -14,6 +14,7 @@ from .master_snapshot_sync import (
     plan_master_snapshot_sync,
 )
 from .md_parser import H3_RE, H4_RE, SCRIPT_ID_RE, SECTION_RE, ParsedMarkdown, parse_markdown_file, parse_product_heading
+from .product_copy_lint import lint_parsed_product_copy
 from .repositories import Repository
 from .settings import DEFAULT_IMAGE_ROOT, DEFAULT_VIDEO_ROOT, DEFAULT_VOICE_ROOT
 from .utils import file_metadata, now_iso, safe_text, text_hash
@@ -25,6 +26,24 @@ AUDIO_SUFFIXES = AUTOSCAN_AUDIO_SUFFIXES
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi"}
 UID_BOUNDARY_PATTERN = r"(?<![A-Za-z0-9])({uid})(?![A-Za-z0-9])"
+
+
+def _product_copy_lint_error(project_id: int, findings: list[dict[str, Any]]) -> str:
+    details = []
+    for finding in findings[:10]:
+        location = f"第 {int(finding.get('line') or 0)} 行" if finding.get("line") else "行号未知"
+        details.append(
+            f"- {safe_text(finding.get('uid'))} / {safe_text(finding.get('block_label'))} / {location}："
+            f"{safe_text(finding.get('match'))}"
+        )
+    remainder = len(findings) - len(details)
+    if remainder > 0:
+        details.append(f"- 另有 {remainder} 处未展开")
+    return (
+        "商品正文口播校验失败，已停止 Markdown 同步。\n"
+        + "\n".join(details)
+        + f"\n请先运行：python -m bworkflow_sql copy-lint {project_id}"
+    )
 
 
 def _intro_label(index: int) -> str:
@@ -184,15 +203,39 @@ class SyncService:
         if not md_path or not Path(md_path).exists():
             raise ValueError("当前项目没有绑定可读取的 MD 文档。")
         path = Path(md_path)
+        source_text = path.read_text(encoding="utf-8-sig")
         parsed = parse_markdown_file(path)
-        result = self.sync_markdown_payload(project_id, parsed)
+        result = self.sync_markdown_payload(
+            project_id,
+            parsed,
+            source_text=source_text,
+            source_path=path,
+        )
         self._write_script_ids_to_markdown(path, parsed)
         return result
 
-    def sync_markdown_payload(self, project_id: int, parsed: ParsedMarkdown) -> dict[str, Any]:
+    def sync_markdown_payload(
+        self,
+        project_id: int,
+        parsed: ParsedMarkdown,
+        *,
+        source_text: str = "",
+        source_path: str | Path = "",
+    ) -> dict[str, Any]:
         products = {item["uid"]: item for item in self.repo.products(project_id, include_removed=False)}
-        md_products = {item.uid: item for item in parsed.products}
         allowed_uids = set(products)
+        lint_findings = [
+            finding
+            for finding in lint_parsed_product_copy(
+                parsed,
+                source_text=source_text,
+                source_path=source_path,
+            )
+            if safe_text(finding.get("uid")) in allowed_uids
+        ]
+        if lint_findings:
+            raise ValueError(_product_copy_lint_error(project_id, lint_findings))
+        md_products = {item.uid: item for item in parsed.products}
         extra_md = [item for uid, item in md_products.items() if uid not in allowed_uids]
         missing_copy = [item for uid, item in products.items() if uid not in md_products]
         upserted = 0

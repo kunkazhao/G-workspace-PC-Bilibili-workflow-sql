@@ -9,6 +9,20 @@
 
 ## 媒体工作区与正式成片履历
 
+阶段 7 开始时，先运行 `template-doctor` 展示 `media_inventory`，再让用户一次
+确认输出分支、账号、商品卡模板、商品素材方式、排序、standard/top 和置顶 UID。
+确认后运行：
+
+```powershell
+python -m bworkflow_sql confirm-phase7-selection --pipeline <.pipeline.json> --output-branch final_mp4 --account <账号> --product-card-template-id <模板> --product-media-mode cover_only|video_preferred --product-order-strategy price_segment_shuffle|stable --mode standard|top --top-uids <可选UID列表>
+```
+
+`render-package` 与 `render-final-video` 必须携带同一 pipeline 和完全一致的参数；
+缺少确认、选择哈希损坏或参数不一致都会阻断。旧候选片没有匹配的
+`phase7_selection_hash` 时只能作为诊断产物，不能执行 `confirm-production`。
+商品卡模板还必须有版本、正式组件源码、文字承载依赖源码和容量基线 SHA-256
+绑定的 `textCapacityCertification`；任一源码或基线变化后认证自动失效。
+
 - 新建项目自动建立所有启用账号的配音目录、实际配置模板的商品图目录、品类 Roll-B 目录和引言展示视频目录。
 - 旧项目或外部盘恢复后运行 `python -m bworkflow_sql scaffold <project_id>` 幂等补齐。
 - `render-final-video` 只写生成证据。用户确认完整 MP4 是实际成品后，运行 `python -m bworkflow_sql confirm-production <project_id> --run-manifest <path> --pipeline <path>`。
@@ -25,6 +39,18 @@
 - 重渲染只生成待确认候选，不覆盖原正式成片。已发布 pipeline 保持 `done`，候选写入 `assembly.pending_candidate`。
 - 用户验收候选后，继续使用现有 `confirm-production` 创建新修订；不得直接改写旧 `production_runs`。
 - 生产命令返回 `repair_required` 时立即停止。代码修复是独立开发任务，不能在生产命令内部自动修改代码再继续渲染。
+
+## 正式成片后的封面阶段
+
+新版 run manifest 在 `confirm-production` 后必须先完成封面，才允许进入发布准备：
+
+1. `cover-context --pipeline <path>` 只读返回完整口播稿和账号风格信息；据此生成恰好 5 个候选文案。
+2. 把候选写入 UTF-8 JSON 后运行 `record-cover-copy-options`；必须等用户选择，再运行 `confirm-cover-copy --index <1-5>`。
+3. `prepare-cover-generation` 会冻结固定账号人像、独立风格、已确认文案和完整提示词。将其返回的 `portrait_path` 与 `prompt` 原样交给 `imagegen`。
+4. 生图模型一次只生成 1 张 4:3 图片，直接生成逐字一致的中文封面文字；只说明品类和多个同类商品，不输入具体 SKU 商品图，也不做程序化贴字。
+5. 用 `record-cover-image` 导入候选并展示给用户。通过后运行 `confirm-cover-image`；不通过运行 `reject-cover-image --reason <原因>` 后重新准备并生图。
+
+人像源目录固定为 `G:\2026项目-b站\素材-剪辑\素材-人像`。小燃、小博、小歪、荣荣分别使用四套独立提示词。封面文案证据、提示词包、人像快照、候选图和最终确认均绑定哈希；任一内容变化都会阻断旧确认。
 
 ## 发布后蓝链回流
 
@@ -466,6 +492,31 @@ data\workspace\manual-tests\{test-name}\
 同一测试主题的配置、短样片、RenderPackage、ASS、抽帧、缓存和 README
 都收拢在该目录；默认不写正式 `.pipeline.json`。CutMe 如生成临时 job，验证后
 只清理该次明确生成的 job，不把 `render_jobs` 当长期验收目录。
+
+## 商品正文措辞门禁
+
+商品正文写入正式 Markdown 后、用户审稿前运行：
+
+```powershell
+python -m bworkflow_sql copy-lint <project_id>
+```
+
+该命令只检查 `## 商品文案` 下的正文版本，不检查资料采集包、价格过渡或引言。它会硬拦截两类高置信问题：
+
+- 把“主推、重点款、低佣、选品池、一百到两百档”等内部选品身份念给观众；
+- 把“页面标注、商品页、详情页、官网写的、资料显示、据测评”等采集过程念进正式口播。
+
+“预算在一百到两百元”“不必为更高参数加预算”“UPF 做到一百加”等观众可用的预算、选择边界和参数表达允许通过。命中结果会返回 UID、正文版本、文件行号、原句和修改方向。
+
+`script-doctor` 复用同一套 lint。任何商品正文版本命中时，该商品不计入 `product_copy_ready`，`next.action=fix_product_copy_language`，并禁止 Markdown 同步、配音和组装。`SyncService.sync_markdown(...)` 在写数据库前也会强制执行该检查，直接运行同步命令不能绕过。修正后必须依次重新运行 `copy-lint` 和 `script-doctor`。
+
+硬门禁通过后，再运行整篇风格软审计：
+
+```powershell
+python -m bworkflow_sql copy-audit <project_id> --voice-profile zhaoer
+```
+
+`copy-audit` 检查赵二口吻中已经排除的抽象收尾，并从全文视角报告重复的“商品主体 + 抽象判断”结构。它返回具体 UID、正文版本、文件行号和原句；`script-doctor` 也会把同一结果列为 `product_copy_style_warning`。这些警告不降低 `product_copy_ready`、不拦截 Markdown 同步，也不会自动改写正文。审稿阶段应逐条做删除测试：前文已经能帮助选择时直接删掉尾句，需要保留判断时改成具体条件、取舍或使用后果。
 
 ## CutMe 引言写作链路
 

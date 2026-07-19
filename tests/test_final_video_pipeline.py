@@ -7,6 +7,8 @@ import pytest
 
 from bworkflow_sql.cutme_adapter import CutMeAdapterError
 from bworkflow_sql.final_video_pipeline import _run_command, run_final_video_pipeline
+from bworkflow_sql.phase7_selection import confirm_phase7_selection
+from bworkflow_sql.artifact_approvals import confirm_intro_video
 
 
 pytestmark = pytest.mark.usefixtures("isolated_final_video_workspace")
@@ -76,7 +78,16 @@ def test_run_final_video_pipeline_uses_one_adapter_call_and_preserves_cutme_resu
         encoding="utf-8",
     )
     pipeline_path.write_text("{}", encoding="utf-8")
-
+    confirm_phase7_selection(
+        pipeline_path,
+        output_branch="final_mp4",
+        account="小博",
+        product_card_template_id="muban-xiaobo-1",
+        product_media_mode="video_preferred",
+        product_order_strategy="price_segment_shuffle",
+        mode="standard",
+    )
+    confirm_intro_video(pipeline_path, intro_mp4, approved_at="2026-07-19T00:00:00Z")
     class FakeWorkflow:
         def regenerate_product_card_images(self, *args, **kwargs):
             return {"ok": True, "regenerated": [], "skipped": []}
@@ -126,6 +137,7 @@ def test_run_final_video_pipeline_uses_one_adapter_call_and_preserves_cutme_resu
         FakeWorkflow(),
         project_id=23,
         account_label="小博",
+        product_card_template_id="muban-xiaobo-1",
         package_output_path=package_path,
         output_path=output_mp4,
         pipeline_path=pipeline_path,
@@ -182,6 +194,17 @@ def test_run_final_video_pipeline_cutme_failure_stops_before_post_processing_or_
     )
     original_pipeline = '{"current_phase":"intro_video"}'
     pipeline_path.write_text(original_pipeline, encoding="utf-8")
+    confirm_phase7_selection(
+        pipeline_path,
+        output_branch="final_mp4",
+        account="小博",
+        product_card_template_id="muban-xiaobo-1",
+        product_media_mode="video_preferred",
+        product_order_strategy="price_segment_shuffle",
+        mode="standard",
+    )
+    confirm_intro_video(pipeline_path, intro_mp4, approved_at="2026-07-19T00:00:00Z")
+    confirmed_pipeline = pipeline_path.read_text(encoding="utf-8")
 
     class FakeWorkflow:
         def regenerate_product_card_images(self, *args, **kwargs):
@@ -204,6 +227,7 @@ def test_run_final_video_pipeline_cutme_failure_stops_before_post_processing_or_
             FakeWorkflow(),
             project_id=23,
             account_label="小博",
+            product_card_template_id="muban-xiaobo-1",
             package_output_path=package_path,
             output_path=output_mp4,
                 pipeline_path=pipeline_path,
@@ -225,7 +249,7 @@ def test_run_final_video_pipeline_cutme_failure_stops_before_post_processing_or_
 
     assert adapter.calls == 1
     assert not output_mp4.exists()
-    assert pipeline_path.read_text(encoding="utf-8") == original_pipeline
+    assert pipeline_path.read_text(encoding="utf-8") == confirmed_pipeline
     assert not (workspace / "project-23" / "runs").exists()
 
 
@@ -1071,6 +1095,17 @@ def test_run_final_video_pipeline_records_latest_run_in_pipeline(tmp_path: Path,
         ),
         encoding="utf-8",
     )
+    confirm_phase7_selection(
+        pipeline_path,
+        output_branch="final_mp4",
+        account="小博",
+        product_card_template_id="muban-xiaobo-3",
+        product_media_mode="cover_only",
+        product_order_strategy="price_segment_shuffle",
+        mode="top",
+        top_uids="P001",
+    )
+    confirm_intro_video(pipeline_path, intro_mp4, approved_at="2026-07-19T00:00:00Z")
 
     class FakeWorkflow:
         def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):

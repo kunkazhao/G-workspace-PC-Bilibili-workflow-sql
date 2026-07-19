@@ -12,6 +12,8 @@ from .price_transition_plan import (
     load_price_transition_plan_set,
     price_transition_plan_path,
 )
+from .product_copy_audit import audit_parsed_product_copy
+from .product_copy_lint import group_findings_by_uid, lint_parsed_product_copy
 from .research_pack_service import ResearchPackService
 from .repositories import Repository
 from .utils import safe_text, text_hash
@@ -57,8 +59,29 @@ def diagnose_script_flow(
     else:
         parsed = parse_markdown_file(md_path)
 
+    markdown_source = md_path.read_text(encoding="utf-8-sig") if parsed and md_path.is_file() else ""
+    markdown_lint_findings = (
+        lint_parsed_product_copy(parsed, source_text=markdown_source, source_path=md_path) if parsed else []
+    )
+    markdown_lint_by_uid = group_findings_by_uid(markdown_lint_findings)
+    markdown_audit_findings = (
+        audit_parsed_product_copy(parsed, source_text=markdown_source, source_path=md_path) if parsed else []
+    )
+
     library_path = product_copy_library_path(project)
     library_parsed = parse_markdown_file(library_path) if library_path.is_file() else None
+    library_source = library_path.read_text(encoding="utf-8-sig") if library_parsed else ""
+    library_lint_findings = (
+        lint_parsed_product_copy(library_parsed, source_text=library_source, source_path=library_path)
+        if library_parsed
+        else []
+    )
+    library_lint_by_uid = group_findings_by_uid(library_lint_findings)
+    library_audit_findings = (
+        audit_parsed_product_copy(library_parsed, source_text=library_source, source_path=library_path)
+        if library_parsed
+        else []
+    )
     library_products = {product.uid: product for product in library_parsed.products} if library_parsed else {}
 
     intro_scripts = parsed.intro_scripts if parsed else []
@@ -109,14 +132,33 @@ def diagnose_script_flow(
     md_products = {product.uid: product for product in parsed.products} if parsed else {}
     product_copy_ready = 0
     product_copy_library_ready = 0
+    product_copy_lint_findings = 0
+    product_copy_lint_failed_uids: set[str] = set()
+    current_uids = {safe_text(product.get("uid")) for product in products}
+    episode_copy_uids: set[str] = set()
+    library_copy_uids: set[str] = set()
     for product in products:
         uid = safe_text(product.get("uid"))
         doc = md_products.get(uid)
         if doc and doc.scripts:
+            episode_copy_uids.add(uid)
+            lint_findings = markdown_lint_by_uid.get(uid, [])
+            if lint_findings:
+                product_copy_lint_findings += len(lint_findings)
+                product_copy_lint_failed_uids.add(uid)
+                issues.extend(_product_copy_lint_issues(lint_findings))
+                continue
             product_copy_ready += 1
             continue
         library_doc = library_products.get(uid)
         if library_doc and library_doc.scripts:
+            library_copy_uids.add(uid)
+            lint_findings = library_lint_by_uid.get(uid, [])
+            if lint_findings:
+                product_copy_lint_findings += len(lint_findings)
+                product_copy_lint_failed_uids.add(uid)
+                issues.extend(_product_copy_lint_issues(lint_findings))
+                continue
             product_copy_library_ready += 1
             continue
         issues.append(
@@ -128,6 +170,15 @@ def diagnose_script_flow(
                 "message": "scheme product has no reusable product copy unit in episode Markdown.",
             }
         )
+
+    selected_audit_findings = _selected_product_copy_audit_findings(
+        markdown_audit_findings=markdown_audit_findings,
+        library_audit_findings=library_audit_findings,
+        current_uids=current_uids,
+        episode_copy_uids=episode_copy_uids,
+        library_copy_uids=library_copy_uids,
+    )
+    issues.extend(_product_copy_audit_issues(selected_audit_findings))
 
     if product_copy_library_ready and product_copy_ready < len(products):
         issues.append(
@@ -253,6 +304,9 @@ def diagnose_script_flow(
             "intro_ready": len(intro_scripts),
             "product_copy_ready": product_copy_ready,
             "product_copy_library_ready": product_copy_library_ready,
+            "product_copy_lint_failed_products": len(product_copy_lint_failed_uids),
+            "product_copy_lint_findings": product_copy_lint_findings,
+            "product_copy_style_findings": len(selected_audit_findings),
             "price_transition_sections": len(price_transitions),
             "price_transition_ready": price_transition_ready,
             "price_transition_library_ready": library_price_transition_ready,
@@ -361,6 +415,7 @@ def _status(issues: list[dict[str, Any]], synced: bool) -> str:
             "missing_price_transition_plan_set",
             "missing_matching_price_transition_plan",
             "missing_product_copy",
+            "product_copy_lint_failed",
         }
     ):
         return "content_incomplete"
@@ -372,6 +427,14 @@ def _status(issues: list[dict[str, Any]], synced: bool) -> str:
 def _next_hint(db: Database, project_id: int, issues: list[dict[str, Any]], synced: bool) -> dict[str, Any]:
     codes = {safe_text(issue.get("code")) for issue in issues}
     research_pack_path = str(ResearchPackService(db).default_pack_path(project_id))
+    if "product_copy_lint_failed" in codes:
+        return {
+            "action": "fix_product_copy_language",
+            "task": "修正商品口播中的内部标签和资料采集措辞",
+            "command": f"python -m bworkflow_sql copy-lint {project_id}",
+            "requires_user_final_approval": False,
+            "note": "按 UID 和正文版本修正命中句，重新运行 copy-lint 与 script-doctor；通过前禁止同步、配音和组装。",
+        }
     if "episode_markdown_needs_materialization" in codes and "missing_product_copy" not in codes:
         materialize_issue = next(
             (issue for issue in issues if safe_text(issue.get("code")) == "episode_markdown_needs_materialization"),
@@ -458,3 +521,75 @@ def _next_hint(db: Database, project_id: int, issues: list[dict[str, Any]], sync
 
 def _product_copy_library_path(project: dict[str, Any]) -> Path:
     return product_copy_library_path(project)
+
+
+def _product_copy_lint_issues(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "level": "error",
+            "code": "product_copy_lint_failed",
+            "uid": safe_text(finding.get("uid")),
+            "title": safe_text(finding.get("title")),
+            "block_label": safe_text(finding.get("block_label")),
+            "rule_id": safe_text(finding.get("rule_id")),
+            "category": safe_text(finding.get("category")),
+            "match": safe_text(finding.get("match")),
+            "message": safe_text(finding.get("message")),
+            "suggestion": safe_text(finding.get("suggestion")),
+            "path": safe_text(finding.get("path")),
+            "line": int(finding.get("line") or 0),
+            "column": int(finding.get("column") or 0),
+            "excerpt": safe_text(finding.get("excerpt")),
+        }
+        for finding in findings
+    ]
+
+
+def _selected_product_copy_audit_findings(
+    *,
+    markdown_audit_findings: list[dict[str, Any]],
+    library_audit_findings: list[dict[str, Any]],
+    current_uids: set[str],
+    episode_copy_uids: set[str],
+    library_copy_uids: set[str],
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    if episode_copy_uids:
+        selected.extend(
+            finding
+            for finding in markdown_audit_findings
+            if safe_text(finding.get("uid")) in current_uids
+            or safe_text(finding.get("rule_id")) == "repeated_abstract_closing_form"
+        )
+    library_only_uids = (library_copy_uids - episode_copy_uids) & current_uids
+    if library_only_uids:
+        selected.extend(
+            finding
+            for finding in library_audit_findings
+            if safe_text(finding.get("uid")) in library_only_uids
+        )
+    return selected
+
+
+def _product_copy_audit_issues(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "level": "warning",
+            "code": "product_copy_style_warning",
+            "uid": safe_text(finding.get("uid")),
+            "title": safe_text(finding.get("title")),
+            "block_label": safe_text(finding.get("block_label")),
+            "rule_id": safe_text(finding.get("rule_id")),
+            "category": safe_text(finding.get("category")),
+            "match": safe_text(finding.get("match")),
+            "message": safe_text(finding.get("message")),
+            "suggestion": safe_text(finding.get("suggestion")),
+            "path": safe_text(finding.get("path")),
+            "line": int(finding.get("line") or 0),
+            "column": int(finding.get("column") or 0),
+            "excerpt": safe_text(finding.get("excerpt")),
+            "locations": finding.get("locations", []),
+            "blocking": False,
+        }
+        for finding in findings
+    ]

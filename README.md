@@ -25,6 +25,28 @@ These commands keep legacy phase fields and also write hash-bound approval
 evidence plus a stable `episode_id`. Replacing an approved file invalidates the
 bound approval in TotalControl.
 
+## Cover Workflow
+
+After `confirm-production`, new run manifests with a bound final spoken-script
+snapshot enter a separate cover phase before publishing preparation:
+
+```powershell
+python -m bworkflow_sql cover-context --pipeline <.pipeline.json>
+python -m bworkflow_sql record-cover-copy-options --pipeline <.pipeline.json> --options-file <five-options.json>
+python -m bworkflow_sql confirm-cover-copy --pipeline <.pipeline.json> --index <1-5>
+python -m bworkflow_sql prepare-cover-generation --pipeline <.pipeline.json>
+python -m bworkflow_sql record-cover-image --pipeline <.pipeline.json> --cover-package <cover-package.json> --image <generated-image>
+python -m bworkflow_sql confirm-cover-image --pipeline <.pipeline.json>
+```
+
+The agent generates exactly five copy options from `cover-context`; the user
+selects one. `prepare-cover-generation` freezes the account-specific portrait,
+style and exact model-native Chinese headline prompt. The image model creates
+one 4:3 candidate with multiple generic products from the category; no SKU image
+is supplied and no deterministic text overlay is added. Rejection uses
+`reject-cover-image --reason <reason>` and keeps the selected copy for another
+attempt. Publishing remains blocked until the cover approval is hash-bound.
+
 ## Run
 
 Install the UI theme dependency first:
@@ -96,8 +118,11 @@ The UI is intentionally direct and database-first. JSON/Markdown support is comp
 4. Sync asset folders. Image/video/voice files are matched to current products by UID in the filename or path and saved as database bindings.
 5. Use the workflow pages in order: `生成配音` -> `组合口播稿` -> `生成剪映草稿`. The spoken-script output MD is chosen in `组合口播稿`, not in the category project.
 6. After reviewing a complete MP4, run `confirm-production` only when the user
-   accepts it as an actual production. Before the next episode, query
-   `production-history` and prefer its unused-template recommendation.
+   accepts it as an actual production.
+7. Complete the cover workflow: five AI copy options, one user-confirmed copy,
+   one 4:3 model-generated image, then explicit image approval.
+8. Before the next episode, query `production-history` and prefer its
+   unused-template recommendation.
 
 CLI examples:
 
@@ -242,14 +267,14 @@ Output rules:
 
 - `商品文案 MD` is the source copy document.
 - `口播稿输出 MD` is selected in the `组合口播稿` workflow. It is the final combined spoken script, and the assembly step overwrites the whole file.
-- The two Markdown roles have exclusive writers: `materialize-episode` may update only the reusable asset Markdown, while `assemble` may update only the final spoken-script Markdown. Either command rejects the other role's path.
+- Reusable asset Markdown and final spoken-script Markdown remain separate roles. `materialize-episode` may update only reusable asset Markdown. `assemble` and formal final-video production write final spoken scripts through the centralized materializer and never write back into the reusable asset library.
 - `materialize-episode` has no target-path override. Its target comes from the project's canonical asset Markdown binding; `--episode-path` is not supported.
-- `assemble-plan` and `assemble` accept `--product-uids UID1,UID2,...` when an exact previously recorded product order must be reproduced. An explicit complete order disables price-segment reshuffling while retaining normal price-transition insertion and `--top-uids` semantics.
+- `assemble-plan` and `assemble` accept `--product-uids UID1,UID2,...` to reproduce a product order before rendering. They cannot prove exact reconstruction of an already rendered MP4 when a product has multiple script-block versions; use that run's RenderPackage or `materialize-final-script` instead.
 - The spoken script manifest is an internal task file under `data/workspace/project-<id>/manifests/`.
 - Internal generated files are kept under `data/workspace`.
 - Jianying drafts are written to `E:\剪辑-剪映\草稿\JianyingPro Drafts`.
 - Standalone voice files default to `G:\2026项目-b站` and do not write `asset_bindings`.
-- Final MP4 can be produced with `python -m bworkflow_sql render-final-video <project_id> --account <账号> --product-media-mode video_preferred`. The normal path builds one `final_mp4` RenderPackage containing the raw intro, price/product recommendation segments, and the account's fixed closing audio; it batch-aligns every segment with ASR, chooses one global subtitle style, calls CutMe once through `CutMeAdapter`, and returns one complete MP4. Add `--intro-video <raw-intro.mp4>` plus either `--intro-video-text-file <transcript.txt>` or `--intro-video-source-plan <plan.json>`; the intro is re-timed from its audio even if the plan contains old scene timing. CutMe normalizes every segment to the package loudness target before concat and masters the complete output. Use `--acceptance-mode quick` for normal delivery, `visual` when visuals changed, and `full` for loudness plus visual archival verification. With `--pipeline <.pipeline.json>`, the program creates or reuses `G:\2026项目-b站\MMDD-品类-账号` and writes only `引言视频.mp4` plus the complete final MP4 there. RenderPackage, product-section MP4, acceptance frames, and process evidence remain under `data\workspace\project-<id>\runs\artifacts\`.
+- Final MP4 can be produced with `python -m bworkflow_sql render-final-video <project_id> --account <账号> --product-media-mode video_preferred --pipeline <.pipeline.json>`. With `--pipeline`, the command automatically resolves the hash-bound accepted intro MP4 and its source plan; changed or mismatched artifacts block before rendering. A successful run writes the current readable script to `1.口播文案\{project}\{month}月-{account}.md`, writes an immutable `完整口播稿.md` beside the run RenderPackage, and binds both hashes plus the RenderPackage hash into the run manifest and pipeline. Use `materialize-final-script --run-manifest <run.json> --pipeline <.pipeline.json>` to backfill this evidence for an existing run without rerendering its MP4.
 
 ## Voice Generation Notes
 
