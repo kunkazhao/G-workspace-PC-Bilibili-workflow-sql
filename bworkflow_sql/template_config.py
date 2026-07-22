@@ -72,6 +72,71 @@ REMOTION_TEMPLATE_METADATA_PATH = Path(
     )
 )
 
+_PRODUCT_CARD_SLOT_TYPES = frozenset({"text", "media", "label_value_list"})
+
+
+def _validated_slot_registry(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        raise ValueError("CutMe product-card slotRegistry must be an object")
+    registry: dict[str, dict[str, Any]] = {}
+    for raw_key, raw_definition in value.items():
+        key = raw_key.strip() if isinstance(raw_key, str) else ""
+        if not key or not isinstance(raw_definition, dict):
+            raise ValueError(f"Invalid slotRegistry definition for {raw_key!r}")
+        slot_type = raw_definition.get("type")
+        if not isinstance(slot_type, str) or slot_type not in _PRODUCT_CARD_SLOT_TYPES:
+            raise ValueError(f"Invalid slot type for {key!r}: {slot_type!r}")
+        source = raw_definition.get("source")
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError(f"Slot {key!r} source must be a non-empty string")
+        registry[key] = {"type": slot_type, "source": source}
+    return registry
+
+
+def _validated_slot_declarations(
+    template_id: str,
+    value: Any,
+    registry: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ValueError(f"Template {template_id} slotDeclarations must be a list")
+    declarations: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_declaration in value:
+        if not isinstance(raw_declaration, dict):
+            raise ValueError(f"Template {template_id} has an invalid slot declaration")
+        raw_key = raw_declaration.get("key")
+        key = raw_key.strip() if isinstance(raw_key, str) else ""
+        if not key:
+            raise ValueError(f"Template {template_id} declaration key must be non-empty")
+        if key not in registry:
+            raise ValueError(
+                f"Template {template_id} declares {key!r}, which is not registered in slotRegistry"
+            )
+        if key in seen:
+            raise ValueError(f"Template {template_id} declares slot {key!r} more than once")
+        required = raw_declaration.get("required")
+        if type(required) is not bool:
+            raise ValueError(
+                f"Template {template_id} slot {key!r} required must be a boolean"
+            )
+        if required:
+            if "emptyPolicy" in raw_declaration:
+                raise ValueError(
+                    f"Template {template_id} required slot {key!r} must not set emptyPolicy"
+                )
+            declarations.append({"key": key, "required": True})
+        else:
+            if raw_declaration.get("emptyPolicy") != "preserve":
+                raise ValueError(
+                    f"Template {template_id} optional slot {key!r} emptyPolicy must be preserve"
+                )
+            declarations.append(
+                {"key": key, "required": False, "emptyPolicy": "preserve"}
+            )
+        seen.add(key)
+    return declarations
+
 
 @lru_cache(maxsize=1)
 def _remotion_template_contract() -> tuple[
@@ -83,38 +148,24 @@ def _remotion_template_contract() -> tuple[
         payload = json.loads(REMOTION_TEMPLATE_METADATA_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}, {}
-    raw_registry = payload.get("slotRegistry")
-    registry = (
-        {
-            str(key): dict(value)
-            for key, value in raw_registry.items()
-            if str(key).strip() and isinstance(value, dict)
-        }
-        if isinstance(raw_registry, dict)
-        else {}
-    )
+    if not isinstance(payload, dict):
+        raise ValueError("CutMe product-card template metadata must be an object")
+    registry = _validated_slot_registry(payload.get("slotRegistry"))
     templates = payload.get("templates")
     if not isinstance(templates, list):
-        return registry, {}
+        raise ValueError("CutMe product-card templates must be a list")
     result: dict[str, dict[str, Any]] = {}
     for item in templates:
         if not isinstance(item, dict):
-            continue
+            raise ValueError("CutMe product-card template entry must be an object")
         template_id = str(item.get("templateId") or "").strip()
         if not template_id:
-            continue
-        declarations = item.get("slotDeclarations")
-        if isinstance(declarations, list):
-            for declaration in declarations:
-                if not isinstance(declaration, dict):
-                    continue
-                key = str(declaration.get("key") or "").strip()
-                if key and key not in registry:
-                    raise ValueError(
-                        f"Template {template_id} declares unregistered slot key {key!r}; "
-                        "add it to slotRegistry first"
-                    )
-        result[template_id] = dict(item)
+            raise ValueError("CutMe product-card templateId must be non-empty")
+        validated = dict(item)
+        validated["slotDeclarations"] = _validated_slot_declarations(
+            template_id, item.get("slotDeclarations"), registry
+        )
+        result[template_id] = validated
     return registry, result
 
 
@@ -154,7 +205,18 @@ def _slot_value_is_present(
     value = _value_at_slot_source(product_card, str(definition.get("source") or ""))
     slot_type = str(definition.get("type") or "")
     if slot_type == "label_value_list":
-        return isinstance(value, list) and bool(value)
+        return (
+            isinstance(value, list)
+            and bool(value)
+            and all(
+                isinstance(item, dict)
+                and isinstance(item.get("label"), str)
+                and bool(item["label"].strip())
+                and isinstance(item.get("value"), str)
+                and bool(item["value"].strip())
+                for item in value
+            )
+        )
     return isinstance(value, str) and bool(value.strip())
 
 

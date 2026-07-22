@@ -20,17 +20,11 @@ from bworkflow_sql.template_config import (
 )
 
 
-ISOLATED_CUTME_METADATA_PATH = Path(
-    os.environ.get(
-        "CUTME_REMOTION_TEMPLATE_METADATA",
-        str(
-            Path(__file__).resolve().parents[3]
-            / "赵二-工具-CutMe"
-            / "dynamic-product-card-final-video"
-            / "remotion-renderer"
-            / "product-card-templates.json"
-        ),
-    )
+_cutme_metadata_env = os.environ.get("CUTME_REMOTION_TEMPLATE_METADATA")
+_cutme_metadata_path = Path(_cutme_metadata_env) if _cutme_metadata_env else None
+requires_cutme_metadata = pytest.mark.skipif(
+    _cutme_metadata_path is None or not _cutme_metadata_path.is_file(),
+    reason="set CUTME_REMOTION_TEMPLATE_METADATA for cross-repository metadata tests",
 )
 
 
@@ -47,14 +41,40 @@ def _clear_template_metadata_caches():
             cached.cache_clear()
 
 
-def _write_isolated_template_contract(
+def _minimal_template_contract() -> dict:
+    return {
+        "slotRegistry": {
+            "title": {"type": "text", "source": "dataMap.title"},
+            "displayPrice": {"type": "text", "source": "dataMap.price"},
+            "specs": {"type": "label_value_list", "source": "slots"},
+            "review": {"type": "text", "source": "dataMap.remark"},
+            "priceBandLabel": {"type": "text", "source": "dataMap.priceBandLabel"},
+            "categoryLabel": {"type": "text", "source": "dataMap.categoryLabel"},
+            "productMedia": {"type": "media", "source": "coverAsset"},
+        },
+        "templates": [
+            {
+                "templateId": "muban-test-1",
+                "slotDeclarations": [
+                    {"key": "title", "required": True},
+                    {"key": "displayPrice", "required": True},
+                    {"key": "specs", "required": False, "emptyPolicy": "preserve"},
+                    {"key": "review", "required": False, "emptyPolicy": "preserve"},
+                    {"key": "priceBandLabel", "required": True},
+                    {"key": "categoryLabel", "required": False, "emptyPolicy": "preserve"},
+                    {"key": "productMedia", "required": True},
+                ],
+            }
+        ],
+    }
+
+
+def _write_template_contract(
     tmp_path: Path,
     monkeypatch,
     mutate,
 ) -> dict:
-    assert ISOLATED_CUTME_METADATA_PATH.is_file()
-    assert "superpowers" in str(ISOLATED_CUTME_METADATA_PATH)
-    payload = json.loads(ISOLATED_CUTME_METADATA_PATH.read_text(encoding="utf-8"))
+    payload = _minimal_template_contract()
     mutate(payload)
     metadata_path = tmp_path / "cutme-remotion" / "product-card-templates.json"
     metadata_path.parent.mkdir(parents=True)
@@ -132,6 +152,7 @@ def test_zhiliao_template_preset_available() -> None:
     }
 
 
+@requires_cutme_metadata
 def test_rongrong_template_preset_available() -> None:
     templates = available_templates("荣荣")
 
@@ -160,6 +181,7 @@ def test_rongrong_template_preset_available() -> None:
     }
 
 
+@requires_cutme_metadata
 def test_rongrong_remotion_template_1_video_slot_is_projected_from_metadata() -> None:
     metadata = get_remotion_template_metadata("muban-rongrong-1")
 
@@ -209,6 +231,7 @@ def test_xiaowai_template_1_uses_jianying_panel_coordinates() -> None:
     }
 
 
+@requires_cutme_metadata
 def test_xiaowai_remotion_template_1_is_available_ahead_of_legacy_template() -> None:
     templates = available_templates("小歪")
 
@@ -219,6 +242,7 @@ def test_xiaowai_remotion_template_1_is_available_ahead_of_legacy_template() -> 
     assert display_template_for_product_card_template_id("muban-xiaowai-1") == "小歪模板1"
 
 
+@requires_cutme_metadata
 def test_xiaowai_remotion_template_1_video_slot_is_projected_from_metadata() -> None:
     metadata = get_remotion_template_metadata("muban-xiaowai-1")
 
@@ -258,6 +282,7 @@ def test_xiaobo_template_2_uses_html_cover_frame_slot() -> None:
     }
 
 
+@requires_cutme_metadata
 def test_xiaobo_template_3_uses_html_cover_frame_slot() -> None:
     remotion_display_name = display_template_for_product_card_template_id("muban-xiaobo-1")
     templates = available_templates(user_for_template(remotion_display_name))
@@ -280,6 +305,7 @@ def test_xiaobo_template_3_uses_html_cover_frame_slot() -> None:
     }
 
 
+@requires_cutme_metadata
 def test_xiaoran_template_2_uses_jianying_ui_coordinates() -> None:
     templates = available_templates("小燃")
 
@@ -309,6 +335,7 @@ def test_xiaoran_template_1_uses_calibrated_fixed_video_scale() -> None:
     }
 
 
+@requires_cutme_metadata
 def test_xiaoran_remotion_template_1_is_available_ahead_of_legacy_template() -> None:
     templates = available_templates("小燃")
 
@@ -319,6 +346,7 @@ def test_xiaoran_remotion_template_1_is_available_ahead_of_legacy_template() -> 
     assert display_template_for_product_card_template_id("muban-xiaoran-1") == "小燃模板1"
 
 
+@requires_cutme_metadata
 def test_xiaoran_remotion_template_1_video_slot_is_projected_from_metadata() -> None:
     metadata = get_remotion_template_metadata("muban-xiaoran-1")
 
@@ -347,6 +375,7 @@ def test_xiaoran_remotion_template_1_video_slot_is_projected_from_metadata() -> 
     }
 
 
+@requires_cutme_metadata
 def test_xiaoran_remotion_template_2_keeps_calibrated_display_scale() -> None:
     slot = display_video_slot_for_product_card_template_id("muban-xiaoran-2")
 
@@ -367,6 +396,7 @@ def test_xiaowai_template_2_uses_html_cover_stage_slot() -> None:
     }
 
 
+@requires_cutme_metadata
 def test_muban_rongrong_2_uses_right_aligned_16_by_9_video_slot_for_calibration() -> None:
     metadata = get_remotion_template_metadata("muban-rongrong-2")
     assert metadata["coverMediaSlot"] == {
@@ -402,6 +432,7 @@ def test_muban_rongrong_2_uses_right_aligned_16_by_9_video_slot_for_calibration(
     }
 
 
+@requires_cutme_metadata
 def test_muban_xiaobo_1_metadata_is_loaded_from_cutme_remotion_contract() -> None:
     metadata = get_remotion_template_metadata("muban-xiaobo-1")
 
@@ -429,6 +460,7 @@ def test_muban_xiaobo_1_metadata_is_loaded_from_cutme_remotion_contract() -> Non
     }
 
 
+@requires_cutme_metadata
 def test_muban_xiaobo_1_video_slot_is_projected_from_remotion_metadata() -> None:
     assert display_template_for_product_card_template_id("muban-xiaobo-1") == "小博模板1"
     assert display_video_slot_for_product_card_template_id("muban-xiaobo-1") == {
@@ -445,6 +477,7 @@ def test_muban_xiaobo_1_video_slot_is_projected_from_remotion_metadata() -> None
     }
 
 
+@requires_cutme_metadata
 def test_resolve_product_card_template_uses_explicit_template_before_account_default() -> None:
     by_id = resolve_product_card_template("小博", "muban-xiaobo-1")
     by_name = resolve_product_card_template("小博", "小博模板1")
@@ -455,6 +488,7 @@ def test_resolve_product_card_template_uses_explicit_template_before_account_def
     assert by_default["templateId"] == "muban-xiaobo-1"
 
 
+@requires_cutme_metadata
 def test_resolve_product_card_template_can_require_explicit_still_template() -> None:
     try:
         resolve_product_card_template("小博", require_explicit=True)
@@ -464,6 +498,7 @@ def test_resolve_product_card_template_can_require_explicit_still_template() -> 
         raise AssertionError("expected still/product-image flow to require explicit template")
 
 
+@requires_cutme_metadata
 def test_resolve_product_card_template_rejects_template_from_other_account() -> None:
     try:
         resolve_product_card_template("小燃", "muban-xiaobo-1")
@@ -477,7 +512,7 @@ def test_new_registered_optional_slot_does_not_require_template_declaration(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    payload = _write_isolated_template_contract(
+    payload = _write_template_contract(
         tmp_path,
         monkeypatch,
         lambda contract: contract["slotRegistry"].update(
@@ -506,17 +541,99 @@ def test_template_declaration_rejects_unregistered_slot_key(
             {"key": "notRegistered", "required": False, "emptyPolicy": "preserve"}
         )
 
-    payload = _write_isolated_template_contract(tmp_path, monkeypatch, mutate)
+    payload = _write_template_contract(tmp_path, monkeypatch, mutate)
 
     with pytest.raises(ValueError, match="notRegistered.*slotRegistry"):
         get_remotion_template_metadata(payload["templates"][0]["templateId"])
+
+
+def test_slot_contract_rejects_invalid_registry_and_declaration_shapes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    invalid_contracts: list[tuple[dict, str]] = []
+
+    unknown_type = _minimal_template_contract()
+    unknown_type["slotRegistry"]["title"]["type"] = "unknown"
+    invalid_contracts.append((unknown_type, "slot type"))
+
+    blank_source = _minimal_template_contract()
+    blank_source["slotRegistry"]["title"]["source"] = "   "
+    invalid_contracts.append((blank_source, "source"))
+
+    non_boolean_required = _minimal_template_contract()
+    non_boolean_required["templates"][0]["slotDeclarations"][0]["required"] = 1
+    invalid_contracts.append((non_boolean_required, "required"))
+
+    bad_empty_policy = _minimal_template_contract()
+    bad_empty_policy["templates"][0]["slotDeclarations"][2]["emptyPolicy"] = "collapse"
+    invalid_contracts.append((bad_empty_policy, "emptyPolicy"))
+
+    missing_optional_policy = _minimal_template_contract()
+    missing_optional_policy["templates"][0]["slotDeclarations"][2].pop("emptyPolicy")
+    invalid_contracts.append((missing_optional_policy, "emptyPolicy"))
+
+    required_with_policy = _minimal_template_contract()
+    required_with_policy["templates"][0]["slotDeclarations"][0]["emptyPolicy"] = "preserve"
+    invalid_contracts.append((required_with_policy, "emptyPolicy"))
+
+    malformed_declaration = _minimal_template_contract()
+    malformed_declaration["templates"][0]["slotDeclarations"][0] = "bad"
+    invalid_contracts.append((malformed_declaration, "declaration"))
+
+    for index, (payload, message) in enumerate(invalid_contracts):
+        metadata_path = tmp_path / f"invalid-{index}.json"
+        metadata_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(template_config, "REMOTION_TEMPLATE_METADATA_PATH", metadata_path)
+        template_config._remotion_template_contract.cache_clear()
+        template_config._remotion_template_metadata.cache_clear()
+        with pytest.raises(ValueError, match=message):
+            template_config.get_remotion_slot_registry()
+
+
+def test_required_label_value_list_rejects_empty_or_blank_items(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def require_specs(contract: dict) -> None:
+        specs = next(
+            item
+            for item in contract["templates"][0]["slotDeclarations"]
+            if item["key"] == "specs"
+        )
+        specs["required"] = True
+        specs.pop("emptyPolicy")
+
+    payload = _write_template_contract(tmp_path, monkeypatch, require_specs)
+    template_id = payload["templates"][0]["templateId"]
+    product_card = {
+        "dataMap": {
+            "title": "Alpha Keyboard",
+            "price": "299元",
+            "priceBandLabel": "200-300元",
+        },
+        "coverAsset": "assets/covers/P001.png",
+    }
+
+    invalid_values = (
+        [{}],
+        [{"label": " ", "value": "机械轴"}],
+        [{"label": "轴体", "value": " "}],
+    )
+    for invalid_specs in invalid_values:
+        product_card["slots"] = invalid_specs
+        issues = template_config.product_card_slot_issues(template_id, product_card)
+        assert "specs" in [item["slot_key"] for item in issues]
+
+    product_card["slots"] = [{"label": "轴体", "value": "机械轴"}]
+    assert template_config.product_card_slot_issues(template_id, product_card) == []
 
 
 def test_only_missing_required_slot_values_are_blocking(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    payload = _write_isolated_template_contract(
+    payload = _write_template_contract(
         tmp_path, monkeypatch, lambda _contract: None
     )
     template_id = payload["templates"][0]["templateId"]
