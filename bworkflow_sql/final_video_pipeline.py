@@ -139,6 +139,7 @@ def run_final_video_pipeline(
     acceptance = safe_text(acceptance_mode) or "full"
     if acceptance not in {"none", "quick", "visual", "full"}:
         raise ValueError(f"unsupported acceptance_mode: {acceptance}")
+    explicit_media_output = bool(output_path or full_output_path)
     dynamic_preflight = _run_dynamic_product_preflight(
         workflow,
         project_id=project_id,
@@ -341,7 +342,7 @@ def run_final_video_pipeline(
 
     # The delivery root only receives a complete candidate after all requested
     # automated gates have passed. Failed or unaccepted renders stay internal.
-    if delivery_layout and acceptance != "none":
+    if delivery_layout and acceptance != "none" and not explicit_media_output:
         promoted_path = delivery_layout["full_mp4"]
         promoted_path.parent.mkdir(parents=True, exist_ok=True)
         staging_dir = target_mp4.parent if target_mp4.parent.name == ".bworkflow-staging" else None

@@ -732,6 +732,7 @@ def test_run_final_video_pipeline_renders_intro_and_outro_in_one_mp4_with_quick_
     job_package_path = tmp_path / "job" / "render-package.json"
     product_mp4 = tmp_path / "product.mp4"
     full_mp4 = tmp_path / "full.mp4"
+    formal_delivery_dir = tmp_path / "formal-delivery"
     intro_mp4 = tmp_path / "intro-subtitle.mp4"
     intro_mp4.write_bytes(b"intro")
     package_path.write_text(
@@ -779,6 +780,7 @@ def test_run_final_video_pipeline_renders_intro_and_outro_in_one_mp4_with_quick_
         intro_video_path=intro_mp4,
         intro_video_text="引言口播文字",
         full_output_path=full_mp4,
+        delivery_dir=formal_delivery_dir,
         acceptance_mode="quick",
         mode="top",
         top_uids="P001",
@@ -791,6 +793,8 @@ def test_run_final_video_pipeline_renders_intro_and_outro_in_one_mp4_with_quick_
     assert result["ok"] is True
     assert result["output_mp4"] == str(full_mp4)
     assert result["full_output_mp4"] == str(full_mp4)
+    assert full_mp4.is_file()
+    assert not list(formal_delivery_dir.glob("*.mp4"))
     assert result["full_output_mp4_link"] == f"[打开完整 MP4]({full_mp4.as_posix()})"
     assert result["acceptance_mode"] == "quick"
     assert result["verification"]["loudnorm"] is None
