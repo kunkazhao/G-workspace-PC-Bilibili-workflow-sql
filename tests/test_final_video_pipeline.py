@@ -6,32 +6,43 @@ from pathlib import Path
 import pytest
 
 from bworkflow_sql.cutme_adapter import CutMeAdapterError
-from bworkflow_sql.final_video_pipeline import _run_command, run_final_video_pipeline
+from bworkflow_sql.final_video_pipeline import (
+    _run_command,
+    _run_dynamic_product_preflight as REAL_DYNAMIC_PREFLIGHT,
+    run_final_video_pipeline,
+)
 from bworkflow_sql.phase7_selection import confirm_phase7_selection
 from bworkflow_sql.artifact_approvals import confirm_intro_video
 
 
-pytestmark = pytest.mark.usefixtures("isolated_final_video_workspace")
+pytestmark = pytest.mark.usefixtures(
+    "isolated_final_video_workspace",
+    "ready_dynamic_preflight",
+)
+
+
+@pytest.fixture
+def ready_dynamic_preflight(monkeypatch: pytest.MonkeyPatch):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_dynamic_product_preflight",
+        lambda workflow, **kwargs: {
+            "ok": True,
+            "status": "ready",
+            "issues": [],
+            "contexts": [],
+            "snapshot_id": "test-snapshot",
+        },
+    )
 
 
 @pytest.fixture(autouse=True)
-def fake_cutme_boundary(tmp_path: Path, monkeypatch, request: pytest.FixtureRequest):
+def fake_cutme_boundary(tmp_path: Path, monkeypatch):
     import bworkflow_sql.final_video_pipeline as pipeline_module
 
     calls: list[tuple[Path, Path, Path]] = []
-    if not request.node.name.startswith("test_dynamic_preflight"):
-        monkeypatch.setattr(
-            pipeline_module,
-            "_run_dynamic_product_preflight",
-            lambda workflow, **kwargs: {
-                "ok": True,
-                "status": "ready",
-                "issues": [],
-                "contexts": [],
-                "snapshot_id": "test-snapshot",
-            },
-            raising=False,
-        )
 
     class FakeCutMeAdapter:
         def __init__(self, *, cutme_root):
@@ -94,6 +105,7 @@ def test_dynamic_preflight_failure_has_no_render_or_cache_side_effects(
             return {
                 "ok": False,
                 "status": "blocked",
+                "error_code": "master_unavailable",
                 "issues": [{"code": "invalid_product_price", "product_uid": "P001"}],
                 "contexts": [],
                 "snapshot_id": "snapshot-1",
@@ -115,7 +127,7 @@ def test_dynamic_preflight_failure_has_no_render_or_cache_side_effects(
     monkeypatch.setattr(
         pipeline_module,
         "_run_dynamic_product_preflight",
-        lambda workflow, **kwargs: workflow.dynamic_product_card_preflight(**kwargs),
+        REAL_DYNAMIC_PREFLIGHT,
     )
 
     result = run_final_video_pipeline(
@@ -129,7 +141,7 @@ def test_dynamic_preflight_failure_has_no_render_or_cache_side_effects(
 
     assert result["ok"] is False
     assert result["stage"] == "dynamic_product_preflight"
-    assert result["error_code"] == "dynamic_product_preflight_failed"
+    assert result["error_code"] == "master_unavailable"
     assert calls == {"preflight": 1, "regenerate": 0, "prepare": 0, "cutme": 0}
     assert cache_manifest.read_bytes() == sentinel
     assert sorted(path.relative_to(render_root) for path in render_root.rglob("*")) == before_paths
@@ -143,6 +155,11 @@ def test_dynamic_preflight_failure_does_not_create_render_directory(
 
     workspace = tmp_path / "workspace"
     monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", workspace)
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_dynamic_product_preflight",
+        REAL_DYNAMIC_PREFLIGHT,
+    )
 
     result = run_final_video_pipeline(
         object(),
@@ -179,7 +196,7 @@ def test_dynamic_preflight_success_enters_existing_package_flow(
     monkeypatch.setattr(
         pipeline_module,
         "_run_dynamic_product_preflight",
-        lambda workflow, **kwargs: workflow.dynamic_product_card_preflight(**kwargs),
+        REAL_DYNAMIC_PREFLIGHT,
     )
 
     result = run_final_video_pipeline(
@@ -194,6 +211,63 @@ def test_dynamic_preflight_success_enters_existing_package_flow(
     assert calls == {"preflight": 1, "prepare": 1}
     assert result["stage"] == "render_package"
     assert (workspace / "project-25" / "render").is_dir()
+
+
+@pytest.mark.parametrize(
+    "business_code",
+    ["master_unavailable", "invalid_product_card_template"],
+)
+def test_dynamic_preflight_preserves_business_error_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    business_code: str,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_dynamic_product_preflight",
+        REAL_DYNAMIC_PREFLIGHT,
+    )
+
+    class FakeWorkflow:
+        def dynamic_product_card_preflight(self, *args, **kwargs):
+            return {"ok": False, "error_code": business_code, "issues": [], "contexts": []}
+
+    result = run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=26,
+        account_label="xiaobo",
+        product_card_template_id="muban-test-1",
+        acceptance_mode="none",
+    )
+    assert result["error_code"] == business_code
+
+
+def test_dynamic_preflight_programming_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_dynamic_product_preflight",
+        REAL_DYNAMIC_PREFLIGHT,
+    )
+
+    class BrokenWorkflow:
+        def dynamic_product_card_preflight(self, *args, **kwargs):
+            raise AssertionError("programming bug")
+
+    with pytest.raises(AssertionError, match="programming bug"):
+        run_final_video_pipeline(
+            BrokenWorkflow(),
+            project_id=27,
+            account_label="xiaobo",
+            product_card_template_id="muban-test-1",
+            acceptance_mode="none",
+        )
 
 
 def test_run_final_video_pipeline_uses_one_adapter_call_and_preserves_cutme_result(

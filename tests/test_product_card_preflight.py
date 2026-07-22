@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+import bworkflow_sql.product_card_preflight as preflight_module
+import bworkflow_sql.workflow_service as workflow_service_module
 from bworkflow_sql.db import Database
 from bworkflow_sql.dynamic_product_card import (
     category_leaf_name,
@@ -50,6 +52,7 @@ def product_card_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
                     {
                         "templateId": "muban-test-1",
                         "displayName": "Test template",
+                        "account": "xiaobo",
                         "slotDeclarations": [
                             {"key": "title", "required": True},
                             {"key": "displayPrice", "required": True},
@@ -63,6 +66,7 @@ def product_card_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
                     {
                         "templateId": "muban-test-required-details",
                         "displayName": "Required details template",
+                        "account": "xiaobo",
                         "slotDeclarations": [
                             {"key": "title", "required": True},
                             {"key": "displayPrice", "required": True},
@@ -70,6 +74,17 @@ def product_card_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
                             {"key": "review", "required": True},
                             {"key": "priceBandLabel", "required": True},
                             {"key": "categoryLabel", "required": True},
+                            {"key": "productMedia", "required": True},
+                        ],
+                    },
+                    {
+                        "templateId": "muban-other-1",
+                        "displayName": "Other account template",
+                        "account": "other-account",
+                        "slotDeclarations": [
+                            {"key": "title", "required": True},
+                            {"key": "displayPrice", "required": True},
+                            {"key": "priceBandLabel", "required": True},
                             {"key": "productMedia", "required": True},
                         ],
                     },
@@ -334,6 +349,43 @@ def test_snapshot_category_is_authoritative_when_local_project_category_conflict
     assert result["contexts"][0]["data_map"]["categoryLabel"] == "Air Fryers"
 
 
+def test_template_display_name_resolves_to_canonical_id(
+    tmp_path: Path,
+    product_card_metadata: Path,
+):
+    db, project_id = _seed_project(tmp_path)
+    result = dynamic_product_card_preflight(
+        db,
+        project_id=project_id,
+        account_label="xiaobo",
+        product_card_template_id="Test template",
+        master_contracts=FakeMasterAdapter(_snapshot((_snapshot_product("P001"),))),
+    )
+    assert result["ok"] is True
+    assert result["product_card_template_id"] == "muban-test-1"
+
+
+@pytest.mark.parametrize(
+    "template_name",
+    ["Other account template", "unknown-template"],
+)
+def test_cross_account_and_unknown_templates_are_blocked(
+    tmp_path: Path,
+    product_card_metadata: Path,
+    template_name: str,
+):
+    db, project_id = _seed_project(tmp_path)
+    result = dynamic_product_card_preflight(
+        db,
+        project_id=project_id,
+        account_label="xiaobo",
+        product_card_template_id=template_name,
+        master_contracts=FakeMasterAdapter(_snapshot((_snapshot_product("P001"),))),
+    )
+    assert result["ok"] is False
+    assert result["error_code"] == "invalid_product_card_template"
+
+
 def test_video_is_preferred_and_remote_cover_is_the_fallback(
     tmp_path: Path,
     product_card_metadata: Path,
@@ -348,6 +400,48 @@ def test_video_is_preferred_and_remote_cover_is_the_fallback(
     result = _run(db, project_id, _snapshot((_snapshot_product("P001"),)))
     assert result["contexts"][0]["media_kind"] == "cover"
     assert result["contexts"][0]["media_asset"] == "https://example.test/cover.jpg"
+
+
+@pytest.mark.parametrize(
+    "cover",
+    [
+        "https://exa mple.com/x",
+        "http://[bad]/x",
+        "https://example.com:99999/x",
+        "https:///missing-host/x",
+        "https://example.com/line\nbreak",
+    ],
+)
+def test_malformed_cover_urls_become_missing_media_issues(
+    tmp_path: Path,
+    product_card_metadata: Path,
+    cover: str,
+):
+    db, project_id = _seed_project(tmp_path)
+    result = _run(db, project_id, _snapshot((_snapshot_product("P001", cover=cover),)))
+    assert result["ok"] is False
+    assert "missing_product_media" in {item["code"] for item in result["issues"]}
+
+
+def test_local_cover_path_probe_errors_are_treated_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class ErrorPath:
+        def is_file(self):
+            raise OSError("unreadable path")
+
+    monkeypatch.setattr(preflight_module, "Path", lambda value: ErrorPath())
+    assert preflight_module._valid_cover("local-cover.png") is False
+
+
+def test_malformed_http_cover_never_falls_back_to_a_local_path_probe(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def unexpected_path_probe(value):
+        raise AssertionError(f"must not probe malformed URL as a local path: {value}")
+
+    monkeypatch.setattr(preflight_module, "Path", unexpected_path_probe)
+    assert preflight_module._valid_cover("https://exa mple.com/x") is False
 
 
 def test_optional_slots_may_be_blank_and_complete_product_png_is_not_required(
@@ -462,7 +556,16 @@ def test_required_slot_issues_are_aggregated_with_core_and_global_errors(
 ):
     db, project_id = _seed_project(tmp_path, with_voice=False)
     snapshot = _snapshot(
-        (_snapshot_product("P001", review=None, specs=()),),
+        (
+            _snapshot_product(
+                "P001",
+                title="",
+                amount="NaN",
+                cover=None,
+                review=None,
+                specs=(),
+            ),
+        ),
         ranges=(MasterPriceRange(None, None, "invalid"),),
         category_name="",
     )
@@ -481,10 +584,20 @@ def test_required_slot_issues_are_aggregated_with_core_and_global_errors(
         for item in result["issues"]
     }
     assert ("", "invalid_price_range", "price_ranges[0]") in by_uid
+    assert ("P001", "missing_product_title", "title") in by_uid
+    assert ("P001", "invalid_product_price", "price.amount") in by_uid
     assert ("P001", "missing_product_voice", "voice") in by_uid
+    assert ("P001", "missing_product_media", "productMedia") in by_uid
     assert ("P001", "missing_required_product_card_slot", "specs") in by_uid
     assert ("P001", "missing_required_product_card_slot", "review") in by_uid
     assert ("P001", "missing_required_product_card_slot", "categoryLabel") in by_uid
+    generic_required_fields = {
+        item["field"]
+        for item in result["issues"]
+        if item["product_uid"] == "P001"
+        and item["code"] == "missing_required_product_card_slot"
+    }
+    assert generic_required_fields == {"specs", "review", "categoryLabel"}
 
 
 def test_master_failure_and_project_contract_gaps_are_structured_failures(
@@ -516,6 +629,21 @@ def test_master_failure_and_project_contract_gaps_are_structured_failures(
     assert result["error_code"] == "master_identity_missing"
 
 
+def test_unexpected_master_adapter_programming_error_propagates(
+    tmp_path: Path,
+    product_card_metadata: Path,
+):
+    db, project_id = _seed_project(tmp_path)
+    with pytest.raises(AssertionError, match="adapter bug"):
+        dynamic_product_card_preflight(
+            db,
+            project_id=project_id,
+            account_label="xiaobo",
+            product_card_template_id="muban-test-1",
+            master_contracts=FakeMasterAdapter(error=AssertionError("adapter bug")),
+        )
+
+
 def test_workflow_service_reuses_injected_master_adapter(
     tmp_path: Path,
     product_card_metadata: Path,
@@ -532,3 +660,31 @@ def test_workflow_service_reuses_injected_master_adapter(
 
     assert result["ok"] is True
     assert adapter.calls == [("workspace-1", "scheme-1", True)]
+
+
+def test_workflow_service_lazily_creates_and_reuses_default_master_adapter(
+    tmp_path: Path,
+    product_card_metadata: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db, project_id = _seed_project(tmp_path)
+    adapter = FakeMasterAdapter(_snapshot((_snapshot_product("P001"),)))
+    creations: list[FakeMasterAdapter] = []
+
+    def create_adapter():
+        creations.append(adapter)
+        return adapter
+
+    monkeypatch.setattr(workflow_service_module, "MasterContractAdapter", create_adapter)
+    service = WorkflowService(db)
+    assert creations == []
+
+    for _ in range(2):
+        result = service.dynamic_product_card_preflight(
+            project_id,
+            account_label="xiaobo",
+            product_card_template_id="muban-test-1",
+        )
+        assert result["ok"] is True
+    assert creations == [adapter]
+    assert len(adapter.calls) == 2

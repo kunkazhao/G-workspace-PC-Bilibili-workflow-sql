@@ -13,7 +13,7 @@ from .dynamic_product_card import (
 )
 from .master_contracts import MasterContractAdapter, MasterContractError
 from .repositories import Repository
-from .template_config import get_remotion_template_metadata, product_card_slot_issues
+from .template_config import product_card_slot_issues, resolve_product_card_template
 from .utils import safe_text
 
 
@@ -64,7 +64,14 @@ def dynamic_product_card_preflight(
 
     template_id = safe_text(product_card_template_id)
     try:
-        get_remotion_template_metadata(template_id)
+        template = resolve_product_card_template(
+            account_label,
+            template_id,
+            require_explicit=True,
+        )
+        template_id = safe_text(template.get("templateId"))
+        if not template_id:
+            raise ValueError("No Remotion product-card template resolved for this account.")
     except (OSError, ValueError) as exc:
         return _failure(
             project_id=project_id,
@@ -103,22 +110,6 @@ def dynamic_product_card_preflight(
                 ),
             ),
         )
-    except Exception as exc:
-        return _failure(
-            project_id=project_id,
-            account_label=account_label,
-            template_id=template_id,
-            error_code="master_snapshot_failed",
-            issues=(
-                DynamicPreflightIssue(
-                    code="master_snapshot_failed",
-                    product_uid="",
-                    field="master_snapshot",
-                    message=str(exc),
-                ),
-            ),
-        )
-
     identity_issues: list[DynamicPreflightIssue] = []
     if safe_text(snapshot.workspace.id) != workspace_id:
         identity_issues.append(
@@ -235,6 +226,15 @@ def dynamic_product_card_preflight(
             template_id,
             context.template_validation_card(),
         )
+        covered_required_slots = _core_issue_slot_keys(
+            product_issues,
+            ranges_valid=ranges_valid,
+        )
+        required_issues = [
+            item
+            for item in required_issues
+            if safe_text(item.get("slot_key")) not in covered_required_slots
+        ]
         if required_issues:
             issues.extend(
                 DynamicPreflightIssue(
@@ -381,9 +381,41 @@ def _select_product_media(
 
 
 def _is_http_url(value: str) -> bool:
-    parsed = urlparse(value)
-    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+    if any(character.isspace() or ord(character) < 32 for character in value):
+        return False
+    try:
+        parsed = urlparse(value)
+        hostname = parsed.hostname
+        _ = parsed.port
+    except ValueError:
+        return False
+    return parsed.scheme.lower() in {"http", "https"} and bool(hostname)
 
 
 def _valid_cover(value: str) -> bool:
-    return bool(value) and (_is_http_url(value) or Path(value).is_file())
+    if not value:
+        return False
+    if value.casefold().startswith(("http://", "https://")):
+        return _is_http_url(value)
+    try:
+        return Path(value).is_file()
+    except (OSError, ValueError):
+        return False
+
+
+def _core_issue_slot_keys(
+    issues: tuple[DynamicPreflightIssue, ...],
+    *,
+    ranges_valid: bool,
+) -> set[str]:
+    slots = {"priceBandLabel"} if not ranges_valid else set()
+    for issue in issues:
+        if issue.code == "missing_product_title":
+            slots.add("title")
+        elif issue.code == "invalid_product_price":
+            slots.update({"displayPrice", "priceBandLabel"})
+        elif issue.code == "price_band_not_matched":
+            slots.add("priceBandLabel")
+        elif issue.code == "missing_product_media":
+            slots.add("productMedia")
+    return slots

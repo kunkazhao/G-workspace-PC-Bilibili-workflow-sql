@@ -233,8 +233,13 @@ class WorkflowService:
     ):
         self.db = db
         self.repo = Repository(db)
-        self.master_contracts = master_contracts or MasterContractAdapter()
+        self.master_contracts = master_contracts
         self._tts_log_handles: list[Any] = []
+
+    def _resolved_master_contracts(self) -> MasterContractAdapter:
+        if self.master_contracts is None:
+            self.master_contracts = MasterContractAdapter()
+        return self.master_contracts
 
     def export_project_markdown(self, project_id: int, target_path: str | Path | None = None) -> Path:
         project = self.repo.project(project_id)
@@ -588,7 +593,7 @@ class WorkflowService:
             product_card_template_id=product_card_template_id,
             product_uid=product_uid,
             expect_cover=expect_cover,
-            master_contracts=self.master_contracts,
+            master_contracts=self._resolved_master_contracts(),
         )
 
     def dynamic_product_card_preflight(
@@ -605,7 +610,7 @@ class WorkflowService:
             project_id=project_id,
             account_label=account_label,
             product_card_template_id=product_card_template_id,
-            master_contracts=self.master_contracts,
+            master_contracts=self._resolved_master_contracts(),
         )
 
     def script_doctor(

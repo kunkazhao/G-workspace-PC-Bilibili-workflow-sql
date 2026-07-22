@@ -78,28 +78,11 @@ def _run_dynamic_product_preflight(
             "contexts": [],
             "snapshot_id": None,
         }
-    try:
-        result = method(
-            project_id,
-            account_label=account_label,
-            product_card_template_id=product_card_template_id,
-        )
-    except Exception as exc:
-        return {
-            "ok": False,
-            "status": "blocked",
-            "error_code": "dynamic_product_preflight_error",
-            "issues": [
-                {
-                    "code": "dynamic_product_preflight_error",
-                    "product_uid": "",
-                    "field": "dynamic_product_preflight",
-                    "message": str(exc),
-                }
-            ],
-            "contexts": [],
-            "snapshot_id": None,
-        }
+    result = method(
+        project_id,
+        account_label=account_label,
+        product_card_template_id=product_card_template_id,
+    )
     if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
         return {
             "ok": False,
@@ -166,7 +149,8 @@ def run_final_video_pipeline(
         return {
             "ok": False,
             "stage": "dynamic_product_preflight",
-            "error_code": "dynamic_product_preflight_failed",
+            "error_code": safe_text(dynamic_preflight.get("error_code"))
+            or "dynamic_product_preflight_failed",
             "preflight": dynamic_preflight,
         }
     phase7_selection = None
