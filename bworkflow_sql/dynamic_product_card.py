@@ -158,7 +158,7 @@ def validate_price_ranges(
 
 
 def _optional_price_bound(value: Any) -> Decimal | None:
-    if value is None or (isinstance(value, str) and not value.strip()):
+    if value is None:
         return None
     return parse_non_negative_decimal(value)
 

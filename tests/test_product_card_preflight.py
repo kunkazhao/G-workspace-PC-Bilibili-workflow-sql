@@ -276,6 +276,18 @@ def test_open_ended_price_ranges_match_and_both_open_ends_are_invalid():
         )
 
 
+@pytest.mark.parametrize(
+    "price_range",
+    [
+        MasterPriceRange(min_amount="", max_amount="100", label="blank-min"),
+        MasterPriceRange(min_amount="0", max_amount=" ", label="blank-max"),
+    ],
+)
+def test_blank_price_range_bounds_are_invalid_not_open(price_range: MasterPriceRange):
+    with pytest.raises(ValueError):
+        match_price_band("50", (price_range,))
+
+
 def test_preflight_builds_semantic_context_with_half_up_price_and_leaf_category(
     tmp_path: Path,
     product_card_metadata: Path,
