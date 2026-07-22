@@ -4,6 +4,7 @@ import json
 from io import BytesIO
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 from bworkflow_sql.db import Database
@@ -426,6 +427,12 @@ def _dynamic_contexts(tmp_path: Path) -> list[dict[str, object]]:
             "source_script_block_id": 102,
         },
     ]
+
+
+def _encoded_image_bytes(image_format: str = "PNG") -> bytes:
+    output = BytesIO()
+    Image.new("RGB", (4, 3), (12, 34, 56)).save(output, format=image_format)
+    return output.getvalue()
 
 
 def test_final_mp4_uses_only_frozen_dynamic_contexts_and_no_product_png(
@@ -1490,7 +1497,14 @@ def test_build_product_recommendation_package_downloads_remote_cover_to_category
     contexts[0]["media_asset"] = "https://img.example.com/covers/P001.webp"
     monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
     monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", tmp_path / "cover-cache")
-    monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: b"cover-bytes")
+    png_bytes = _encoded_image_bytes()
+    download_calls = []
+
+    def download(_url):
+        download_calls.append(_url)
+        return png_bytes
+
+    monkeypatch.setattr(builder, "_download_url_bytes", download)
 
     result = build_product_recommendation_package(
         db,
@@ -1512,9 +1526,15 @@ def test_build_product_recommendation_package_downloads_remote_cover_to_category
         category="keyboard",
         uid="P001",
         url="https://img.example.com/covers/P001.webp",
-    )
-    assert cover_path.read_bytes() == b"cover-bytes"
+    ).with_suffix(".png")
+    assert cover_path.read_bytes() == png_bytes
     assert "cover" not in product["productCard"]["dataMap"]
+    assert builder._ensure_remote_cover_cached(
+        "https://img.example.com/covers/P001.webp",
+        category="keyboard",
+        uid="P001",
+    ) == cover_path
+    assert len(download_calls) == 1
 
 
 def test_build_product_recommendation_package_downloads_data_map_cover_url(
@@ -1529,7 +1549,8 @@ def test_build_product_recommendation_package_downloads_data_map_cover_url(
     contexts[0]["media_asset"] = "https://img.example.com/covers/P001.jpg"
     monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
     monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", tmp_path / "cover-cache")
-    monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: b"cover-bytes")
+    jpeg_bytes = _encoded_image_bytes("JPEG")
+    monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: jpeg_bytes)
 
     result = build_product_recommendation_package(
         db,
@@ -1553,6 +1574,63 @@ def test_build_product_recommendation_package_downloads_data_map_cover_url(
 
     assert product["productCard"]["coverAsset"] == str(cover_path)
     assert "cover" not in product["productCard"]["dataMap"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        b"<html><body>200 OK but not an image</body></html>",
+        b"RIFF\x10\x00\x00\x00WEBPbroken",
+        b"\xff\xd8\xff\xe0truncated-jpeg",
+    ),
+    ids=("html-200", "broken-webp", "truncated-jpeg"),
+)
+def test_formal_remote_cover_rejects_invalid_payload_without_cache_or_package(
+    tmp_path: Path,
+    monkeypatch,
+    payload: bytes,
+):
+    import bworkflow_sql.render_package_builder as builder
+    import bworkflow_sql.workflow_service as workflow_service
+    from bworkflow_sql.workflow_service import WorkflowService
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    contexts = _contexts_for_builder_test(db, project_id)
+    url = "https://img.example.com/covers/P001.jpg"
+    contexts[0]["media_kind"] = "cover"
+    contexts[0]["media_asset"] = url
+    cache_root = tmp_path / "cover-cache"
+    output = tmp_path / "formal-render-package.json"
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    monkeypatch.setattr(builder, "_price_transition_sound_effects", lambda: {})
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", cache_root)
+    monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: payload)
+    monkeypatch.setattr(workflow_service, "_product_card_text_capacity_issues", lambda **_kwargs: [])
+
+    result = WorkflowService(db).prepare_product_recommendation_output(
+        project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+        product_order_strategy="stable",
+        package_output_path=output,
+        subtitle_alignment="proportional",
+        dynamic_product_contexts=contexts,
+        master_snapshot_id="snapshot-invalid-cover",
+    )
+
+    assert result["ok"] is False
+    assert any(
+        item["kind"] == "product_cover"
+        and item["uid"] == "P001"
+        and "P001" in item["message"]
+        and url in item["message"]
+        for item in result["missing"]
+    )
+    target = builder._cover_cache_path(category="keyboard", uid="P001", url=url)
+    assert not target.exists()
+    assert not target.with_suffix(".png").exists()
+    assert not list(target.parent.glob("*.tmp"))
+    assert not output.exists()
 
 
 def test_formal_remote_cover_download_failure_is_uid_scoped_missing(
@@ -1583,11 +1661,38 @@ def test_formal_remote_cover_download_failure_is_uid_scoped_missing(
     )
 
     assert any(
-        item["kind"] == "dynamic_product_context"
+        item["kind"] == "product_cover"
         and item["uid"] == "P001"
-        and "failed to download product cover" in item["message"]
+        and "failed to cache product cover" in item["message"]
         for item in result.missing
     )
+
+
+def test_remote_cover_atomic_replace_failure_cleans_temporary_file(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    url = "https://img.example.com/covers/P001.png"
+    cache_root = tmp_path / "cover-cache"
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", cache_root)
+    monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: _encoded_image_bytes())
+
+    def fail_replace(self, target):
+        raise OSError("replace denied")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+
+    with pytest.raises(
+        builder.ProductCoverMaterializationError,
+        match=r"P001.*https://img\.example\.com/covers/P001\.png.*replace denied",
+    ):
+        builder._ensure_remote_cover_cached(url, category="keyboard", uid="P001")
+
+    target = builder._cover_cache_path(category="keyboard", uid="P001", url=url)
+    assert not target.exists()
+    assert not list(target.parent.glob("*.tmp"))
 
 
 def test_remote_cover_cache_path_changes_when_url_changes_but_suffix_does_not(

@@ -4,6 +4,8 @@ import json
 import random
 import re
 import hashlib
+import os
+import tempfile
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -131,6 +133,10 @@ class ProductRenderPackageResult:
     package: dict[str, Any]
     missing: list[dict[str, Any]]
     stale_product_images: list[dict[str, Any]]
+
+
+class ProductCoverMaterializationError(ValueError):
+    pass
 
 
 def _validated_dynamic_context_map(
@@ -638,7 +644,11 @@ def build_product_recommendation_package(
             except ValueError as exc:
                 missing.append(
                     {
-                        "kind": "dynamic_product_context",
+                        "kind": (
+                            "product_cover"
+                            if isinstance(exc, ProductCoverMaterializationError)
+                            else "dynamic_product_context"
+                        ),
                         "uid": uid,
                         "message": str(exc),
                     }
@@ -1537,41 +1547,85 @@ def _is_remote_url(value: str) -> bool:
 def _ensure_remote_cover_cached(url: str, *, category: str, uid: str) -> Path:
     target = _cover_cache_path(category=category, uid=uid, url=url)
     png_target = target.with_suffix(".png")
-    if png_target.is_file():
-        return png_target
-    if target.is_file():
-        return _materialize_cover_bytes(target.read_bytes(), target=target)
     webp_target = target.with_suffix(".webp")
-    if webp_target.is_file():
-        return _materialize_cover_bytes(webp_target.read_bytes(), target=webp_target)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    cache_candidates = tuple(
+        dict.fromkeys(
+            (
+                png_target,
+                target,
+                target.with_suffix(".jpg"),
+                target.with_suffix(".jpeg"),
+                webp_target,
+            )
+        )
+    )
     try:
+        for cached_path in cache_candidates:
+            if not cached_path.is_file():
+                continue
+            materialized = _materialize_cover_bytes(
+                cached_path.read_bytes(),
+                target=cached_path,
+            )
+            if materialized != cached_path:
+                cached_path.unlink(missing_ok=True)
+            return materialized
         data = _download_url_bytes(url)
-    except Exception as exc:  # pragma: no cover - exercised through caller behavior.
-        raise ValueError(f"failed to download product cover for {uid}: {url}: {exc}") from exc
-    return _materialize_cover_bytes(data, target=target)
+        return _materialize_cover_bytes(data, target=target)
+    except Exception as exc:
+        for cache_path in cache_candidates:
+            try:
+                cache_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise ProductCoverMaterializationError(
+            f"failed to cache product cover for {uid}: {url}: {exc}"
+        ) from exc
 
 
 def _materialize_cover_bytes(data: bytes, *, target: Path) -> Path:
-    detected_suffix = _image_suffix_from_bytes(data)
-    if detected_suffix == ".webp":
-        png_target = target.with_suffix(".png")
-        png_data = _decode_webp_as_png(data)
-        if not png_target.is_file() or png_target.read_bytes() != png_data:
-            png_target.write_bytes(png_data)
-        return png_target
-    if detected_suffix and detected_suffix != target.suffix.lower():
-        target = target.with_suffix(detected_suffix)
-    target.write_bytes(data)
-    return target
+    suffix, materialized = _validated_cover_payload(data)
+    resolved_target = target.with_suffix(suffix)
+    if resolved_target.is_file() and resolved_target.read_bytes() == materialized:
+        return resolved_target
+    _atomic_write_bytes(resolved_target, materialized)
+    return resolved_target
 
 
-def _decode_webp_as_png(data: bytes) -> bytes:
-    output = BytesIO()
-    with Image.open(BytesIO(data)) as image:
-        decoded = image.convert("RGBA" if "A" in image.getbands() else "RGB")
-        decoded.save(output, format="PNG")
-    return output.getvalue()
+def _validated_cover_payload(data: bytes) -> tuple[str, bytes]:
+    with Image.open(BytesIO(data), formats=["JPEG", "PNG", "WEBP"]) as image:
+        image_format = safe_text(image.format).upper()
+        if image_format not in {"JPEG", "PNG", "WEBP"}:
+            raise ValueError(f"unsupported product cover image format: {image_format or 'unknown'}")
+        image.load()
+        if image_format == "WEBP":
+            output = BytesIO()
+            decoded = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+            decoded.save(output, format="PNG")
+            return ".png", output.getvalue()
+        return (".jpg" if image_format == "JPEG" else ".png"), data
+
+
+def _atomic_write_bytes(target: Path, data: bytes) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(target)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _cover_cache_path(*, category: str, uid: str, url: str) -> Path:
@@ -1590,16 +1644,6 @@ def _cover_cache_path(*, category: str, uid: str, url: str) -> Path:
 def _download_url_bytes(url: str) -> bytes:
     with urllib.request.urlopen(url, timeout=30) as response:
         return response.read()
-
-
-def _image_suffix_from_bytes(data: bytes) -> str:
-    if data.startswith(b"\xff\xd8\xff"):
-        return ".jpg"
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return ".png"
-    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return ".webp"
-    return ""
 
 
 def _safe_path_component(value: str) -> str:
