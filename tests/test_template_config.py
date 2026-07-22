@@ -581,6 +581,37 @@ def test_slot_contract_rejects_invalid_registry_and_declaration_shapes(
     malformed_declaration["templates"][0]["slotDeclarations"][0] = "bad"
     invalid_contracts.append((malformed_declaration, "declaration"))
 
+    duplicate_template_id = _minimal_template_contract()
+    duplicate_template_id["templates"].append(
+        json.loads(json.dumps(duplicate_template_id["templates"][0]))
+    )
+    invalid_contracts.append((duplicate_template_id, "templateId"))
+
+    non_string_template_id = _minimal_template_contract()
+    non_string_template_id["templates"][0]["templateId"] = 123
+    invalid_contracts.append((non_string_template_id, "templateId"))
+
+    spaced_template_id = _minimal_template_contract()
+    spaced_template_id["templates"][0]["templateId"] = " muban-test-1"
+    invalid_contracts.append((spaced_template_id, "templateId"))
+
+    spaced_registry_key = _minimal_template_contract()
+    title_definition = spaced_registry_key["slotRegistry"].pop("title")
+    spaced_registry_key["slotRegistry"][" title"] = title_definition
+    invalid_contracts.append((spaced_registry_key, "slotRegistry"))
+
+    spaced_source = _minimal_template_contract()
+    spaced_source["slotRegistry"]["title"]["source"] = "dataMap.title "
+    invalid_contracts.append((spaced_source, "source"))
+
+    spaced_declaration_key = _minimal_template_contract()
+    spaced_declaration_key["templates"][0]["slotDeclarations"][0]["key"] = "title "
+    invalid_contracts.append((spaced_declaration_key, "declaration"))
+
+    non_string_declaration_key = _minimal_template_contract()
+    non_string_declaration_key["templates"][0]["slotDeclarations"][0]["key"] = 123
+    invalid_contracts.append((non_string_declaration_key, "declaration"))
+
     for index, (payload, message) in enumerate(invalid_contracts):
         metadata_path = tmp_path / f"invalid-{index}.json"
         metadata_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -589,6 +620,26 @@ def test_slot_contract_rejects_invalid_registry_and_declaration_shapes(
         template_config._remotion_template_metadata.cache_clear()
         with pytest.raises(ValueError, match=message):
             template_config.get_remotion_slot_registry()
+
+
+def test_existing_unreadable_or_invalid_metadata_fails_closed_with_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    invalid_json_path = tmp_path / "invalid.json"
+    invalid_json_path.write_text("{", encoding="utf-8")
+    unreadable_path = tmp_path / "metadata-directory"
+    unreadable_path.mkdir()
+
+    for metadata_path in (invalid_json_path, unreadable_path):
+        monkeypatch.setattr(
+            template_config, "REMOTION_TEMPLATE_METADATA_PATH", metadata_path
+        )
+        template_config._remotion_template_contract.cache_clear()
+        template_config._remotion_template_metadata.cache_clear()
+        with pytest.raises(ValueError) as exc_info:
+            template_config.get_remotion_slot_registry()
+        assert str(metadata_path) in str(exc_info.value)
 
 
 def test_required_label_value_list_rejects_empty_or_blank_items(
