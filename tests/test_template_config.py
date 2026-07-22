@@ -206,7 +206,7 @@ def test_rongrong_remotion_template_1_video_slot_is_projected_from_metadata() ->
         "sourceHeight": 1080,
         "coordinate_mode": "canvas_rect",
         "templateId": "muban-rongrong-1",
-        "templateVersion": "2.0.0",
+        "templateVersion": "2.1.0",
         "display_scale": 0.52,
     }
 
@@ -267,7 +267,7 @@ def test_xiaowai_remotion_template_1_video_slot_is_projected_from_metadata() -> 
         "sourceHeight": 1080,
         "coordinate_mode": "canvas_rect",
         "templateId": "muban-xiaowai-1",
-        "templateVersion": "1.0.0",
+        "templateVersion": "1.1.0",
         "display_scale": 0.51,
     }
 
@@ -371,7 +371,7 @@ def test_xiaoran_remotion_template_1_video_slot_is_projected_from_metadata() -> 
         "sourceHeight": 1080,
         "coordinate_mode": "canvas_rect",
         "templateId": "muban-xiaoran-1",
-        "templateVersion": "1.0.0",
+        "templateVersion": "1.1.0",
     }
 
 
@@ -428,7 +428,7 @@ def test_muban_rongrong_2_uses_right_aligned_16_by_9_video_slot_for_calibration(
         "sourceHeight": 1080,
         "coordinate_mode": "canvas_rect",
         "templateId": "muban-rongrong-2",
-        "templateVersion": "1.1.0",
+        "templateVersion": "1.2.0",
     }
 
 
@@ -438,7 +438,7 @@ def test_muban_xiaobo_1_metadata_is_loaded_from_cutme_remotion_contract() -> Non
 
     assert metadata["displayName"] == "小博模板1"
     assert metadata["account"] == "小博"
-    assert metadata["templateVersion"] == "1.0.2"
+    assert metadata["templateVersion"] == "1.1.0"
     assert metadata["sourceCanvas"] == {"width": 970, "height": 480}
     assert metadata["cardPlacement"] == {
         "x": 0,
@@ -472,7 +472,7 @@ def test_muban_xiaobo_1_video_slot_is_projected_from_remotion_metadata() -> None
         "sourceHeight": 1080,
         "coordinate_mode": "canvas_rect",
         "templateId": "muban-xiaobo-1",
-        "templateVersion": "1.0.2",
+        "templateVersion": "1.1.0",
         "display_scale": 0.52,
     }
 
