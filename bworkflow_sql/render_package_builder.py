@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 import hashlib
@@ -139,92 +140,306 @@ class ProductCoverMaterializationError(ValueError):
     pass
 
 
+def _dynamic_context_issue(uid: str, field: str, message: str) -> dict[str, str]:
+    return {
+        "kind": "dynamic_product_context",
+        "uid": uid,
+        "field": field,
+        "message": message,
+    }
+
+
 def _validated_dynamic_context_map(
     products: list[dict[str, Any]],
     contexts: list[dict[str, Any]] | None,
     *,
     master_snapshot_id: str | None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
-    expected_uids = [safe_text(product.get("uid")) for product in products]
+    expected_uids = [safe_text(product.get("uid")).strip() for product in products]
     expected = set(expected_uids)
     issues: list[dict[str, Any]] = []
-    if not safe_text(master_snapshot_id):
+    if not isinstance(master_snapshot_id, str) or not master_snapshot_id.strip():
         issues.append(
-            {
-                "kind": "dynamic_product_context",
-                "uid": "",
-                "field": "master_snapshot_id",
-                "message": "final_mp4 requires the frozen Master snapshot id",
-            }
+            _dynamic_context_issue(
+                "",
+                "master_snapshot_id",
+                "final_mp4 requires the frozen Master snapshot id as a non-empty string",
+            )
         )
     if not isinstance(contexts, list):
         contexts = []
         issues.append(
-            {
-                "kind": "dynamic_product_context",
-                "uid": "",
-                "field": "contexts",
-                "message": "final_mp4 requires frozen dynamic product contexts",
-            }
+            _dynamic_context_issue(
+                "",
+                "contexts",
+                "final_mp4 requires frozen dynamic product contexts as a list",
+            )
         )
 
     result: dict[str, dict[str, Any]] = {}
     duplicates: set[str] = set()
-    for context in contexts:
+    seen_uids: set[str] = set()
+    for context_index, context in enumerate(contexts):
         if not isinstance(context, dict):
             issues.append(
-                {
-                    "kind": "dynamic_product_context",
-                    "uid": "",
-                    "field": "contexts",
-                    "message": "dynamic product context must be an object",
-                }
+                _dynamic_context_issue(
+                    "",
+                    f"contexts[{context_index}]",
+                    "dynamic product context must be an object",
+                )
             )
             continue
-        uid = safe_text(context.get("product_uid"))
-        if not uid:
+
+        raw_uid = context.get("product_uid")
+        uid = raw_uid.strip() if isinstance(raw_uid, str) else ""
+        if not isinstance(raw_uid, str) or not uid:
             issues.append(
-                {
-                    "kind": "dynamic_product_context",
-                    "uid": "",
-                    "field": "product_uid",
-                    "message": "dynamic product context product_uid is required",
-                }
+                _dynamic_context_issue(
+                    "",
+                    "product_uid",
+                    "dynamic product context product_uid must be a non-empty string",
+                )
             )
-            continue
-        if uid in result:
+        elif uid in seen_uids:
             duplicates.add(uid)
-            continue
-        result[uid] = context
+        else:
+            seen_uids.add(uid)
+
+        normalized_data: dict[str, str] = {}
+        raw_data = context.get("data_map")
+        if not isinstance(raw_data, dict):
+            issues.append(
+                _dynamic_context_issue(uid, "data_map", "data_map must be an object")
+            )
+        else:
+            for field in (
+                "title",
+                "displayPrice",
+                "review",
+                "priceBandLabel",
+                "categoryLabel",
+            ):
+                value = raw_data.get(field)
+                if not isinstance(value, str):
+                    issues.append(
+                        _dynamic_context_issue(
+                            uid,
+                            f"data_map.{field}",
+                            f"data_map.{field} must be a string",
+                        )
+                    )
+                    continue
+                normalized_value = value.strip()
+                if field in {"title", "displayPrice", "priceBandLabel"} and not normalized_value:
+                    issues.append(
+                        _dynamic_context_issue(
+                            uid,
+                            f"data_map.{field}",
+                            f"data_map.{field} must be non-empty",
+                        )
+                    )
+                    continue
+                normalized_data[field] = normalized_value
+
+        normalized_specs: list[dict[str, str]] = []
+        raw_specs = context.get("specs")
+        if not isinstance(raw_specs, list):
+            issues.append(
+                _dynamic_context_issue(uid, "specs", "specs must be a list")
+            )
+        else:
+            for spec_index, raw_spec in enumerate(raw_specs):
+                if not isinstance(raw_spec, dict):
+                    issues.append(
+                        _dynamic_context_issue(
+                            uid,
+                            f"specs[{spec_index}]",
+                            f"specs[{spec_index}] must be an object",
+                        )
+                    )
+                    continue
+                normalized_spec: dict[str, str] = {}
+                for field in ("label", "value"):
+                    value = raw_spec.get(field)
+                    if not isinstance(value, str) or not value.strip():
+                        issues.append(
+                            _dynamic_context_issue(
+                                uid,
+                                f"specs[{spec_index}].{field}",
+                                f"specs[{spec_index}].{field} must be a non-empty string",
+                            )
+                        )
+                        continue
+                    normalized_spec[field] = value.strip()
+                if set(normalized_spec) == {"label", "value"}:
+                    normalized_specs.append(normalized_spec)
+
+        raw_media_kind = context.get("media_kind")
+        media_kind = raw_media_kind.strip() if isinstance(raw_media_kind, str) else ""
+        if not isinstance(raw_media_kind, str) or media_kind not in {"cover", "video"}:
+            issues.append(
+                _dynamic_context_issue(
+                    uid,
+                    "media_kind",
+                    "media_kind must be either cover or video",
+                )
+            )
+
+        raw_media_asset = context.get("media_asset")
+        media_asset = raw_media_asset.strip() if isinstance(raw_media_asset, str) else ""
+        normalized_media_asset = media_asset
+        if not isinstance(raw_media_asset, str) or not media_asset:
+            issues.append(
+                _dynamic_context_issue(
+                    uid,
+                    "media_asset",
+                    "media_asset must be a non-empty string",
+                )
+            )
+        elif _is_remote_url(media_asset):
+            if media_kind == "video":
+                issues.append(
+                    _dynamic_context_issue(
+                        uid,
+                        "media_asset",
+                        "video media_asset must be an existing local file",
+                    )
+                )
+        else:
+            try:
+                media_path = Path(media_asset).resolve()
+                normalized_media_asset = str(media_path)
+                media_exists = media_path.is_file()
+            except (OSError, RuntimeError, ValueError) as exc:
+                media_exists = False
+                normalized_media_asset = media_asset
+                media_error = str(exc)
+            else:
+                media_error = ""
+            if not media_exists:
+                issues.append(
+                    _dynamic_context_issue(
+                        uid,
+                        "media_asset",
+                        f"media_asset does not exist: {media_asset}"
+                        + (f": {media_error}" if media_error else ""),
+                    )
+                )
+
+        raw_voice_asset = context.get("voice_asset")
+        voice_asset = raw_voice_asset.strip() if isinstance(raw_voice_asset, str) else ""
+        normalized_voice_asset = voice_asset
+        voice_duration: float | None = None
+        if not isinstance(raw_voice_asset, str) or not voice_asset:
+            issues.append(
+                _dynamic_context_issue(
+                    uid,
+                    "voice_asset",
+                    "voice_asset must be a non-empty string",
+                )
+            )
+        elif _is_remote_url(voice_asset):
+            issues.append(
+                _dynamic_context_issue(
+                    uid,
+                    "voice_asset",
+                    "voice_asset must be an existing local file",
+                )
+                )
+        else:
+            try:
+                voice_path = Path(voice_asset).resolve()
+                normalized_voice_asset = str(voice_path)
+                voice_exists = voice_path.is_file()
+            except (OSError, RuntimeError, ValueError) as exc:
+                voice_exists = False
+                normalized_voice_asset = voice_asset
+                voice_error = str(exc)
+            else:
+                voice_error = ""
+            if not voice_exists:
+                issues.append(
+                    _dynamic_context_issue(
+                        uid,
+                        "voice_asset",
+                        f"voice_asset does not exist: {voice_asset}"
+                        + (f": {voice_error}" if voice_error else ""),
+                    )
+                )
+            else:
+                try:
+                    voice_duration = float(get_audio_duration_seconds(voice_path))
+                    if not math.isfinite(voice_duration) or voice_duration <= 0:
+                        raise ValueError("duration must be positive")
+                except Exception as exc:
+                    voice_duration = None
+                    issues.append(
+                        _dynamic_context_issue(
+                            uid,
+                            "voice_asset",
+                            f"voice_asset duration could not be read: {exc}",
+                        )
+                    )
+
+        raw_spoken_text = context.get("spoken_text")
+        spoken_text = raw_spoken_text.strip() if isinstance(raw_spoken_text, str) else ""
+        if not isinstance(raw_spoken_text, str) or not spoken_text:
+            issues.append(
+                _dynamic_context_issue(
+                    uid,
+                    "spoken_text",
+                    "spoken_text must be a non-empty string",
+                )
+            )
+
+        source_script_block_id = context.get("source_script_block_id")
+        if type(source_script_block_id) is not int or source_script_block_id <= 0:
+            issues.append(
+                _dynamic_context_issue(
+                    uid,
+                    "source_script_block_id",
+                    "source_script_block_id must be a positive integer",
+                )
+            )
+
+        if uid and uid not in result:
+            result[uid] = {
+                "product_uid": uid,
+                "data_map": normalized_data,
+                "specs": normalized_specs,
+                "media_kind": media_kind,
+                "media_asset": normalized_media_asset,
+                "voice_asset": normalized_voice_asset,
+                "spoken_text": spoken_text,
+                "source_script_block_id": source_script_block_id,
+                "_voice_duration": voice_duration,
+            }
     for uid in sorted(duplicates):
         issues.append(
-            {
-                "kind": "dynamic_product_context",
-                "uid": uid,
-                "field": "product_uid",
-                "message": "duplicate dynamic product context",
-            }
+            _dynamic_context_issue(
+                uid,
+                "product_uid",
+                "duplicate dynamic product context",
+            )
         )
         result.pop(uid, None)
     for uid in sorted(set(result) - expected):
         issues.append(
-            {
-                "kind": "dynamic_product_context",
-                "uid": uid,
-                "field": "product_uid",
-                "message": "dynamic product context does not match a selected product",
-            }
+            _dynamic_context_issue(
+                uid,
+                "product_uid",
+                "dynamic product context does not match a selected product",
+            )
         )
         result.pop(uid, None)
     for uid in expected_uids:
-        if uid not in result:
+        if uid not in seen_uids:
             issues.append(
-                {
-                    "kind": "dynamic_product_context",
-                    "uid": uid,
-                    "field": "product_uid",
-                    "message": "missing dynamic product context for selected product",
-                }
+                _dynamic_context_issue(
+                    uid,
+                    "product_uid",
+                    "missing dynamic product context for selected product",
+                )
             )
     if issues:
         return {}, issues
@@ -238,38 +453,11 @@ def _dynamic_product_segment(
     selected_template: dict[str, Any],
     subtitle_alignment: str,
 ) -> dict[str, Any]:
-    uid = safe_text(context.get("product_uid"))
-    data_map = context.get("data_map")
-    if not isinstance(data_map, dict):
-        raise ValueError("dynamic product context data_map must be an object")
-    semantic_data = {
-        "title": safe_text(data_map.get("title")),
-        "displayPrice": safe_text(data_map.get("displayPrice")),
-        "review": safe_text(data_map.get("review")),
-        "priceBandLabel": safe_text(data_map.get("priceBandLabel")),
-        "categoryLabel": safe_text(data_map.get("categoryLabel")),
-    }
-    for field in ("title", "displayPrice", "priceBandLabel"):
-        if not semantic_data[field]:
-            raise ValueError(f"dynamic product context data_map.{field} is required")
-
-    raw_specs = context.get("specs")
-    if not isinstance(raw_specs, list):
-        raise ValueError("dynamic product context specs must be a list")
-    specs: list[dict[str, str]] = []
-    for index, raw_slot in enumerate(raw_specs):
-        if not isinstance(raw_slot, dict):
-            raise ValueError(f"dynamic product context specs[{index}] must be an object")
-        label = safe_text(raw_slot.get("label"))
-        value = safe_text(raw_slot.get("value"))
-        if not label or not value:
-            raise ValueError(f"dynamic product context specs[{index}] requires label and value")
-        specs.append({"label": label, "value": value})
-
-    media_kind = safe_text(context.get("media_kind"))
-    media_value = safe_text(context.get("media_asset"))
-    if media_kind not in {"video", "cover"} or not media_value:
-        raise ValueError("dynamic product context requires media_kind and media_asset")
+    uid = context["product_uid"]
+    semantic_data = context["data_map"]
+    specs = context["specs"]
+    media_kind = context["media_kind"]
+    media_value = context["media_asset"]
     if media_kind == "cover" and _is_remote_url(media_value):
         media_path = _ensure_remote_cover_cached(
             media_value,
@@ -277,19 +465,11 @@ def _dynamic_product_segment(
             uid=uid,
         )
     else:
-        media_path = _absolute_file_path(media_value)
-    if not media_path.is_file():
-        raise ValueError(f"dynamic product context media does not exist: {media_value}")
+        media_path = Path(media_value)
 
-    voice_path = _absolute_file_path(context.get("voice_asset"))
-    if not voice_path.is_file():
-        raise ValueError(f"dynamic product context voice does not exist: {voice_path}")
-    spoken_text = safe_text(context.get("spoken_text"))
-    if not spoken_text:
-        raise ValueError("dynamic product context spoken_text is required")
-    source_script_block_id = int(context.get("source_script_block_id") or 0)
-    if source_script_block_id <= 0:
-        raise ValueError("dynamic product context source_script_block_id is required")
+    voice_path = Path(context["voice_asset"])
+    spoken_text = context["spoken_text"]
+    source_script_block_id = context["source_script_block_id"]
 
     template_id = safe_text(selected_template.get("templateId"))
     template_version = safe_text(selected_template.get("templateVersion"))
@@ -300,8 +480,9 @@ def _dynamic_product_segment(
         "templateVersion": template_version,
         "dataMap": semantic_data,
         "slots": specs,
-        "coverAsset": str(media_path),
     }
+    if media_kind == "cover":
+        product_card["coverAsset"] = str(media_path)
     for metadata_key in (
         "cardPlacement",
         "outputCanvas",
@@ -312,7 +493,7 @@ def _dynamic_product_segment(
         if isinstance(metadata_value, dict):
             product_card[metadata_key] = dict(metadata_value)
 
-    duration = get_audio_duration_seconds(voice_path)
+    duration = context["_voice_duration"]
     segment: dict[str, Any] = {
         "type": "product_recommendation",
         "id": f"product-{uid}",
@@ -321,7 +502,6 @@ def _dynamic_product_segment(
         "priceRangeLabel": semantic_data["priceBandLabel"],
         "spokenText": spoken_text,
         "voiceAsset": str(voice_path),
-        "videoAsset": str(media_path) if media_kind == "video" else None,
         "productMediaMode": "video_preferred",
         "duration": duration,
         "sourceScriptBlockId": source_script_block_id,
@@ -336,6 +516,8 @@ def _dynamic_product_segment(
             )
         ),
     }
+    if media_kind == "video":
+        segment["videoAsset"] = str(media_path)
     return segment
 
 
@@ -1559,25 +1741,45 @@ def _ensure_remote_cover_cached(url: str, *, category: str, uid: str) -> Path:
             )
         )
     )
-    try:
-        for cached_path in cache_candidates:
-            if not cached_path.is_file():
-                continue
-            materialized = _materialize_cover_bytes(
-                cached_path.read_bytes(),
+    for cached_path in cache_candidates:
+        if not cached_path.is_file():
+            continue
+        try:
+            cached_stat = cached_path.stat()
+            cached_data = cached_path.read_bytes()
+        except OSError as exc:
+            raise ProductCoverMaterializationError(
+                f"failed to read cached product cover for {uid}: {url}: {exc}"
+            ) from exc
+        try:
+            suffix, materialized = _validated_cover_payload(cached_data)
+        except Exception:
+            try:
+                _unlink_corrupt_cover_if_unchanged(
+                    cached_path,
+                    expected_data=cached_data,
+                    expected_stat=cached_stat,
+                )
+            except OSError as exc:
+                raise ProductCoverMaterializationError(
+                    f"failed to remove corrupt product cover for {uid}: {url}: {exc}"
+                ) from exc
+            continue
+        try:
+            return _materialize_validated_cover(
+                suffix,
+                materialized,
                 target=cached_path,
             )
-            if materialized != cached_path:
-                cached_path.unlink(missing_ok=True)
-            return materialized
+        except Exception as exc:
+            raise ProductCoverMaterializationError(
+                f"failed to cache product cover for {uid}: {url}: {exc}"
+            ) from exc
+
+    try:
         data = _download_url_bytes(url)
         return _materialize_cover_bytes(data, target=target)
     except Exception as exc:
-        for cache_path in cache_candidates:
-            try:
-                cache_path.unlink(missing_ok=True)
-            except OSError:
-                pass
         raise ProductCoverMaterializationError(
             f"failed to cache product cover for {uid}: {url}: {exc}"
         ) from exc
@@ -1585,11 +1787,42 @@ def _ensure_remote_cover_cached(url: str, *, category: str, uid: str) -> Path:
 
 def _materialize_cover_bytes(data: bytes, *, target: Path) -> Path:
     suffix, materialized = _validated_cover_payload(data)
+    return _materialize_validated_cover(suffix, materialized, target=target)
+
+
+def _materialize_validated_cover(suffix: str, data: bytes, *, target: Path) -> Path:
     resolved_target = target.with_suffix(suffix)
-    if resolved_target.is_file() and resolved_target.read_bytes() == materialized:
+    if resolved_target.is_file() and resolved_target.read_bytes() == data:
         return resolved_target
-    _atomic_write_bytes(resolved_target, materialized)
+    _atomic_write_bytes(resolved_target, data)
     return resolved_target
+
+
+def _unlink_corrupt_cover_if_unchanged(
+    path: Path,
+    *,
+    expected_data: bytes,
+    expected_stat: os.stat_result,
+) -> None:
+    try:
+        current_stat = path.stat()
+        current_data = path.read_bytes()
+    except FileNotFoundError:
+        return
+    identity = (
+        current_stat.st_dev,
+        current_stat.st_ino,
+        current_stat.st_size,
+        current_stat.st_mtime_ns,
+    )
+    expected_identity = (
+        expected_stat.st_dev,
+        expected_stat.st_ino,
+        expected_stat.st_size,
+        expected_stat.st_mtime_ns,
+    )
+    if identity == expected_identity and current_data == expected_data:
+        path.unlink()
 
 
 def _validated_cover_payload(data: bytes) -> tuple[str, bytes]:

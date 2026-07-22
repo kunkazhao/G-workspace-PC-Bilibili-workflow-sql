@@ -481,7 +481,10 @@ def test_final_mp4_uses_only_frozen_dynamic_contexts_and_no_product_png(
     assert first["productCard"]["slots"] == [{"label": "轴体", "value": "银轴"}]
     assert first["priceRangeLabel"] == "200-300"
     assert first["videoAsset"].endswith("P001.mp4")
-    assert first["productCard"]["coverAsset"].endswith("P001.mp4")
+    assert "coverAsset" not in first["productCard"]
+    second = products[1]
+    assert "videoAsset" not in second
+    assert second["productCard"]["coverAsset"].endswith("P002-cover.png")
 
 
 def test_final_mp4_rejects_missing_duplicate_and_unknown_dynamic_contexts(
@@ -515,6 +518,72 @@ def test_final_mp4_rejects_missing_duplicate_and_unknown_dynamic_contexts(
             item["type"] == "product_recommendation"
             for item in result.package["segments"]
         )
+
+
+def test_final_context_validation_aggregates_before_any_remote_cover_mutation(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    contexts = _contexts_for_builder_test(db, project_id)
+    remote_url = "https://img.example.com/covers/P001.jpg"
+    contexts[0]["media_kind"] = "cover"
+    contexts[0]["media_asset"] = remote_url
+    contexts[1]["data_map"] = {
+        **contexts[1]["data_map"],
+        "title": 123,
+        "review": [],
+    }
+    contexts[1]["specs"] = [
+        {"label": ["not", "text"], "value": "valid"},
+        {"label": "valid", "value": 42},
+    ]
+    contexts[1]["spoken_text"] = ["not", "text"]
+    contexts[1]["source_script_block_id"] = {}
+    contexts[1]["media_kind"] = True
+    contexts[1]["media_asset"] = []
+    contexts[1]["voice_asset"] = 123
+    cache_root = tmp_path / "cover-cache"
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", cache_root)
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    target = builder._cover_cache_path(category="keyboard", uid="P001", url=remote_url)
+    target.parent.mkdir(parents=True)
+    sentinel = b"cache-must-not-be-inspected-before-all-contexts-validate"
+    target.write_bytes(sentinel)
+    downloads = []
+    monkeypatch.setattr(builder, "_download_url_bytes", lambda url: downloads.append(url))
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+        product_order_strategy="stable",
+        subtitle_alignment="proportional",
+        dynamic_product_contexts=contexts,
+        master_snapshot_id="snapshot-invalid-context",
+    )
+
+    issue_fields = {item.get("field") for item in result.missing}
+    assert {
+        "data_map.title",
+        "data_map.review",
+        "specs[0].label",
+        "specs[1].value",
+        "spoken_text",
+        "source_script_block_id",
+        "media_kind",
+        "media_asset",
+        "voice_asset",
+    }.issubset(issue_fields)
+    assert downloads == []
+    assert target.read_bytes() == sentinel
+    assert not any(
+        item["type"] == "product_recommendation"
+        for item in result.package["segments"]
+    )
 
 
 def test_build_product_recommendation_package_from_ready_assets(
@@ -1369,7 +1438,8 @@ def test_build_final_mp4_package_uses_product_card_without_legacy_image(
     )
     assert "imageCardAsset" not in product
     assert "image" not in product.get("assetBindingIds", {})
-    assert product["productCard"]["coverAsset"].endswith("P001.mp4")
+    assert product["videoAsset"].endswith("P001.mp4")
+    assert "coverAsset" not in product["productCard"]
     assert "fallbackImageAsset" not in product["productCard"]
 
 
@@ -1693,6 +1763,119 @@ def test_remote_cover_atomic_replace_failure_cleans_temporary_file(
     target = builder._cover_cache_path(category="keyboard", uid="P001", url=url)
     assert not target.exists()
     assert not list(target.parent.glob("*.tmp"))
+
+
+def test_corrupt_remote_cover_cache_is_replaced_by_valid_redownload(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    url = "https://img.example.com/covers/P001.jpg"
+    cache_root = tmp_path / "cover-cache"
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", cache_root)
+    target = builder._cover_cache_path(category="keyboard", uid="P001", url=url)
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"<html>corrupt cache</html>")
+    valid_jpeg = _encoded_image_bytes("JPEG")
+    downloads = []
+
+    def download(_url):
+        downloads.append(_url)
+        return valid_jpeg
+
+    monkeypatch.setattr(builder, "_download_url_bytes", download)
+
+    resolved = builder._ensure_remote_cover_cached(url, category="keyboard", uid="P001")
+
+    assert resolved == target
+    assert target.read_bytes() == valid_jpeg
+    assert downloads == [url]
+
+
+def test_remote_cover_cache_read_error_preserves_candidate(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    url = "https://img.example.com/covers/P001.jpg"
+    cache_root = tmp_path / "cover-cache"
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", cache_root)
+    target = builder._cover_cache_path(category="keyboard", uid="P001", url=url)
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"unreadable-sentinel")
+    original_read_bytes = Path.read_bytes
+
+    def fail_target_read(path):
+        if path == target:
+            raise PermissionError("read denied")
+        return original_read_bytes(path)
+
+    downloads = []
+    monkeypatch.setattr(Path, "read_bytes", fail_target_read)
+    monkeypatch.setattr(builder, "_download_url_bytes", lambda value: downloads.append(value))
+
+    with pytest.raises(builder.ProductCoverMaterializationError, match="read denied"):
+        builder._ensure_remote_cover_cached(url, category="keyboard", uid="P001")
+
+    assert target.exists()
+    assert downloads == []
+
+
+def test_failed_remote_cover_call_does_not_delete_concurrent_valid_cache(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    url = "https://img.example.com/covers/P001.jpg"
+    cache_root = tmp_path / "cover-cache"
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", cache_root)
+    target = builder._cover_cache_path(category="keyboard", uid="P001", url=url)
+    valid_jpeg = _encoded_image_bytes("JPEG")
+
+    def interleaved_failure(_url):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(valid_jpeg)
+        raise OSError("first caller failed after another caller completed")
+
+    monkeypatch.setattr(builder, "_download_url_bytes", interleaved_failure)
+
+    with pytest.raises(builder.ProductCoverMaterializationError):
+        builder._ensure_remote_cover_cached(url, category="keyboard", uid="P001")
+
+    assert target.read_bytes() == valid_jpeg
+
+
+def test_two_successful_remote_cover_calls_share_atomic_cache(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from concurrent.futures import ThreadPoolExecutor
+    import bworkflow_sql.render_package_builder as builder
+
+    url = "https://img.example.com/covers/P001.png"
+    cache_root = tmp_path / "cover-cache"
+    valid_png = _encoded_image_bytes("PNG")
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", cache_root)
+    monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: valid_png)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda _index: builder._ensure_remote_cover_cached(
+                    url,
+                    category="keyboard",
+                    uid="P001",
+                ),
+                range(2),
+            )
+        )
+
+    assert results[0] == results[1]
+    assert results[0].read_bytes() == valid_png
+    assert not list(results[0].parent.glob("*.tmp"))
 
 
 def test_remote_cover_cache_path_changes_when_url_changes_but_suffix_does_not(
