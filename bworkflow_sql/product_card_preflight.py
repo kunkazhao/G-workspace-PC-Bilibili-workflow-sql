@@ -165,9 +165,11 @@ def dynamic_product_card_preflight(
     ranges_valid = not range_issues
 
     snapshot_by_uid: dict[str, Any] = {}
+    snapshot_uid_integrity_ok = True
     for snapshot_product in snapshot.products:
         uid = safe_text(snapshot_product.uid)
         if uid in snapshot_by_uid:
+            snapshot_uid_integrity_ok = False
             issues.append(
                 DynamicPreflightIssue(
                     code="duplicate_snapshot_product_uid",
@@ -186,9 +188,7 @@ def dynamic_product_card_preflight(
         if safe_text(block.get("script_type")) == "product":
             blocks_by_uid.setdefault(safe_text(block.get("owner_uid")), []).append(block)
 
-    category_source = safe_text(project.get("category_name")) or safe_text(
-        snapshot.scheme.category.name
-    )
+    category_source = safe_text(snapshot.scheme.category.name)
     contexts: list[dict[str, Any]] = []
     for local_product in products:
         uid = safe_text(local_product.get("uid"))
@@ -231,9 +231,6 @@ def dynamic_product_card_preflight(
             source_script_block_id=int(block.get("id") or 0) if block else 0,
         )
         issues.extend(product_issues)
-        if context is None or not ranges_valid:
-            continue
-
         required_issues = product_card_slot_issues(
             template_id,
             context.template_validation_card(),
@@ -248,6 +245,13 @@ def dynamic_product_card_preflight(
                 )
                 for item in required_issues
             )
+        if (
+            product_issues
+            or required_issues
+            or not ranges_valid
+            or identity_issues
+            or not snapshot_uid_integrity_ok
+        ):
             continue
         contexts.append(context.as_dict())
 
@@ -344,7 +348,7 @@ def _select_script_and_voice(
                 continue
             if int(asset.get("script_block_id") or 0) != block_id:
                 continue
-            if block_hash and safe_text(asset.get("text_hash")) != block_hash:
+            if safe_text(asset.get("text_hash")) != block_hash:
                 continue
             path = Path(safe_text(asset.get("path")))
             if path.is_file():

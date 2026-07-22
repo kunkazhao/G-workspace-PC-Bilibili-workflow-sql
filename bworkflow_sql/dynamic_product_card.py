@@ -87,8 +87,8 @@ class DynamicProductContext:
 
 @dataclass(frozen=True, slots=True)
 class ParsedPriceRange:
-    minimum: Decimal
-    maximum: Decimal
+    minimum: Decimal | None
+    maximum: Decimal | None
     label: str
 
 
@@ -126,9 +126,11 @@ def validate_price_ranges(
     for index, item in enumerate(ranges):
         label = str(item.label or "").strip()
         try:
-            minimum = parse_non_negative_decimal(item.min_amount)
-            maximum = parse_non_negative_decimal(item.max_amount)
-            if minimum >= maximum:
+            minimum = _optional_price_bound(item.min_amount)
+            maximum = _optional_price_bound(item.max_amount)
+            if minimum is None and maximum is None:
+                raise ValueError("at least one bound is required")
+            if minimum is not None and maximum is not None and minimum >= maximum:
                 raise ValueError("minimum must be lower than maximum")
             if not label:
                 raise ValueError("label is required")
@@ -155,13 +157,26 @@ def validate_price_ranges(
     return tuple(parsed), tuple(issues)
 
 
+def _optional_price_bound(value: Any) -> Decimal | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return parse_non_negative_decimal(value)
+
+
+def _price_is_in_range(amount: Decimal, item: ParsedPriceRange) -> bool:
+    return (
+        (item.minimum is None or item.minimum <= amount)
+        and (item.maximum is None or amount <= item.maximum)
+    )
+
+
 def match_price_band(value: Any, ranges: Iterable[MasterPriceRange]) -> str:
     parsed, issues = validate_price_ranges(ranges)
     if issues:
         raise ValueError(issues[0].message)
     amount = parse_non_negative_decimal(value)
     for item in parsed:
-        if item.minimum <= amount <= item.maximum:
+        if _price_is_in_range(amount, item):
             return item.label
     raise ValueError("price does not match a configured range")
 
@@ -176,7 +191,7 @@ def build_dynamic_product_context(
     voice_asset: str,
     spoken_text: str,
     source_script_block_id: int,
-) -> tuple[DynamicProductContext | None, tuple[DynamicPreflightIssue, ...]]:
+) -> tuple[DynamicProductContext, tuple[DynamicPreflightIssue, ...]]:
     uid = str(product.uid or "").strip()
     issues: list[DynamicPreflightIssue] = []
     title = str(product.title or "").strip()
@@ -213,7 +228,7 @@ def build_dynamic_product_context(
             (
                 item.label
                 for item in parsed_price_ranges
-                if item.minimum <= amount <= item.maximum
+                if _price_is_in_range(amount, item)
             ),
             "",
         )
@@ -245,9 +260,6 @@ def build_dynamic_product_context(
                 message="Product has neither a ready local video nor a valid current cover.",
             )
         )
-    if issues:
-        return None, tuple(issues)
-
     context = DynamicProductContext(
         product_uid=uid,
         title=title,
@@ -266,4 +278,4 @@ def build_dynamic_product_context(
         spoken_text=spoken_text,
         source_script_block_id=source_script_block_id,
     )
-    return context, ()
+    return context, tuple(issues)

@@ -59,7 +59,20 @@ def product_card_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
                             {"key": "categoryLabel", "required": False, "emptyPolicy": "preserve"},
                             {"key": "productMedia", "required": True},
                         ],
-                    }
+                    },
+                    {
+                        "templateId": "muban-test-required-details",
+                        "displayName": "Required details template",
+                        "slotDeclarations": [
+                            {"key": "title", "required": True},
+                            {"key": "displayPrice", "required": True},
+                            {"key": "specs", "required": True},
+                            {"key": "review", "required": True},
+                            {"key": "priceBandLabel", "required": True},
+                            {"key": "categoryLabel", "required": True},
+                            {"key": "productMedia", "required": True},
+                        ],
+                    },
                 ],
             },
             ensure_ascii=False,
@@ -122,6 +135,7 @@ def _snapshot(
         MasterPriceRange(min_amount="0", max_amount="100", label="0-100"),
         MasterPriceRange(min_amount="100", max_amount="200", label="100-200"),
     ),
+    category_name: str = "Kitchen",
 ) -> MasterSchemeSnapshot:
     return MasterSchemeSnapshot(
         schema_version="1.0.0",
@@ -131,7 +145,7 @@ def _snapshot(
         scheme=MasterSchemeIdentity(
             id="scheme-1",
             name="Scheme",
-            category=MasterCategoryIdentity(id="category-1", name="Kitchen"),
+            category=MasterCategoryIdentity(id="category-1", name=category_name),
             updated_at=None,
         ),
         price_ranges=ranges,
@@ -246,6 +260,22 @@ def test_category_uses_last_non_empty_segment_and_price_boundary_uses_first_rang
     assert match_price_band("100", ranges) == "first"
 
 
+def test_open_ended_price_ranges_match_and_both_open_ends_are_invalid():
+    ranges = (
+        MasterPriceRange(min_amount=None, max_amount="100", label="under-100"),
+        MasterPriceRange(min_amount="500", max_amount=None, label="over-500"),
+    )
+    assert match_price_band("0", ranges) == "under-100"
+    assert match_price_band("100", ranges) == "under-100"
+    assert match_price_band("500", ranges) == "over-500"
+    assert match_price_band("999", ranges) == "over-500"
+    with pytest.raises(ValueError):
+        match_price_band(
+            "10",
+            (MasterPriceRange(min_amount=None, max_amount=None, label="all"),),
+        )
+
+
 def test_preflight_builds_semantic_context_with_half_up_price_and_leaf_category(
     tmp_path: Path,
     product_card_metadata: Path,
@@ -257,7 +287,8 @@ def test_preflight_builds_semantic_context_with_half_up_price_and_leaf_category(
                 "P001",
                 specs=(MasterSpecSlot(label="Power", value="1500W"),),
             ),
-        )
+        ),
+        category_name="Home - Kitchen - Air Fryers",
     )
 
     result = _run(db, project_id, snapshot)
@@ -273,6 +304,22 @@ def test_preflight_builds_semantic_context_with_half_up_price_and_leaf_category(
         "productMedia": "https://example.test/cover.jpg",
     }
     assert result["contexts"][0]["specs"] == [{"label": "Power", "value": "1500W"}]
+
+
+def test_snapshot_category_is_authoritative_when_local_project_category_conflicts(
+    tmp_path: Path,
+    product_card_metadata: Path,
+):
+    db, project_id = _seed_project(tmp_path, category_name="Stale - Local Category")
+    result = _run(
+        db,
+        project_id,
+        _snapshot(
+            (_snapshot_product("P001"),),
+            category_name="Current - Master - Air Fryers",
+        ),
+    )
+    assert result["contexts"][0]["data_map"]["categoryLabel"] == "Air Fryers"
 
 
 def test_video_is_preferred_and_remote_cover_is_the_fallback(
@@ -347,6 +394,85 @@ def test_preflight_aggregates_title_voice_media_and_missing_snapshot_uid(
     assert ("P001", "missing_product_media") in issues
     assert ("P002", "snapshot_product_missing") in issues
     assert result["summary"]["products_checked"] == 2
+
+
+@pytest.mark.parametrize(
+    "binding_change",
+    [
+        {"account_label": "other-account"},
+        {"block_text_hash": "", "asset_text_hash": "wrong-hash"},
+        {"status": "missing"},
+        {"delete_file": True},
+    ],
+)
+def test_voice_must_match_account_hash_ready_status_and_existing_file(
+    tmp_path: Path,
+    product_card_metadata: Path,
+    binding_change: dict[str, object],
+):
+    db, project_id = _seed_project(tmp_path)
+    row = db.fetchone(
+        "SELECT * FROM asset_bindings WHERE project_id=? AND asset_type='voice'",
+        (project_id,),
+    )
+    assert row is not None
+    with db.connect() as conn:
+        if "account_label" in binding_change:
+            conn.execute(
+                "UPDATE asset_bindings SET account_label=? WHERE id=?",
+                (binding_change["account_label"], row["id"]),
+            )
+        if "status" in binding_change:
+            conn.execute(
+                "UPDATE asset_bindings SET status=? WHERE id=?",
+                (binding_change["status"], row["id"]),
+            )
+        if "block_text_hash" in binding_change:
+            conn.execute(
+                "UPDATE script_blocks SET text_hash=? WHERE id=?",
+                (binding_change["block_text_hash"], row["script_block_id"]),
+            )
+            conn.execute(
+                "UPDATE asset_bindings SET text_hash=? WHERE id=?",
+                (binding_change["asset_text_hash"], row["id"]),
+            )
+    if binding_change.get("delete_file"):
+        Path(row["path"]).unlink()
+
+    result = _run(db, project_id, _snapshot((_snapshot_product("P001"),)))
+    assert result["ok"] is False
+    assert "missing_product_voice" in {item["code"] for item in result["issues"]}
+
+
+def test_required_slot_issues_are_aggregated_with_core_and_global_errors(
+    tmp_path: Path,
+    product_card_metadata: Path,
+):
+    db, project_id = _seed_project(tmp_path, with_voice=False)
+    snapshot = _snapshot(
+        (_snapshot_product("P001", review=None, specs=()),),
+        ranges=(MasterPriceRange(None, None, "invalid"),),
+        category_name="",
+    )
+
+    result = dynamic_product_card_preflight(
+        db,
+        project_id=project_id,
+        account_label="xiaobo",
+        product_card_template_id="muban-test-required-details",
+        master_contracts=FakeMasterAdapter(snapshot),
+    )
+
+    assert result["ok"] is False
+    by_uid = {
+        (item["product_uid"], item["code"], item["field"])
+        for item in result["issues"]
+    }
+    assert ("", "invalid_price_range", "price_ranges[0]") in by_uid
+    assert ("P001", "missing_product_voice", "voice") in by_uid
+    assert ("P001", "missing_required_product_card_slot", "specs") in by_uid
+    assert ("P001", "missing_required_product_card_slot", "review") in by_uid
+    assert ("P001", "missing_required_product_card_slot", "categoryLabel") in by_uid
 
 
 def test_master_failure_and_project_contract_gaps_are_structured_failures(
