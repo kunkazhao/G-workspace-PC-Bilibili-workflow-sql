@@ -1208,7 +1208,15 @@ def test_build_product_recommendation_package_normalizes_formal_media_mode(
     ]
     assert result.package["output"]["productMediaMode"] == "video_preferred"
     assert all(item["productMediaMode"] == "video_preferred" for item in products)
-    assert any(item["videoAsset"] for item in products)
+    assert any(item.get("videoAsset") for item in products)
+    video_product = next(item for item in products if item.get("videoAsset"))
+    cover_product = next(
+        item
+        for item in products
+        if item["productCard"].get("coverAsset")
+    )
+    assert "coverAsset" not in video_product["productCard"]
+    assert "videoAsset" not in cover_product
 
 
 def test_build_package_ignores_legacy_image_layout_for_formal_product_card(
