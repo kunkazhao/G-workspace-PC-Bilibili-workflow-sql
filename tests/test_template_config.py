@@ -45,9 +45,9 @@ def _minimal_template_contract() -> dict:
     return {
         "slotRegistry": {
             "title": {"type": "text", "source": "dataMap.title"},
-            "displayPrice": {"type": "text", "source": "dataMap.price"},
+            "displayPrice": {"type": "text", "source": "dataMap.displayPrice"},
             "specs": {"type": "label_value_list", "source": "slots"},
-            "review": {"type": "text", "source": "dataMap.remark"},
+            "review": {"type": "text", "source": "dataMap.review"},
             "priceBandLabel": {"type": "text", "source": "dataMap.priceBandLabel"},
             "categoryLabel": {"type": "text", "source": "dataMap.categoryLabel"},
             "productMedia": {"type": "media", "source": "coverAsset"},
@@ -660,7 +660,7 @@ def test_required_label_value_list_rejects_empty_or_blank_items(
     product_card = {
         "dataMap": {
             "title": "Alpha Keyboard",
-            "price": "299元",
+                "displayPrice": "299元",
             "priceBandLabel": "200-300元",
         },
         "coverAsset": "assets/covers/P001.png",
@@ -691,7 +691,7 @@ def test_only_missing_required_slot_values_are_blocking(
     product_card = {
         "dataMap": {
             "title": "Alpha Keyboard",
-            "price": "299元",
+                "displayPrice": "299元",
             "priceBandLabel": "200-300元",
         },
         "coverAsset": "assets/covers/P001.png",

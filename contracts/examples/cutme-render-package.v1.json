@@ -4,11 +4,12 @@
   "project": {
     "category": "contract-canary",
     "account": "contract-canary",
-    "bworkflowProjectId": 0
+    "bworkflowProjectId": 0,
+    "masterSnapshotId": "contract-snapshot-001"
   },
   "output": {
     "mode": "final_mp4",
-    "productMediaMode": "cover_only",
+    "productMediaMode": "video_preferred",
     "fps": 30,
     "width": 1920,
     "height": 1080,
@@ -80,16 +81,17 @@
       "productTitle": "Boundary 2 contract fixture",
       "spokenText": "Representative producer payload.",
       "voiceAsset": "cutme-render-package-v1/audio/product.fixture",
-      "imageCardAsset": "cutme-render-package-v1/assets/product-card.fixture",
       "videoAsset": null,
-      "productMediaMode": "cover_only",
+      "productMediaMode": "video_preferred",
       "duration": 1.0,
       "productCard": {
         "templateId": "contract-fixture-v1",
         "dataMap": {
           "title": "Boundary 2 contract fixture",
-          "price": "fixture",
-          "cover": "cutme-render-package-v1/assets/product-card.fixture"
+          "displayPrice": "199元",
+          "review": "Representative structured review.",
+          "priceBandLabel": "100-200元",
+          "categoryLabel": "冲牙器"
         },
         "slots": [],
         "coverAsset": "cutme-render-package-v1/assets/product-card.fixture"

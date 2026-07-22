@@ -133,6 +133,206 @@ class ProductRenderPackageResult:
     stale_product_images: list[dict[str, Any]]
 
 
+def _validated_dynamic_context_map(
+    products: list[dict[str, Any]],
+    contexts: list[dict[str, Any]] | None,
+    *,
+    master_snapshot_id: str | None,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    expected_uids = [safe_text(product.get("uid")) for product in products]
+    expected = set(expected_uids)
+    issues: list[dict[str, Any]] = []
+    if not safe_text(master_snapshot_id):
+        issues.append(
+            {
+                "kind": "dynamic_product_context",
+                "uid": "",
+                "field": "master_snapshot_id",
+                "message": "final_mp4 requires the frozen Master snapshot id",
+            }
+        )
+    if not isinstance(contexts, list):
+        contexts = []
+        issues.append(
+            {
+                "kind": "dynamic_product_context",
+                "uid": "",
+                "field": "contexts",
+                "message": "final_mp4 requires frozen dynamic product contexts",
+            }
+        )
+
+    result: dict[str, dict[str, Any]] = {}
+    duplicates: set[str] = set()
+    for context in contexts:
+        if not isinstance(context, dict):
+            issues.append(
+                {
+                    "kind": "dynamic_product_context",
+                    "uid": "",
+                    "field": "contexts",
+                    "message": "dynamic product context must be an object",
+                }
+            )
+            continue
+        uid = safe_text(context.get("product_uid"))
+        if not uid:
+            issues.append(
+                {
+                    "kind": "dynamic_product_context",
+                    "uid": "",
+                    "field": "product_uid",
+                    "message": "dynamic product context product_uid is required",
+                }
+            )
+            continue
+        if uid in result:
+            duplicates.add(uid)
+            continue
+        result[uid] = context
+    for uid in sorted(duplicates):
+        issues.append(
+            {
+                "kind": "dynamic_product_context",
+                "uid": uid,
+                "field": "product_uid",
+                "message": "duplicate dynamic product context",
+            }
+        )
+        result.pop(uid, None)
+    for uid in sorted(set(result) - expected):
+        issues.append(
+            {
+                "kind": "dynamic_product_context",
+                "uid": uid,
+                "field": "product_uid",
+                "message": "dynamic product context does not match a selected product",
+            }
+        )
+        result.pop(uid, None)
+    for uid in expected_uids:
+        if uid not in result:
+            issues.append(
+                {
+                    "kind": "dynamic_product_context",
+                    "uid": uid,
+                    "field": "product_uid",
+                    "message": "missing dynamic product context for selected product",
+                }
+            )
+    if issues:
+        return {}, issues
+    return result, []
+
+
+def _dynamic_product_segment(
+    context: dict[str, Any],
+    *,
+    project: dict[str, Any],
+    selected_template: dict[str, Any],
+    subtitle_alignment: str,
+) -> dict[str, Any]:
+    uid = safe_text(context.get("product_uid"))
+    data_map = context.get("data_map")
+    if not isinstance(data_map, dict):
+        raise ValueError("dynamic product context data_map must be an object")
+    semantic_data = {
+        "title": safe_text(data_map.get("title")),
+        "displayPrice": safe_text(data_map.get("displayPrice")),
+        "review": safe_text(data_map.get("review")),
+        "priceBandLabel": safe_text(data_map.get("priceBandLabel")),
+        "categoryLabel": safe_text(data_map.get("categoryLabel")),
+    }
+    for field in ("title", "displayPrice", "priceBandLabel"):
+        if not semantic_data[field]:
+            raise ValueError(f"dynamic product context data_map.{field} is required")
+
+    raw_specs = context.get("specs")
+    if not isinstance(raw_specs, list):
+        raise ValueError("dynamic product context specs must be a list")
+    specs: list[dict[str, str]] = []
+    for index, raw_slot in enumerate(raw_specs):
+        if not isinstance(raw_slot, dict):
+            raise ValueError(f"dynamic product context specs[{index}] must be an object")
+        label = safe_text(raw_slot.get("label"))
+        value = safe_text(raw_slot.get("value"))
+        if not label or not value:
+            raise ValueError(f"dynamic product context specs[{index}] requires label and value")
+        specs.append({"label": label, "value": value})
+
+    media_kind = safe_text(context.get("media_kind"))
+    media_value = safe_text(context.get("media_asset"))
+    if media_kind not in {"video", "cover"} or not media_value:
+        raise ValueError("dynamic product context requires media_kind and media_asset")
+    if media_kind == "cover" and _is_remote_url(media_value):
+        media_path = _ensure_remote_cover_cached(
+            media_value,
+            category=safe_text(project.get("category_name") or project.get("name")),
+            uid=uid,
+        )
+    else:
+        media_path = _absolute_file_path(media_value)
+    if not media_path.is_file():
+        raise ValueError(f"dynamic product context media does not exist: {media_value}")
+
+    voice_path = _absolute_file_path(context.get("voice_asset"))
+    if not voice_path.is_file():
+        raise ValueError(f"dynamic product context voice does not exist: {voice_path}")
+    spoken_text = safe_text(context.get("spoken_text"))
+    if not spoken_text:
+        raise ValueError("dynamic product context spoken_text is required")
+    source_script_block_id = int(context.get("source_script_block_id") or 0)
+    if source_script_block_id <= 0:
+        raise ValueError("dynamic product context source_script_block_id is required")
+
+    template_id = safe_text(selected_template.get("templateId"))
+    template_version = safe_text(selected_template.get("templateVersion"))
+    if not template_id or not template_version:
+        raise ValueError("selected product-card template metadata is incomplete")
+    product_card: dict[str, Any] = {
+        "templateId": template_id,
+        "templateVersion": template_version,
+        "dataMap": semantic_data,
+        "slots": specs,
+        "coverAsset": str(media_path),
+    }
+    for metadata_key in (
+        "cardPlacement",
+        "outputCanvas",
+        "coverMediaSlot",
+        "videoOverlaySlot",
+    ):
+        metadata_value = selected_template.get(metadata_key)
+        if isinstance(metadata_value, dict):
+            product_card[metadata_key] = dict(metadata_value)
+
+    duration = get_audio_duration_seconds(voice_path)
+    segment: dict[str, Any] = {
+        "type": "product_recommendation",
+        "id": f"product-{uid}",
+        "productUid": uid,
+        "productTitle": semantic_data["title"],
+        "priceRangeLabel": semantic_data["priceBandLabel"],
+        "spokenText": spoken_text,
+        "voiceAsset": str(voice_path),
+        "videoAsset": str(media_path) if media_kind == "video" else None,
+        "productMediaMode": "video_preferred",
+        "duration": duration,
+        "sourceScriptBlockId": source_script_block_id,
+        "productCard": product_card,
+        "subtitles": (
+            []
+            if subtitle_alignment == "asr"
+            else _segment_subtitles(
+                spoken_text,
+                duration,
+                subtitle_alignment=subtitle_alignment,
+            )
+        ),
+    }
+    return segment
+
+
 def _trim_transition_text(text: str) -> str:
     return safe_text(text).strip(" ，。；、,.!?:：")
 
@@ -282,12 +482,16 @@ def build_product_recommendation_package(
     intro_video_text: str = "",
     include_outro: bool = False,
     closing_text: str = "",
+    dynamic_product_contexts: list[dict[str, Any]] | None = None,
+    master_snapshot_id: str | None = None,
 ) -> ProductRenderPackageResult:
     if output_mode not in SUPPORTED_OUTPUT_MODES:
         raise ValueError(f"unsupported output_mode: {output_mode}")
     media_mode = safe_text(product_media_mode) or DEFAULT_PRODUCT_MEDIA_MODE
     if media_mode not in SUPPORTED_PRODUCT_MEDIA_MODES:
         raise ValueError(f"unsupported product_media_mode: {media_mode}")
+    if output_mode == "final_mp4":
+        media_mode = "video_preferred"
     order_strategy = safe_text(product_order_strategy) or DEFAULT_PRODUCT_ORDER_STRATEGY
     if order_strategy not in SUPPORTED_PRODUCT_ORDER_STRATEGIES:
         raise ValueError(f"unsupported product_order_strategy: {order_strategy}")
@@ -332,6 +536,14 @@ def build_product_recommendation_package(
     stale_product_images: list[dict[str, Any]] = []
     price_segments: dict[str, dict[str, Any]] = {}
     product_segments: dict[str, dict[str, Any]] = {}
+    dynamic_context_by_uid: dict[str, dict[str, Any]] = {}
+    if output_mode == "final_mp4":
+        dynamic_context_by_uid, context_issues = _validated_dynamic_context_map(
+            products,
+            dynamic_product_contexts,
+            master_snapshot_id=master_snapshot_id,
+        )
+        missing.extend(context_issues)
     price_plan_error = ""
     try:
         strict_price_plan = load_price_transition_plan_set(project_id) is not None
@@ -412,6 +624,26 @@ def build_product_recommendation_package(
     for product in products:
         uid = safe_text(product.get("uid"))
         title = safe_text(product.get("title"))
+        if output_mode == "final_mp4":
+            context = dynamic_context_by_uid.get(uid)
+            if context is None:
+                continue
+            try:
+                product_segments[uid] = _dynamic_product_segment(
+                    context,
+                    project=project,
+                    selected_template=selected_template,
+                    subtitle_alignment=subtitle_mode,
+                )
+            except ValueError as exc:
+                missing.append(
+                    {
+                        "kind": "dynamic_product_context",
+                        "uid": uid,
+                        "message": str(exc),
+                    }
+                )
+            continue
         block = product_blocks.get(uid)
         if not block:
             missing.append(
@@ -551,7 +783,29 @@ def build_product_recommendation_package(
         product_segments[uid] = product_segment
 
     segments = _arrange_segments(
-        products,
+        [
+            {
+                **product,
+                "_dynamic_price_band_label": safe_text(
+                    (
+                        dynamic_context_by_uid.get(safe_text(product.get("uid")), {}).get(
+                            "data_map", {}
+                        )
+                        if isinstance(
+                            dynamic_context_by_uid.get(safe_text(product.get("uid")), {}).get(
+                                "data_map"
+                            ),
+                            dict,
+                        )
+                        else {}
+                    ).get("priceBandLabel")
+                )
+                or product.get("price_label"),
+            }
+            for product in products
+        ]
+        if output_mode == "final_mp4"
+        else products,
         price_blocks=price_blocks,
         price_segments=price_segments,
         product_segments=product_segments,
@@ -655,6 +909,11 @@ def build_product_recommendation_package(
             "account": account,
             "bworkflowProjectId": int(project_id),
             "masterSchemeId": safe_text(project.get("scheme_id")),
+            **(
+                {"masterSnapshotId": safe_text(master_snapshot_id)}
+                if output_mode == "final_mp4" and safe_text(master_snapshot_id)
+                else {}
+            ),
         },
         "output": {
             "mode": output_mode,
@@ -1137,6 +1396,9 @@ def _has_matching_price_groups(products: list[dict[str, Any]], price_blocks: lis
 
 
 def _matching_price_label(product: dict[str, Any], price_blocks: list[dict[str, Any]]) -> str:
+    dynamic_label = safe_text(product.get("_dynamic_price_band_label"))
+    if dynamic_label:
+        return dynamic_label
     price = _first_number(safe_text(product.get("price_label")))
     if price is None:
         return ""

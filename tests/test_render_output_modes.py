@@ -103,8 +103,11 @@ def test_prepare_product_recommendation_output_returns_structured_final_mp4_read
     monkeypatch,
 ):
     package = {"schemaVersion": "1.0.0", "segments": [{"type": "price_transition"}]}
+    calls = []
+    frozen_contexts = [{"product_uid": "P001"}]
 
     def fake_build(db, **kwargs):
+        calls.append(kwargs)
         return SimpleNamespace(package=package, missing=[], stale_product_images=[])
 
     output = tmp_path / "render-package.json"
@@ -114,7 +117,10 @@ def test_prepare_product_recommendation_output_returns_structured_final_mp4_read
         7,
         account_label="xiaobo",
         output_mode="final_mp4",
+        product_media_mode="cover_only",
         package_output_path=output,
+        dynamic_product_contexts=frozen_contexts,
+        master_snapshot_id="snapshot-service-1",
     )
 
     assert result["ok"] is True
@@ -125,6 +131,10 @@ def test_prepare_product_recommendation_output_returns_structured_final_mp4_read
         "target_mp4": str(output.with_suffix(".mp4")),
     }
     assert "cutme" not in json.dumps(result["next"], ensure_ascii=False).lower()
+    assert result["product_media_mode"] == "video_preferred"
+    assert calls[0]["product_media_mode"] == "video_preferred"
+    assert calls[0]["dynamic_product_contexts"] is frozen_contexts
+    assert calls[0]["master_snapshot_id"] == "snapshot-service-1"
 
 
 def test_prepare_product_recommendation_output_can_pass_stable_product_order(

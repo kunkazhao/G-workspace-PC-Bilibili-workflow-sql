@@ -41,9 +41,9 @@ def product_card_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
             {
                 "slotRegistry": {
                     "title": {"type": "text", "source": "dataMap.title"},
-                    "displayPrice": {"type": "text", "source": "dataMap.price"},
+                    "displayPrice": {"type": "text", "source": "dataMap.displayPrice"},
                     "specs": {"type": "label_value_list", "source": "slots"},
-                    "review": {"type": "text", "source": "dataMap.remark"},
+                    "review": {"type": "text", "source": "dataMap.review"},
                     "priceBandLabel": {"type": "text", "source": "dataMap.priceBandLabel"},
                     "categoryLabel": {"type": "text", "source": "dataMap.categoryLabel"},
                     "productMedia": {"type": "media", "source": "coverAsset"},

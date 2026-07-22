@@ -58,8 +58,8 @@ class DynamicProductContext:
             "coverAsset": self.media_asset,
             "dataMap": {
                 "title": self.title,
-                "price": self.display_price,
-                "remark": self.review,
+                "displayPrice": self.display_price,
+                "review": self.review,
                 "priceBandLabel": self.price_band_label,
                 "categoryLabel": self.category_label,
             },

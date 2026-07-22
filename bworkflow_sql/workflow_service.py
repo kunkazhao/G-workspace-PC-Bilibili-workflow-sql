@@ -401,6 +401,8 @@ class WorkflowService:
         intro_video_text: str = "",
         include_outro: bool = False,
         closing_text: str = "",
+        dynamic_product_contexts: list[dict[str, Any]] | None = None,
+        master_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         output_mode_value = safe_text(output_mode) or "jianying_draft"
         if output_mode_value not in SUPPORTED_OUTPUT_MODES:
@@ -408,6 +410,8 @@ class WorkflowService:
         media_mode = safe_text(product_media_mode) or DEFAULT_PRODUCT_MEDIA_MODE
         if media_mode not in SUPPORTED_PRODUCT_MEDIA_MODES:
             raise ValueError(f"unsupported product_media_mode: {media_mode}")
+        if output_mode_value == "final_mp4":
+            media_mode = "video_preferred"
         order_strategy = safe_text(product_order_strategy) or DEFAULT_PRODUCT_ORDER_STRATEGY
         if order_strategy not in SUPPORTED_PRODUCT_ORDER_STRATEGIES:
             raise ValueError(f"unsupported product_order_strategy: {order_strategy}")
@@ -446,6 +450,9 @@ class WorkflowService:
         if include_outro:
             build_kwargs["include_outro"] = True
             build_kwargs["closing_text"] = closing_text
+        if output_mode_value == "final_mp4":
+            build_kwargs["dynamic_product_contexts"] = dynamic_product_contexts
+            build_kwargs["master_snapshot_id"] = master_snapshot_id
 
         result = build_product_recommendation_package(
             self.db,

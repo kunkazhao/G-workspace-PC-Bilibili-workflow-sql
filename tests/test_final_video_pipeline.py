@@ -183,14 +183,22 @@ def test_dynamic_preflight_success_enters_existing_package_flow(
     workspace = tmp_path / "workspace"
     monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", workspace)
     calls = {"preflight": 0, "prepare": 0}
+    frozen_contexts = [{"product_uid": "P001", "data_map": {"title": "Frozen"}}]
+    captured_kwargs = {}
 
     class FakeWorkflow:
         def dynamic_product_card_preflight(self, *args, **kwargs):
             calls["preflight"] += 1
-            return {"ok": True, "issues": [], "contexts": [], "snapshot_id": "snapshot-1"}
+            return {
+                "ok": True,
+                "issues": [],
+                "contexts": frozen_contexts,
+                "snapshot_id": "snapshot-1",
+            }
 
         def prepare_product_recommendation_output(self, *args, **kwargs):
             calls["prepare"] += 1
+            captured_kwargs.update(kwargs)
             return {"ok": False, "missing": [{"kind": "expected-test-stop"}]}
 
     monkeypatch.setattr(
@@ -209,6 +217,8 @@ def test_dynamic_preflight_success_enters_existing_package_flow(
     )
 
     assert calls == {"preflight": 1, "prepare": 1}
+    assert captured_kwargs["dynamic_product_contexts"] is frozen_contexts
+    assert captured_kwargs["master_snapshot_id"] == "snapshot-1"
     assert result["stage"] == "render_package"
     assert (workspace / "project-25" / "render").is_dir()
 
@@ -600,6 +610,8 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             intro_video_text="",
             include_outro=False,
             closing_text="",
+            dynamic_product_contexts=None,
+            master_snapshot_id=None,
         ):
             calls.append(
                 (
@@ -615,7 +627,9 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
                     product_card_template_id,
                     package_output_path,
                     subtitle_alignment,
-                )
+                    dynamic_product_contexts,
+                    master_snapshot_id,
+                    )
             )
             return {
                 "ok": True,
@@ -668,8 +682,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
         "product-video",
         "later-product",
     ]
-    assert calls[:2] == [
-        ("images", 3, "小燃", "missing", "", "muban-xiaobo-1"),
+    assert calls[:1] == [
         (
             "package",
             3,
@@ -683,6 +696,8 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             "muban-xiaobo-1",
             str(package_path),
             "asr",
+            [],
+            "test-snapshot",
         ),
     ]
     assert result["verification"]["ffprobe"]["duration"] == 10.0

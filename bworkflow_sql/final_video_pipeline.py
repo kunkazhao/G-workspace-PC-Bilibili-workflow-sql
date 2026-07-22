@@ -224,21 +224,7 @@ def run_final_video_pipeline(
             target_mp4 = delivery_layout["full_mp4"]
 
     product_images: dict[str, Any] | None = None
-    with timings.measure("product_images_ms"):
-        if product_image_mode != "skip":
-            product_images = workflow.regenerate_product_card_images(
-                project_id,
-                account_label=account,
-                mode=product_image_mode,
-                product_uid="",
-                product_card_template_id=product_card_template_id,
-            )
-        if product_images is not None and product_images.get("ok") is False:
-            return {
-                "ok": False,
-                "stage": "product_images",
-                "product_images": product_images,
-            }
+    timings.set_zero("product_images_ms")
 
     with timings.measure("render_package_ms"):
         package_result = workflow.prepare_product_recommendation_output(
@@ -257,6 +243,8 @@ def run_final_video_pipeline(
             intro_video_text=resolved_intro_text,
             include_outro=True,
             closing_text=DEFAULT_CLOSING_TEXT,
+            dynamic_product_contexts=dynamic_preflight.get("contexts"),
+            master_snapshot_id=safe_text(dynamic_preflight.get("snapshot_id")),
         )
     if package_result.get("ok") is not True:
         return {
