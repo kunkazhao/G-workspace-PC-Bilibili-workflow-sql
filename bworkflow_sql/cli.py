@@ -64,14 +64,16 @@ def _json_err(message: str, code: int = 1) -> None:
 
 def _init() -> tuple:
     from .db import Database
+    from .master_contracts import MasterContractAdapter
     from .repositories import Repository
     from .sync_service import SyncService
     from .workflow_service import WorkflowService
 
     db = Database()
     repo = Repository(db)
-    sync = SyncService(db)
-    wf = WorkflowService(db)
+    master_contracts = MasterContractAdapter()
+    sync = SyncService(db, master_contracts=master_contracts)
+    wf = WorkflowService(db, master_contracts=master_contracts)
     return db, repo, sync, wf
 
 
@@ -1595,7 +1597,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--state", default="", help="optional exact new state")
     p.add_argument("--limit", type=int, default=200)
 
-    p = sub.add_parser("product-card-preflight", help="Preflight product-card data and image freshness before product-images or phase-7 output")
+    p = sub.add_parser(
+        "product-card-preflight",
+        help="Preflight current Master data and ready voice/media before dynamic product-card rendering",
+    )
     p.add_argument("project_id", type=int)
     p.add_argument("--account", required=True)
     p.add_argument(
@@ -1604,7 +1609,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="explicit Remotion-first product-card template id or display name",
     )
     p.add_argument("--product-uid", default="", help="optional single product UID to check")
-    p.add_argument("--expect-cover", default="", help="optional filename/substring expected in coverAsset or dataMap.cover")
+    p.add_argument(
+        "--expect-cover",
+        default="",
+        help="deprecated compatibility argument; current Master snapshot cover is authoritative",
+    )
 
     p = sub.add_parser("template-calibrate", help="生成单商品剪映模板位置校准草稿")
     p.add_argument("project_id", type=int)

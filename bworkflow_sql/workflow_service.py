@@ -29,6 +29,7 @@ from .cutme_intro import (
     run_cutme_render,
 )
 from .db import Database
+from .master_contracts import MasterContractAdapter
 from .repositories import Repository
 from .resource_lifecycle import (
     DERIVED_ASSET_RETENTION_DAYS,
@@ -224,9 +225,15 @@ class RollBRenameItem:
 
 
 class WorkflowService:
-    def __init__(self, db: Database):
+    def __init__(
+        self,
+        db: Database,
+        *,
+        master_contracts: MasterContractAdapter | None = None,
+    ):
         self.db = db
         self.repo = Repository(db)
+        self.master_contracts = master_contracts or MasterContractAdapter()
         self._tts_log_handles: list[Any] = []
 
     def export_project_markdown(self, project_id: int, target_path: str | Path | None = None) -> Path:
@@ -581,6 +588,24 @@ class WorkflowService:
             product_card_template_id=product_card_template_id,
             product_uid=product_uid,
             expect_cover=expect_cover,
+            master_contracts=self.master_contracts,
+        )
+
+    def dynamic_product_card_preflight(
+        self,
+        project_id: int,
+        *,
+        account_label: str,
+        product_card_template_id: str,
+    ) -> dict[str, Any]:
+        from .product_card_preflight import dynamic_product_card_preflight
+
+        return dynamic_product_card_preflight(
+            self.db,
+            project_id=project_id,
+            account_label=account_label,
+            product_card_template_id=product_card_template_id,
+            master_contracts=self.master_contracts,
         )
 
     def script_doctor(

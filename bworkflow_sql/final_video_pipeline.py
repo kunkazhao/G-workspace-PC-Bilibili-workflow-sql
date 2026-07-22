@@ -54,6 +54,71 @@ class _TimingCollector:
         return payload
 
 
+def _run_dynamic_product_preflight(
+    workflow: Any,
+    *,
+    project_id: int,
+    account_label: str,
+    product_card_template_id: str,
+) -> dict[str, Any]:
+    method = getattr(workflow, "dynamic_product_card_preflight", None)
+    if not callable(method):
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error_code": "dynamic_product_preflight_unavailable",
+            "issues": [
+                {
+                    "code": "dynamic_product_preflight_unavailable",
+                    "product_uid": "",
+                    "field": "workflow",
+                    "message": "Workflow does not expose the required dynamic product-card preflight.",
+                }
+            ],
+            "contexts": [],
+            "snapshot_id": None,
+        }
+    try:
+        result = method(
+            project_id,
+            account_label=account_label,
+            product_card_template_id=product_card_template_id,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error_code": "dynamic_product_preflight_error",
+            "issues": [
+                {
+                    "code": "dynamic_product_preflight_error",
+                    "product_uid": "",
+                    "field": "dynamic_product_preflight",
+                    "message": str(exc),
+                }
+            ],
+            "contexts": [],
+            "snapshot_id": None,
+        }
+    if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error_code": "invalid_dynamic_product_preflight_result",
+            "issues": [
+                {
+                    "code": "invalid_dynamic_product_preflight_result",
+                    "product_uid": "",
+                    "field": "dynamic_product_preflight",
+                    "message": "Dynamic product-card preflight returned an invalid result.",
+                }
+            ],
+            "contexts": [],
+            "snapshot_id": None,
+        }
+    return result
+
+
 def run_final_video_pipeline(
     workflow: Any,
     *,
@@ -91,6 +156,19 @@ def run_final_video_pipeline(
     acceptance = safe_text(acceptance_mode) or "full"
     if acceptance not in {"none", "quick", "visual", "full"}:
         raise ValueError(f"unsupported acceptance_mode: {acceptance}")
+    dynamic_preflight = _run_dynamic_product_preflight(
+        workflow,
+        project_id=project_id,
+        account_label=account,
+        product_card_template_id=product_card_template_id,
+    )
+    if dynamic_preflight.get("ok") is not True:
+        return {
+            "ok": False,
+            "stage": "dynamic_product_preflight",
+            "error_code": "dynamic_product_preflight_failed",
+            "preflight": dynamic_preflight,
+        }
     phase7_selection = None
     if pipeline_path:
         phase7_selection = validated_phase7_selection(
