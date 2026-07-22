@@ -74,24 +74,61 @@ REMOTION_TEMPLATE_METADATA_PATH = Path(
 
 
 @lru_cache(maxsize=1)
-def _remotion_template_metadata() -> dict[str, dict[str, Any]]:
+def _remotion_template_contract() -> tuple[
+    dict[str, dict[str, Any]], dict[str, dict[str, Any]]
+]:
     if not REMOTION_TEMPLATE_METADATA_PATH.exists():
-        return {}
+        return {}, {}
     try:
         payload = json.loads(REMOTION_TEMPLATE_METADATA_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {}
+        return {}, {}
+    raw_registry = payload.get("slotRegistry")
+    registry = (
+        {
+            str(key): dict(value)
+            for key, value in raw_registry.items()
+            if str(key).strip() and isinstance(value, dict)
+        }
+        if isinstance(raw_registry, dict)
+        else {}
+    )
     templates = payload.get("templates")
     if not isinstance(templates, list):
-        return {}
+        return registry, {}
     result: dict[str, dict[str, Any]] = {}
     for item in templates:
         if not isinstance(item, dict):
             continue
         template_id = str(item.get("templateId") or "").strip()
-        if template_id:
-            result[template_id] = dict(item)
-    return result
+        if not template_id:
+            continue
+        declarations = item.get("slotDeclarations")
+        if isinstance(declarations, list):
+            for declaration in declarations:
+                if not isinstance(declaration, dict):
+                    continue
+                key = str(declaration.get("key") or "").strip()
+                if key and key not in registry:
+                    raise ValueError(
+                        f"Template {template_id} declares unregistered slot key {key!r}; "
+                        "add it to slotRegistry first"
+                    )
+        result[template_id] = dict(item)
+    return registry, result
+
+
+@lru_cache(maxsize=1)
+def _remotion_template_metadata() -> dict[str, dict[str, Any]]:
+    return _remotion_template_contract()[1]
+
+
+def get_remotion_slot_registry() -> dict[str, dict[str, Any]]:
+    """读取 CutMe 的商品卡槽位注册表，不在 B-Workflow 复制槽位常量。"""
+    return {
+        key: dict(definition)
+        for key, definition in _remotion_template_contract()[0].items()
+    }
 
 
 def get_remotion_template_metadata(template_id: str) -> dict[str, Any]:
@@ -100,6 +137,55 @@ def get_remotion_template_metadata(template_id: str) -> dict[str, Any]:
     if metadata is None:
         raise ValueError(f"未知 Remotion 商品图模板：{template_id}")
     return dict(metadata)
+
+
+def _value_at_slot_source(product_card: dict[str, Any], source: str) -> Any:
+    value: Any = product_card
+    for part in source.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return None
+        value = value[part]
+    return value
+
+
+def _slot_value_is_present(
+    product_card: dict[str, Any], definition: dict[str, Any]
+) -> bool:
+    value = _value_at_slot_source(product_card, str(definition.get("source") or ""))
+    slot_type = str(definition.get("type") or "")
+    if slot_type == "label_value_list":
+        return isinstance(value, list) and bool(value)
+    return isinstance(value, str) and bool(value.strip())
+
+
+def product_card_slot_issues(
+    template_id: str,
+    product_card: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """仅为声明为 required 且缺值的槽位返回阻断问题。"""
+    metadata = get_remotion_template_metadata(template_id)
+    registry = get_remotion_slot_registry()
+    card = product_card if isinstance(product_card, dict) else {}
+    issues: list[dict[str, Any]] = []
+    declarations = metadata.get("slotDeclarations")
+    for declaration in declarations if isinstance(declarations, list) else []:
+        if not isinstance(declaration, dict) or declaration.get("required") is not True:
+            continue
+        key = str(declaration.get("key") or "").strip()
+        definition = registry.get(key, {})
+        if _slot_value_is_present(card, definition):
+            continue
+        issues.append(
+            {
+                "level": "error",
+                "code": "missing_required_product_card_slot",
+                "blocking": True,
+                "template_id": template_id,
+                "slot_key": key,
+                "message": f"Product-card template requires slot {key!r}, but its value is empty.",
+            }
+        )
+    return issues
 
 
 def product_card_text_capacity_certification_issues(

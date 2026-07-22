@@ -1,6 +1,9 @@
 import hashlib
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 import bworkflow_sql.template_config as template_config
 from bworkflow_sql.template_config import (
@@ -15,6 +18,49 @@ from bworkflow_sql.template_config import (
     resolve_product_card_template,
     user_for_template,
 )
+
+
+ISOLATED_CUTME_METADATA_PATH = Path(
+    os.environ.get(
+        "CUTME_REMOTION_TEMPLATE_METADATA",
+        str(
+            Path(__file__).resolve().parents[3]
+            / "赵二-工具-CutMe"
+            / "dynamic-product-card-final-video"
+            / "remotion-renderer"
+            / "product-card-templates.json"
+        ),
+    )
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_template_metadata_caches():
+    for name in ("_remotion_template_contract", "_remotion_template_metadata"):
+        cached = getattr(template_config, name, None)
+        if cached is not None:
+            cached.cache_clear()
+    yield
+    for name in ("_remotion_template_contract", "_remotion_template_metadata"):
+        cached = getattr(template_config, name, None)
+        if cached is not None:
+            cached.cache_clear()
+
+
+def _write_isolated_template_contract(
+    tmp_path: Path,
+    monkeypatch,
+    mutate,
+) -> dict:
+    assert ISOLATED_CUTME_METADATA_PATH.is_file()
+    assert "superpowers" in str(ISOLATED_CUTME_METADATA_PATH)
+    payload = json.loads(ISOLATED_CUTME_METADATA_PATH.read_text(encoding="utf-8"))
+    mutate(payload)
+    metadata_path = tmp_path / "cutme-remotion" / "product-card-templates.json"
+    metadata_path.parent.mkdir(parents=True)
+    metadata_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(template_config, "REMOTION_TEMPLATE_METADATA_PATH", metadata_path)
+    return payload
 
 
 def _sha256(path: Path) -> str:
@@ -425,3 +471,68 @@ def test_resolve_product_card_template_rejects_template_from_other_account() -> 
         assert "does not belong to account" in str(exc)
     else:
         raise AssertionError("expected template/account mismatch to fail")
+
+
+def test_new_registered_optional_slot_does_not_require_template_declaration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    payload = _write_isolated_template_contract(
+        tmp_path,
+        monkeypatch,
+        lambda contract: contract["slotRegistry"].update(
+            {
+                "futureBadge": {
+                    "type": "text",
+                    "source": "dataMap.futureBadge",
+                }
+            }
+        ),
+    )
+
+    registry = template_config.get_remotion_slot_registry()
+    metadata = get_remotion_template_metadata(payload["templates"][0]["templateId"])
+
+    assert registry["futureBadge"]["type"] == "text"
+    assert "futureBadge" not in {item["key"] for item in metadata["slotDeclarations"]}
+
+
+def test_template_declaration_rejects_unregistered_slot_key(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def mutate(contract: dict) -> None:
+        contract["templates"][0]["slotDeclarations"].append(
+            {"key": "notRegistered", "required": False, "emptyPolicy": "preserve"}
+        )
+
+    payload = _write_isolated_template_contract(tmp_path, monkeypatch, mutate)
+
+    with pytest.raises(ValueError, match="notRegistered.*slotRegistry"):
+        get_remotion_template_metadata(payload["templates"][0]["templateId"])
+
+
+def test_only_missing_required_slot_values_are_blocking(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    payload = _write_isolated_template_contract(
+        tmp_path, monkeypatch, lambda _contract: None
+    )
+    template_id = payload["templates"][0]["templateId"]
+    product_card = {
+        "dataMap": {
+            "title": "Alpha Keyboard",
+            "price": "299元",
+            "priceBandLabel": "200-300元",
+        },
+        "coverAsset": "assets/covers/P001.png",
+    }
+
+    assert template_config.product_card_slot_issues(template_id, product_card) == []
+
+    product_card["dataMap"]["title"] = ""
+    issues = template_config.product_card_slot_issues(template_id, product_card)
+
+    assert [item["slot_key"] for item in issues] == ["title"]
+    assert all(item["blocking"] is True for item in issues)
