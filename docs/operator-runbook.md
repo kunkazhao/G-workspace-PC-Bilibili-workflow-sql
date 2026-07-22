@@ -1,5 +1,16 @@
 # B-Workflow SQL 运维手册
 
+## 商品图快速生成
+
+先运行 `product-card-preflight`。仅缺图时用 `--mode missing`，仅已有图过期或
+模板错误时用 `--mode stale`，两类问题并存才用 `--mode all`。CLI 默认
+`--workers 3`，允许 1-4 路有界并发；返回 JSON 的 `workers` 和
+`timings.prepare_seconds`、`render_seconds`、`total_seconds` 是批量阶段的耗时证据。封面或模板发生变化时，先用
+`--product-uid` 生成一张代表样图，确认后再批量生成。
+正式批量会把本次商品卡写入一个 job package，由 CutMe 的
+`render-product-cards` 在同一进程中只执行一次 Remotion `bundle()`，再按有界
+并发输出全部 PNG；不要退回逐商品启动 CutMe 的旧路径。
+
 ## 按产物身份确认
 
 不要通过手工修改 `status` 验收引言。用户确认后运行
@@ -9,8 +20,10 @@
 
 ## 媒体工作区与正式成片履历
 
-阶段 7 开始时，先运行 `template-doctor` 展示 `media_inventory`，再让用户一次
-确认输出分支、账号、商品卡模板、商品素材方式、排序、standard/top 和置顶 UID。
+阶段 7 开始时，先运行 `template-doctor` 展示 `media_inventory`，并读取
+`workflow-doctor.checks.phase7_selection.featured_products`。没有重点商品时默认
+`standard` 且不置顶；一款时展示 UID/完整名称并询问是否置顶；多款时展示全部
+UID/完整名称并询问是否全部置顶。随后一次确认输出分支、账号、商品卡模板、商品素材方式和排序。
 确认后运行：
 
 ```powershell
@@ -29,8 +42,9 @@ python -m bworkflow_sql confirm-phase7-selection --pipeline <.pipeline.json> --o
 - 如果实际上传的是后续剪辑导出的版本，加 `--final-path <最终发布版.mp4>`；run manifest 继续提供模板和生成来源，履历哈希与当前路径记录最终发布版。
 - 测试、预览、模板校准和未采纳成片不得执行确认命令。
 - 下次选模板前运行 `python -m bworkflow_sql production-history <project_id> --account <账号>`，优先使用 `recommended_template`。
-- 发布后自动移动：`python -m bworkflow_sql complete-publishing <production_run_id> --pipeline <path>`。默认使用 `G:\2026项目-b站\已发布视频` 下已存在的当前月份目录；当前月份目录不存在则放根目录，不自动建月份目录。`--archive-dir` 仅用于覆盖默认目录。
-- 已手工移动：改用 `--current-path <当前完整MP4路径>`；系统校验 SHA-256 后更新现有正式成片记录和 `phases.publishing`，不修改 run manifest。
+- 发布后自动归档：`python -m bworkflow_sql complete-publishing <production_run_id> --pipeline <path>`。归档单元是完整交付目录，不是单个 MP4；默认目标为 `G:\2026项目-b站\已发布视频\<已存在月份目录>\<原项目目录名>`。月份目录不存在时使用已发布视频根目录，但仍保留原项目目录名。
+- 归档会递归重写 pipeline 中属于原交付目录的绝对路径，包括 `output_dir`、引言、成片、封面和 `artifact_approvals`，随后重新校验审批文件的大小和 SHA-256，再更新 SQLite。目标项目目录已存在时拒绝合并覆盖。
+- 已手工整体移动项目目录：改用 `--current-path <新项目目录内的正式成片路径>`；若原交付目录仍存在则拒绝只重绑单个文件。run manifest 作为历史生成证据不修改。
 
 ## 冻结配方重渲染与修订
 
@@ -149,6 +163,12 @@ runner 的固定顺序是：先跑只读 `template-doctor`；如果发现缺图�
 manifest 里的三件事必须一致：顶层 `display_template`、商品 `image_path`
 所在模板目录、`display_video_slot.templateId`。如果只是想看是否已准备好，
 用 `--dry-run`，它不会生成新的剪映草稿。
+
+模板设计目录下的单商品 still（例如 `data\workspace\manual-tests\` 中的
+KX030 样图）只是视觉验收证据，不会写入 `asset_bindings`，也不代表当前项目
+切换了模板。只有用户另行明确指定项目、账号和替换范围后，才能运行
+`product-images`。引言预检缺少的3段品类产品展示视频属于 phase 6 素材阻塞，
+不能用商品图批量生成来替代。
 
 ## 常用操作速查
 
@@ -644,3 +664,36 @@ library or stale `.pipeline.json`. For normal workflow production, pass
 `--pipeline <path-to-.pipeline.json>` to `render-final-video` so the latest
 manifest and MP4 paths are written back for TotalControl `workflow.ps1
 status/next`.
+
+## Resource lifecycle audit and reconciliation
+
+Resource cleanup is event-driven rather than a periodic disk sweep. Successful
+product-image jobs register a delayed cleanup candidate immediately; moving an
+image binding to a new template or output path registers the replaced generated
+PNG. Periodic work is only a reconciliation backstop.
+
+```powershell
+python -m bworkflow_sql resource-audit <project_id> --pipeline <.pipeline.json>
+python -m bworkflow_sql resource-reconcile <project_id> --pipeline <.pipeline.json>
+python -m bworkflow_sql resource-cleanup-list <project_id> --pipeline <.pipeline.json>
+python -m bworkflow_sql resource-cleanup-plan <project_id> --pipeline <.pipeline.json> --account <账号> --kind <resource_kind>
+python -m bworkflow_sql resource-cleanup-delete --batch-id <batch_id> --confirm <token>
+python -m bworkflow_sql resource-history <project_id> --account <账号> --kind <resource_kind> --state <state>
+```
+
+The first command is read-only. The second only writes high-confidence candidates
+to `resource_cleanup_candidates` and corrects broken `ready` bindings to `missing`;
+neither command deletes files. `resource-cleanup-list` applies every permanent-delete
+gate without writing. `resource-cleanup-plan` stores an exact fingerprinted batch
+and returns its one-time token; it still does not delete. Only the final command,
+after explicit user confirmation, permanently deletes the unchanged batch.
+
+There is no automatic deletion and no quarantine directory. Missing pipeline state
+makes ordinary inactive assets `uncertain`. Manual/source assets, formal productions,
+run manifests, immutable spoken scripts, and superseded formal outputs are outside
+ordinary cleanup. Product-image jobs retain seven days; replaced generated images
+and voices retain fourteen days. A changed path, size, mtime, fingerprint, binding,
+pipeline or production reference invalidates the prepared batch. Successful deletion
+keeps its candidate, batch-item and state-event tombstones.
+`resource-history` queries those append-only creation, update, invalidation and
+deletion events without scanning the filesystem.

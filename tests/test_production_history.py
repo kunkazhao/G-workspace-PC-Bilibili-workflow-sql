@@ -1,5 +1,6 @@
 import json
 import hashlib
+import shutil
 from pathlib import Path
 
 import pytest
@@ -24,12 +25,17 @@ def _service(tmp_path: Path):
 def _manifest(tmp_path: Path, project_id: int, *, acceptance_mode: str = "quick") -> Path:
     mp4 = tmp_path / "完整成片.mp4"
     mp4.write_bytes(b"mp4")
+    delivery = tmp_path / "delivery"
+    delivery.mkdir(exist_ok=True)
+    delivered_mp4 = delivery / mp4.name
+    mp4.replace(delivered_mp4)
+    mp4 = delivered_mp4
     path = tmp_path / "run.json"
     path.write_text(json.dumps({
         "kind": "bworkflow.final_video_run", "createdAt": "2026-07-12T12:00:00",
         "project": {"id": project_id, "account": "小博"},
         "selection": {"product_card_template_id": "muban-xiaobo-3", "acceptance_mode": acceptance_mode},
-        "outputs": {"full_mp4": str(mp4)},
+        "outputs": {"full_mp4": str(mp4), "product_mp4": str(mp4)},
         "reports": {"verification": {"full_ffprobe": {"duration": 60}}},
     }, ensure_ascii=False), encoding="utf-8")
     return path
@@ -268,6 +274,7 @@ def test_complete_publishing_relinks_a_manually_moved_matching_file(tmp_path: Pa
     moved = tmp_path / "手工已发布" / original.name
     moved.parent.mkdir()
     original.replace(moved)
+    original.parent.rmdir()
     pipeline = tmp_path / ".pipeline.json"
     pipeline.write_text(json.dumps({"phases": {}, "paths": {}}, ensure_ascii=False), encoding="utf-8")
 
@@ -298,7 +305,90 @@ def test_complete_publishing_defaults_to_existing_current_month_directory(tmp_pa
         now=datetime(2026, 7, 12),
     )
 
-    assert Path(result["production"]["full_mp4_path"]).parent == month_dir.resolve()
+    assert Path(result["production"]["full_mp4_path"]).parent == (month_dir / "delivery").resolve()
+    db.close()
+
+
+def test_complete_publishing_archives_delivery_folder_and_rewrites_all_bound_paths(tmp_path: Path):
+    db, project_id, service = _service(tmp_path)
+    confirmed = service.confirm(project_id, run_manifest_path=_manifest(tmp_path, project_id))
+    delivery = Path(confirmed["production"]["full_mp4_path"]).parent
+    final = Path(confirmed["production"]["full_mp4_path"])
+    intro = delivery / "intro.mp4"
+    cover = delivery / "cover.png"
+    notes = delivery / "notes.txt"
+    intro.write_bytes(b"intro")
+    cover.write_bytes(b"cover")
+    notes.write_text("keep me", encoding="utf-8")
+    pipeline = tmp_path / ".pipeline.json"
+    pipeline.write_text(json.dumps({
+        "output_dir": str(delivery),
+        "phases": {
+            "intro_video": {"output_mp4_path": str(intro)},
+            "assembly": {
+                "full_mp4_path": str(final),
+                "run_manifest_path": confirmed["production"]["run_manifest_path"],
+            },
+            "cover": {"output_path": str(cover)},
+            "publishing": {"status": "pending"},
+        },
+        "paths": {"intro_video": str(intro), "cover": str(cover)},
+        "artifact_approvals": {
+            "intro_video": {
+                "path": str(intro), "size": intro.stat().st_size,
+                "sha256": "sha256:" + _file_sha256(intro),
+            },
+            "cover": {
+                "path": str(cover), "size": cover.stat().st_size,
+                "sha256": "sha256:" + _file_sha256(cover),
+            },
+        },
+    }, ensure_ascii=False), encoding="utf-8")
+    archive = tmp_path / "published" / "episode-folder"
+
+    result = service.complete_publishing(
+        confirmed["production"]["id"], pipeline_path=pipeline, archive_dir=archive
+    )
+
+    payload = json.loads(pipeline.read_text(encoding="utf-8"))
+    assert result["archive_directory"] == str(archive.resolve())
+    assert not delivery.exists()
+    assert (archive / final.name).is_file()
+    assert (archive / intro.name).is_file()
+    assert (archive / cover.name).is_file()
+    assert (archive / notes.name).read_text(encoding="utf-8") == "keep me"
+    assert payload["output_dir"] == str(archive.resolve())
+    assert payload["phases"]["intro_video"]["output_mp4_path"] == str((archive / intro.name).resolve())
+    assert payload["phases"]["cover"]["output_path"] == str((archive / cover.name).resolve())
+    assert payload["artifact_approvals"]["intro_video"]["path"] == str((archive / intro.name).resolve())
+    assert payload["artifact_approvals"]["cover"]["path"] == str((archive / cover.name).resolve())
+    assert payload["phases"]["assembly"]["product_mp4_path"] == str((archive / final.name).resolve())
+    assert payload["paths"]["product_mp4"] == str((archive / final.name).resolve())
+    db.close()
+
+
+def test_complete_publishing_resumes_a_verified_partial_directory_move(tmp_path: Path):
+    db, project_id, service = _service(tmp_path)
+    confirmed = service.confirm(project_id, run_manifest_path=_manifest(tmp_path, project_id))
+    delivery = Path(confirmed["production"]["full_mp4_path"]).parent
+    companion = delivery / "companion.txt"
+    companion.write_text("same", encoding="utf-8")
+    archive = tmp_path / "published" / "episode-folder"
+    shutil.copytree(delivery, archive)
+    pipeline = tmp_path / ".pipeline.json"
+    pipeline.write_text(json.dumps({
+        "output_dir": str(delivery),
+        "phases": {"publishing": {"status": "pending"}},
+        "paths": {},
+    }), encoding="utf-8")
+
+    result = service.complete_publishing(
+        confirmed["production"]["id"], pipeline_path=pipeline, archive_dir=archive
+    )
+
+    assert result["moved"] is True
+    assert not delivery.exists()
+    assert (archive / companion.name).read_text(encoding="utf-8") == "same"
     db.close()
 
 
@@ -317,6 +407,6 @@ def test_complete_publishing_defaults_to_root_when_current_month_directory_is_mi
         now=datetime(2026, 8, 1),
     )
 
-    assert Path(result["production"]["full_mp4_path"]).parent == published_root.resolve()
+    assert Path(result["production"]["full_mp4_path"]).parent == (published_root / "delivery").resolve()
     assert not (published_root / "8月").exists()
     db.close()

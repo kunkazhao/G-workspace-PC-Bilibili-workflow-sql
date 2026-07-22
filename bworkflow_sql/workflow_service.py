@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.request
 import wave
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +30,11 @@ from .cutme_intro import (
 )
 from .db import Database
 from .repositories import Repository
+from .resource_lifecycle import (
+    DERIVED_ASSET_RETENTION_DAYS,
+    record_resource_state_event_in_connection,
+    register_cleanup_candidate_in_connection,
+)
 from .settings import (
     CUTME_ROOT,
     DEFAULT_INDEXTTS_DIR,
@@ -515,6 +521,7 @@ class WorkflowService:
         mode: str = "stale",
         product_uid: str = "",
         product_card_template_id: str = "",
+        max_workers: int = 3,
     ) -> dict[str, Any]:
         certification_issues = _product_card_text_capacity_issues(
             account_label=account_label,
@@ -537,6 +544,7 @@ class WorkflowService:
             mode=mode,
             product_uid=product_uid,
             product_card_template_id=product_card_template_id,
+            max_workers=max_workers,
         )
 
     def template_doctor(
@@ -606,6 +614,9 @@ class WorkflowService:
         account = safe_text(account_label)
         top_uid_list = split_csv(top_uids) if isinstance(top_uids, str) else list(top_uids or [])
         checks: dict[str, Any] = {
+            "phase7_selection": _phase7_selection_context(
+                self.repo.products(project_id, include_removed=False)
+            ),
             "script": None,
             "voice_and_assembly": None,
             "intro_preflight": None,
@@ -1059,7 +1070,7 @@ class WorkflowService:
                     provider_adapter.capabilities.output_suffix
                 ).name
                 # Generate beside the previous artifact first. The database update decides
-                # which file is current; only after that commit may stale files be removed.
+                # which file is current; older files remain until a confirmed cleanup batch.
                 final_path = unique_path(out_dir / filename)
                 synthesis = provider_adapter.synthesize(
                     TtsSynthesisRequest(
@@ -2505,6 +2516,37 @@ class WorkflowService:
             text_hash=safe_text(job.block.get("text_hash")),
         )
         with self.db.connect() as conn:
+            expiring = conn.execute(
+                """
+                SELECT * FROM asset_bindings
+                WHERE project_id=? AND script_block_id=? AND asset_type='voice'
+                  AND account_label=?
+                  AND (COALESCE(text_hash, '')<>? OR COALESCE(generation_fingerprint, '')<>?)
+                  AND source_kind<>'manual' AND status<>'expired'
+                """,
+                (
+                    project_id,
+                    job.block["id"],
+                    account_label,
+                    job.block["text_hash"],
+                    generation_fingerprint,
+                ),
+            ).fetchall()
+            existing = conn.execute(
+                """
+                SELECT * FROM asset_bindings
+                WHERE project_id=? AND uid=? AND script_block_id=? AND asset_type='voice'
+                  AND account_label=? AND block_label=? AND path=?
+                """,
+                (
+                    project_id,
+                    job.uid,
+                    job.block["id"],
+                    account_label,
+                    safe_text(job.block.get("price_range_label")) if job.kind == "price_transition" else safe_text(job.block.get("block_label")),
+                    str(path),
+                ),
+            ).fetchone()
             conn.execute(
                 """
                 UPDATE asset_bindings
@@ -2563,56 +2605,78 @@ class WorkflowService:
                     ts,
                 ),
             )
-        self._delete_stale_voice_files(
-            project_id,
-            job=job,
-            account_label=account_label,
-            current_path=path,
-            generation_fingerprint=generation_fingerprint,
-        )
-
-    def _delete_stale_voice_files(
-        self,
-        project_id: int,
-        *,
-        job: VoiceJob,
-        account_label: str,
-        current_path: Path,
-        generation_fingerprint: str,
-    ) -> None:
-        rows = self.db.fetchall(
-            """
-            SELECT path FROM asset_bindings
-            WHERE project_id=?
-              AND script_block_id=?
-              AND asset_type='voice'
-              AND account_label=?
-              AND (COALESCE(text_hash, '')<>? OR COALESCE(generation_fingerprint, '')<>?)
-              AND source_kind<>'manual'
-            """,
-            (
-                project_id,
-                job.block["id"],
-                account_label,
-                safe_text(job.block.get("text_hash")),
-                generation_fingerprint,
-            ),
-        )
-        current = current_path.resolve()
-        for row in rows:
-            stale_path = Path(safe_text(row["path"]))
-            if not stale_path:
-                continue
-            try:
-                if stale_path.resolve() == current:
+            current = conn.execute(
+                """
+                SELECT * FROM asset_bindings
+                WHERE project_id=? AND uid=? AND script_block_id=? AND asset_type='voice'
+                  AND account_label=? AND block_label=? AND path=?
+                """,
+                (
+                    project_id,
+                    job.uid,
+                    job.block["id"],
+                    account_label,
+                    safe_text(job.block.get("price_range_label")) if job.kind == "price_transition" else safe_text(job.block.get("block_label")),
+                    str(path),
+                ),
+            ).fetchone()
+            current_id = int(current["id"])
+            for expired in expiring:
+                if int(expired["id"]) == current_id or safe_text(expired["path"]) == str(path):
                     continue
-            except OSError:
-                pass
-            try:
-                if stale_path.is_file():
-                    stale_path.unlink()
-            except OSError:
-                continue
+                record_resource_state_event_in_connection(
+                    conn,
+                    project_id=project_id,
+                    resource_kind="voice",
+                    resource_key=f"asset_binding:{int(expired['id'])}",
+                    path=safe_text(expired["path"]),
+                    previous_state=safe_text(expired["status"]),
+                    new_state="expired",
+                    reason="voice_generation_identity_changed",
+                    source="voice_generation",
+                    account_label=account_label,
+                    details={
+                        "previous_text_hash": safe_text(expired["text_hash"]),
+                        "text_hash": safe_text(job.block.get("text_hash")),
+                        "generation_fingerprint": generation_fingerprint,
+                    },
+                    created_at=ts,
+                )
+                stale_path = safe_text(expired["path"])
+                if stale_path:
+                    register_cleanup_candidate_in_connection(
+                        conn,
+                        project_id=project_id,
+                        resource_kind="asset_voice",
+                        path=stale_path,
+                        reason="voice_generation_identity_changed",
+                        eligible_at=datetime.now(timezone.utc)
+                        + timedelta(days=DERIVED_ASSET_RETENTION_DAYS),
+                        details={
+                            "asset_binding_id": int(expired["id"]),
+                            "account_label": account_label,
+                            "discovered_by": "voice_generation",
+                        },
+                    )
+            record_resource_state_event_in_connection(
+                conn,
+                project_id=project_id,
+                resource_kind="voice",
+                resource_key=f"asset_binding:{current_id}",
+                path=path,
+                previous_state=safe_text(existing["status"]) if existing else "",
+                new_state="created" if existing is None else "updated",
+                reason="voice_generated",
+                source="voice_generation",
+                account_label=account_label,
+                details={
+                    "script_block_id": int(job.block["id"]),
+                    "text_hash": safe_text(job.block.get("text_hash")),
+                    "generation_fingerprint": generation_fingerprint,
+                    "provider": identity.provider,
+                },
+                created_at=ts,
+            )
 
     def _ensure_tts_api_ready(
         self,
@@ -3254,6 +3318,25 @@ def _workflow_doctor_issues(source: str, issues: list[dict[str, Any]]) -> list[d
         item["source"] = source
         result.append(item)
     return result
+
+
+def _phase7_selection_context(products: list[dict[str, Any]]) -> dict[str, Any]:
+    featured_products: list[dict[str, str]] = []
+    for product in products:
+        try:
+            product_card = json.loads(safe_text(product.get("product_card_json")) or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            product_card = {}
+        if not isinstance(product_card, dict) or product_card.get("featured") is not True:
+            continue
+        uid = safe_text(product.get("uid"))
+        title = safe_text(product.get("title"))
+        if uid and title:
+            featured_products.append({"uid": uid, "title": title})
+    return {
+        "featured_count": len(featured_products),
+        "featured_products": featured_products,
+    }
 
 
 def _workflow_doctor_payload(

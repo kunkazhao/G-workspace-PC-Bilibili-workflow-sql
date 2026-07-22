@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database
+from .product_image_modes import regeneration_mode_for_issue_codes
 from .render_package_builder import product_card_content_fingerprint, product_card_payload_for_product
 from .repositories import Repository
 from .template_config import image_set_for_template, resolve_product_card_template
@@ -249,6 +250,7 @@ def _next_hint(
         "action": "regenerate_product_images_then_recheck",
         "command": (
             f"python -m bworkflow_sql product-images {project_id} "
-            f"--account {account} --mode stale --product-card-template-id {template_id}"
+            f"--account {account} --mode {regeneration_mode_for_issue_codes(codes)} "
+            f"--product-card-template-id {template_id}"
         ),
     }

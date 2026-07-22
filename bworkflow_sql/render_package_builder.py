@@ -7,8 +7,11 @@ import hashlib
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+
+from PIL import Image
 
 from .db import Database
 from .repositories import Repository
@@ -1271,25 +1274,42 @@ def _is_remote_url(value: str) -> bool:
 
 def _ensure_remote_cover_cached(url: str, *, category: str, uid: str) -> Path:
     target = _cover_cache_path(category=category, uid=uid, url=url)
+    png_target = target.with_suffix(".png")
+    if png_target.is_file():
+        return png_target
     if target.is_file():
-        data = target.read_bytes()
-        detected_suffix = _image_suffix_from_bytes(data)
-        if detected_suffix and detected_suffix != target.suffix.lower():
-            corrected_target = target.with_suffix(detected_suffix)
-            if not corrected_target.is_file() or corrected_target.read_bytes() != data:
-                corrected_target.write_bytes(data)
-            return corrected_target
-        return target
+        return _materialize_cover_bytes(target.read_bytes(), target=target)
+    webp_target = target.with_suffix(".webp")
+    if webp_target.is_file():
+        return _materialize_cover_bytes(webp_target.read_bytes(), target=webp_target)
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         data = _download_url_bytes(url)
     except Exception as exc:  # pragma: no cover - exercised through caller behavior.
         raise ValueError(f"failed to download product cover for {uid}: {url}: {exc}") from exc
+    return _materialize_cover_bytes(data, target=target)
+
+
+def _materialize_cover_bytes(data: bytes, *, target: Path) -> Path:
     detected_suffix = _image_suffix_from_bytes(data)
+    if detected_suffix == ".webp":
+        png_target = target.with_suffix(".png")
+        png_data = _decode_webp_as_png(data)
+        if not png_target.is_file() or png_target.read_bytes() != png_data:
+            png_target.write_bytes(png_data)
+        return png_target
     if detected_suffix and detected_suffix != target.suffix.lower():
         target = target.with_suffix(detected_suffix)
     target.write_bytes(data)
     return target
+
+
+def _decode_webp_as_png(data: bytes) -> bytes:
+    output = BytesIO()
+    with Image.open(BytesIO(data)) as image:
+        decoded = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+        decoded.save(output, format="PNG")
+    return output.getvalue()
 
 
 def _cover_cache_path(*, category: str, uid: str, url: str) -> Path:

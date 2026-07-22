@@ -123,3 +123,19 @@ def test_product_card_preflight_passes_current_cover_template_and_binding(tmp_pa
     assert result["products"][0]["uid"] == "P001"
     assert result["products"][0]["cover_match"] is True
     assert result["next"]["action"] == "run_product_images_or_continue"
+
+
+def test_product_card_preflight_recommends_missing_mode_when_images_are_absent(tmp_path: Path):
+    db, project_id, _cover = _seed_preflight_project(tmp_path)
+
+    result = product_card_preflight(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        product_card_template_id="muban-xiaobo-1",
+        product_uid="P001",
+    )
+
+    assert result["ok"] is False
+    assert {issue["code"] for issue in result["issues"]} == {"missing_ready_image_binding"}
+    assert "--mode missing" in result["next"]["command"]

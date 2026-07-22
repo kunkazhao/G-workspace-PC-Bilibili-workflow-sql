@@ -132,7 +132,7 @@ def test_fresh_db_has_nullable_master_snapshot_provenance(tmp_path: Path):
         (project_id,),
     )
 
-    assert CURRENT_SCHEMA_VERSION == 12
+    assert CURRENT_SCHEMA_VERSION == 15
     assert "master_snapshot_id" in columns
     assert "master_snapshot_applied_at" in columns
     assert project["master_snapshot_id"] is None
@@ -170,10 +170,211 @@ def test_v3_database_upgrades_to_current_without_backfilling_existing_project(tm
         "SELECT version FROM schema_version ORDER BY version"
     )]
 
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     assert project["master_snapshot_id"] is None
     assert project["master_snapshot_applied_at"] is None
     db.close()
+
+
+def test_resource_cleanup_candidate_schema_is_created(tmp_path: Path):
+    db = Database(tmp_path / "resource-lifecycle.db")
+
+    columns = {
+        row["name"] for row in db.fetchall("PRAGMA table_info(resource_cleanup_candidates)")
+    }
+    indexes = {
+        row["name"]
+        for row in db.fetchall("PRAGMA index_list(resource_cleanup_candidates)")
+    }
+
+    assert {
+        "project_id",
+        "resource_kind",
+        "path",
+        "status",
+        "eligible_at",
+        "details_json",
+    } <= columns
+    assert "idx_resource_cleanup_candidates_project_status" in indexes
+    db.close()
+
+
+def test_resource_lifecycle_event_and_delete_batch_schema_is_created(tmp_path: Path):
+    db = Database(tmp_path / "resource-delete-contract.db")
+
+    tables = {
+        row["name"]
+        for row in db.fetchall("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    event_columns = {
+        row["name"] for row in db.fetchall("PRAGMA table_info(resource_state_events)")
+    }
+    batch_columns = {
+        row["name"] for row in db.fetchall("PRAGMA table_info(resource_cleanup_batches)")
+    }
+    item_columns = {
+        row["name"]
+        for row in db.fetchall("PRAGMA table_info(resource_cleanup_batch_items)")
+    }
+
+    assert {
+        "resource_state_events",
+        "resource_cleanup_batches",
+        "resource_cleanup_batch_items",
+    } <= tables
+    assert {
+        "project_id",
+        "resource_kind",
+        "resource_key",
+        "previous_state",
+        "new_state",
+        "reason",
+        "source",
+        "created_at",
+    } <= event_columns
+    assert {
+        "id",
+        "project_id",
+        "status",
+        "snapshot_hash",
+        "confirmation_token_hash",
+        "confirmed_by",
+        "result_json",
+    } <= batch_columns
+    assert {
+        "batch_id",
+        "candidate_id",
+        "path",
+        "expected_entry_kind",
+        "expected_size_bytes",
+        "expected_mtime_ns",
+        "expected_fingerprint",
+        "status",
+        "result_message",
+        "deleted_at",
+    } <= item_columns
+    db.close()
+
+
+def test_resource_lifecycle_event_and_delete_batch_contract_round_trip(tmp_path: Path):
+    db = Database(tmp_path / "resource-delete-round-trip.db")
+    project_id = db.upsert_project({"name": "home-oven"})
+    with db.connect() as conn:
+        candidate = conn.execute(
+            """
+            INSERT INTO resource_cleanup_candidates
+                (project_id, resource_kind, path, reason, status, eligible_at,
+                 details_json, first_seen_at, last_seen_at)
+            VALUES (?, 'asset_voice', 'G:/voice/old.mp3', 'script_changed',
+                    'pending', '2026-07-20T00:00:00Z', '{}', 'now', 'now')
+            """,
+            (project_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO resource_state_events
+                (project_id, resource_kind, resource_key, path, previous_state,
+                 new_state, reason, source, account_label, details_json, created_at)
+            VALUES (?, 'voice', 'asset_binding:7', 'G:/voice/old.mp3', 'ready',
+                    'superseded', 'script_changed', 'markdown_sync', 'rongrong',
+                    '{"script_id":"intro-1"}', 'now')
+            """,
+            (project_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO resource_cleanup_batches
+                (id, project_id, status, filters_json, snapshot_hash,
+                 confirmation_token_hash, candidate_count, total_size_bytes,
+                 created_at)
+            VALUES ('batch-1', ?, 'prepared', '{"kind":"voice"}',
+                    'snapshot-hash', 'token-hash', 1, 128, 'now')
+            """,
+            (project_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO resource_cleanup_batch_items
+                (batch_id, candidate_id, resource_kind, path, reason,
+                 expected_entry_kind, expected_size_bytes, expected_mtime_ns,
+                 expected_fingerprint)
+            VALUES ('batch-1', ?, 'asset_voice', 'G:/voice/old.mp3',
+                    'script_changed', 'file', 128, 123456, 'fingerprint')
+            """,
+            (candidate.lastrowid,),
+        )
+
+    event = db.fetchone(
+        "SELECT new_state, reason, account_label FROM resource_state_events"
+    )
+    batch_item = db.fetchone(
+        """
+        SELECT b.status AS batch_status, i.status AS item_status, i.path
+        FROM resource_cleanup_batches b
+        JOIN resource_cleanup_batch_items i ON i.batch_id=b.id
+        WHERE b.id='batch-1'
+        """
+    )
+
+    assert dict(event) == {
+        "new_state": "superseded",
+        "reason": "script_changed",
+        "account_label": "rongrong",
+    }
+    assert dict(batch_item) == {
+        "batch_status": "prepared",
+        "item_status": "prepared",
+        "path": "G:/voice/old.mp3",
+    }
+    db.close()
+
+
+def test_v15_backfills_existing_cleanup_candidate_without_duplicate_event(tmp_path: Path):
+    db_path = tmp_path / "resource-event-backfill.db"
+    db = Database(db_path)
+    project_id = db.upsert_project({"name": "oven"})
+    with db.connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO resource_cleanup_candidates
+                (project_id, resource_kind, path, reason, status, eligible_at,
+                 details_json, first_seen_at, last_seen_at)
+            VALUES (?, 'asset_voice', 'G:/voice/legacy.mp3', 'legacy_candidate',
+                    'pending', '2026-07-01T00:00:00Z', '{}', 'first', 'last')
+            """,
+            (project_id,),
+        )
+        candidate_id = int(cursor.lastrowid)
+        conn.execute("DELETE FROM resource_state_events")
+        conn.execute("DELETE FROM schema_version WHERE version=15")
+    db.close()
+
+    migrated = Database(db_path)
+    events = migrated.fetchall(
+        """
+        SELECT resource_key, new_state, reason, source, created_at
+        FROM resource_state_events
+        WHERE project_id=?
+        """,
+        (project_id,),
+    )
+
+    assert [dict(row) for row in events] == [
+        {
+            "resource_key": f"cleanup_candidate:{candidate_id}",
+            "new_state": "pending",
+            "reason": "legacy_candidate",
+            "source": "resource_lifecycle_v15_backfill",
+            "created_at": "first",
+        }
+    ]
+    with migrated.connect() as conn:
+        migrated._migrate_v15(conn)
+    assert migrated.fetchone(
+        "SELECT COUNT(*) AS count FROM resource_state_events WHERE project_id=?",
+        (project_id,),
+    )["count"] == 1
+    migrated.close()
 
 
 def test_voice_provenance_schema_and_account_profiles_are_created(tmp_path: Path):

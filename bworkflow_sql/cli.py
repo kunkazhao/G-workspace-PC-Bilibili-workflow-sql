@@ -869,6 +869,7 @@ def cmd_product_images(args: argparse.Namespace) -> None:
         mode=args.mode,
         product_uid=args.product_uid or "",
         product_card_template_id=args.product_card_template_id or "",
+        max_workers=args.workers,
     )
     _json_out(result)
 
@@ -937,6 +938,92 @@ def cmd_script_doctor(args: argparse.Namespace) -> None:
         intro_label=args.intro_label or "",
     )
     _json_out(result)
+
+
+def cmd_resource_audit(args: argparse.Namespace) -> None:
+    from .resource_lifecycle import audit_project_resources
+
+    db, _, _, _ = _init()
+    _json_out(
+        audit_project_resources(
+            db,
+            project_id=args.project_id,
+            pipeline_path=args.pipeline or None,
+        )
+    )
+
+
+def cmd_resource_reconcile(args: argparse.Namespace) -> None:
+    from .resource_lifecycle import reconcile_project_resources
+
+    db, _, _, _ = _init()
+    _json_out(
+        reconcile_project_resources(
+            db,
+            project_id=args.project_id,
+            pipeline_path=args.pipeline or None,
+        )
+    )
+
+
+def cmd_resource_cleanup_list(args: argparse.Namespace) -> None:
+    from .resource_lifecycle import assess_cleanup_candidates
+
+    db, _, _, _ = _init()
+    _json_out(
+        assess_cleanup_candidates(
+            db,
+            project_id=args.project_id,
+            pipeline_path=args.pipeline or None,
+            account_label=args.account or "",
+            resource_kind=args.kind or "",
+        )
+    )
+
+
+def cmd_resource_cleanup_plan(args: argparse.Namespace) -> None:
+    from .resource_lifecycle import prepare_cleanup_batch
+
+    db, _, _, _ = _init()
+    _json_out(
+        prepare_cleanup_batch(
+            db,
+            project_id=args.project_id,
+            pipeline_path=args.pipeline or None,
+            account_label=args.account or "",
+            resource_kind=args.kind or "",
+        )
+    )
+
+
+def cmd_resource_cleanup_delete(args: argparse.Namespace) -> None:
+    from .resource_lifecycle import delete_cleanup_batch
+
+    db, _, _, _ = _init()
+    _json_out(
+        delete_cleanup_batch(
+            db,
+            batch_id=args.batch_id,
+            confirmation_token=args.confirm,
+            confirmed_by=args.confirmed_by or "user",
+        )
+    )
+
+
+def cmd_resource_history(args: argparse.Namespace) -> None:
+    from .resource_lifecycle import list_resource_state_events
+
+    db, _, _, _ = _init()
+    _json_out(
+        list_resource_state_events(
+            db,
+            project_id=args.project_id,
+            resource_kind=args.kind or "",
+            account_label=args.account or "",
+            new_state=args.state or "",
+            limit=args.limit,
+        )
+    )
 
 
 def cmd_copy_lint(args: argparse.Namespace) -> None:
@@ -1261,12 +1348,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json；已发布状态不会被降级")
     p.add_argument("--delivery-dir", default="", help="覆盖 pipeline 中的正式交付目录")
 
-    p = sub.add_parser("complete-publishing", help="记录发布完成并移动或重绑已发布成片")
+    p = sub.add_parser("complete-publishing", help="记录发布完成并整体归档或重绑已发布项目目录")
     p.add_argument("production_run_id", type=int)
     p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json")
     destination = p.add_mutually_exclusive_group()
-    destination.add_argument("--archive-dir", default="", help="覆盖默认归档目录；默认优先使用已发布视频下的当前月份目录，不存在则使用根目录")
-    destination.add_argument("--current-path", default="", help="成片已手工移动时传入当前完整路径")
+    destination.add_argument("--archive-dir", default="", help="覆盖项目目录的最终归档路径；默认使用当前月份目录/原项目目录名")
+    destination.add_argument("--current-path", default="", help="项目目录已整体手工移动时，传入其中正式成片的当前完整路径")
 
     p = sub.add_parser("publishing-context", help="读取正式成片绑定的 Master 账号 ID、B站 MID 和方案 ID")
     p.add_argument("production_run_id", type=int)
@@ -1468,6 +1555,45 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Remotion-first product-card template id or display name; required for still/product-image generation",
     )
+    p.add_argument(
+        "--workers",
+        type=int,
+        choices=range(1, 5),
+        default=3,
+        help="bounded parallel render workers (1-4); default: 3",
+    )
+
+    p = sub.add_parser("resource-audit", help="Read-only resource lifecycle and orphan audit")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--pipeline", default="", help="optional current .pipeline.json path")
+
+    p = sub.add_parser("resource-reconcile", help="Register safe cleanup candidates without deleting files")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--pipeline", default="", help="optional current .pipeline.json path")
+
+    p = sub.add_parser("resource-cleanup-list", help="List candidates that pass or fail permanent-delete gates")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--pipeline", default="", help="optional current .pipeline.json path")
+    p.add_argument("--account", default="", help="optional exact account label")
+    p.add_argument("--kind", default="", help="optional exact resource kind")
+
+    p = sub.add_parser("resource-cleanup-plan", help="Prepare a fingerprinted permanent-delete batch")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--pipeline", default="", help="optional current .pipeline.json path")
+    p.add_argument("--account", default="", help="optional exact account label")
+    p.add_argument("--kind", default="", help="optional exact resource kind")
+
+    p = sub.add_parser("resource-cleanup-delete", help="Permanently delete one explicitly confirmed batch")
+    p.add_argument("--batch-id", required=True)
+    p.add_argument("--confirm", required=True, help="one-time token returned by resource-cleanup-plan")
+    p.add_argument("--confirmed-by", default="user", help="audit label for the confirming operator")
+
+    p = sub.add_parser("resource-history", help="Query append-only resource creation, change, invalidation, and deletion events")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--account", default="", help="optional exact account label")
+    p.add_argument("--kind", default="", help="optional exact resource kind")
+    p.add_argument("--state", default="", help="optional exact new state")
+    p.add_argument("--limit", type=int, default=200)
 
     p = sub.add_parser("product-card-preflight", help="Preflight product-card data and image freshness before product-images or phase-7 output")
     p.add_argument("project_id", type=int)
@@ -1612,6 +1738,12 @@ DISPATCH = {
     "render-package": cmd_render_package,
     "render-final-video": cmd_render_final_video,
     "product-images": cmd_product_images,
+    "resource-audit": cmd_resource_audit,
+    "resource-reconcile": cmd_resource_reconcile,
+    "resource-cleanup-list": cmd_resource_cleanup_list,
+    "resource-cleanup-plan": cmd_resource_cleanup_plan,
+    "resource-cleanup-delete": cmd_resource_cleanup_delete,
+    "resource-history": cmd_resource_history,
     "product-card-preflight": cmd_product_card_preflight,
     "template-calibrate": cmd_template_calibrate,
     "template-calibrate-runner": cmd_template_calibrate_runner,

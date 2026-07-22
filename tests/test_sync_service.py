@@ -110,6 +110,83 @@ def test_markdown_sync_only_imports_master_products(tmp_path: Path):
     assert blocks[0]["owner_uid"] == "YXEJ002"
 
 
+def test_markdown_sync_records_script_creation_and_body_update(tmp_path: Path):
+    db = Database(tmp_path / "script-events.db")
+    repo = Repository(db)
+    project_id = db.upsert_project({"name": "家居-烤箱"})
+    repo.upsert_products_from_master(
+        project_id,
+        [{"uid": "OVEN001", "title": "测试烤箱", "price_label": "299元"}],
+    )
+    first = parse_markdown_text(
+        """
+## 商品文案
+
+### 299元-OVEN001-测试烤箱
+#### 正文
+第一版正文
+""".strip()
+    )
+    second = parse_markdown_text(
+        """
+## 商品文案
+
+### 299元-OVEN001-测试烤箱
+#### 正文
+修改后的第二版正文
+""".strip()
+    )
+
+    SyncService(db).sync_markdown_payload(project_id, first)
+    SyncService(db).sync_markdown_payload(project_id, second)
+    events = db.fetchall(
+        """
+        SELECT previous_state, new_state, reason, details_json
+        FROM resource_state_events
+        WHERE project_id=? AND resource_kind='script'
+        ORDER BY id
+        """,
+        (project_id,),
+    )
+
+    assert [row["new_state"] for row in events] == ["created", "updated"]
+    assert events[1]["previous_state"] == "active"
+    assert events[1]["reason"] == "markdown_body_changed"
+    assert text_hash("第一版正文") in events[1]["details_json"]
+    assert text_hash("修改后的第二版正文") in events[1]["details_json"]
+
+
+def test_asset_sync_records_same_path_video_change(tmp_path: Path):
+    db = Database(tmp_path / "video-events.db")
+    repo = Repository(db)
+    video_root = tmp_path / "videos"
+    video_root.mkdir()
+    project_id = db.upsert_project({"name": "家居-烤箱", "video_root": str(video_root)})
+    repo.upsert_products_from_master(
+        project_id,
+        [{"uid": "OVEN001", "title": "测试烤箱", "price_label": "299元"}],
+    )
+    video = video_root / "299-OVEN001-测试烤箱.mp4"
+    video.write_bytes(b"version-one")
+
+    SyncService(db).sync_assets(project_id, asset_type="video", root_override=video_root)
+    video.write_bytes(b"version-two-is-different")
+    SyncService(db).sync_assets(project_id, asset_type="video", root_override=video_root)
+    events = db.fetchall(
+        """
+        SELECT new_state, reason, path
+        FROM resource_state_events
+        WHERE project_id=? AND resource_kind='video'
+        ORDER BY id
+        """,
+        (project_id,),
+    )
+
+    assert [row["new_state"] for row in events] == ["created", "updated"]
+    assert events[1]["reason"] == "same_path_file_changed"
+    assert events[1]["path"] == str(video)
+
+
 def test_script_hash_matches_legacy_voice_registry_format(tmp_path: Path):
     db = Database(tmp_path / "test.db")
     repo = Repository(db)

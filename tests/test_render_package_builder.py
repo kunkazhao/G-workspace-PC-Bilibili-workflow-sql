@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
+
+from PIL import Image
 
 from bworkflow_sql.db import Database
 from bworkflow_sql.render_package_builder import (
@@ -1222,7 +1225,8 @@ def test_build_package_passes_rongrong_2_video_overlay_slot_to_cutme():
     assert product_card is not None
     assert product_card["templateId"] == "muban-rongrong-2"
     assert product_card["coverMediaSlot"]["height"] == 340
-    assert product_card["videoOverlaySlot"]["height"] == 260
+    assert product_card["videoOverlaySlot"]["height"] == 220
+    assert product_card["videoOverlaySlot"]["clearSlot"]["height"] == 340
 
 
 def test_build_package_records_explicit_product_card_template_selection(
@@ -1387,14 +1391,16 @@ def test_remote_cover_cache_path_changes_when_url_changes_but_suffix_does_not(
     assert new_path.suffix == ".jpg"
 
 
-def test_remote_cover_cache_uses_detected_webp_suffix_when_url_ends_with_jpg(
+def test_remote_cover_cache_decodes_webp_as_png_when_url_ends_with_jpg(
     tmp_path: Path,
     monkeypatch,
 ):
     import bworkflow_sql.render_package_builder as builder
 
     monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", tmp_path / "cover-cache")
-    webp_bytes = b"RIFF\x08\x00\x00\x00WEBPVP8 "
+    webp_buffer = BytesIO()
+    Image.new("RGBA", (3, 2), (12, 34, 56, 128)).save(webp_buffer, format="WEBP", lossless=True)
+    webp_bytes = webp_buffer.getvalue()
     monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: webp_bytes)
 
     cover_path = builder._ensure_remote_cover_cached(
@@ -1403,8 +1409,10 @@ def test_remote_cover_cache_uses_detected_webp_suffix_when_url_ends_with_jpg(
         uid="P001",
     )
 
-    assert cover_path.suffix == ".webp"
-    assert cover_path.read_bytes() == webp_bytes
+    assert cover_path.suffix == ".png"
+    with Image.open(cover_path) as decoded:
+        assert decoded.format == "PNG"
+        assert decoded.size == (3, 2)
 
 
 def test_build_product_recommendation_package_reports_missing_required_assets(

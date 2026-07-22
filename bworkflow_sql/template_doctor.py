@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database
+from .product_image_modes import regeneration_mode_for_issue_codes
 from .render_package_builder import (
     DEFAULT_PRODUCT_MEDIA_MODE,
     SUPPORTED_PRODUCT_MEDIA_MODES,
@@ -310,7 +311,12 @@ def _next_hint(
     ):
         return {
             "action": "regenerate_product_images",
-            "command": _product_images_command(project_id, account, template_id),
+            "command": _product_images_command(
+                project_id,
+                account,
+                template_id,
+                mode=regeneration_mode_for_issue_codes(codes),
+            ),
         }
     if codes.intersection({"missing_video_slot", "display_video_slot_unavailable"}):
         return {
@@ -323,10 +329,10 @@ def _next_hint(
     }
 
 
-def _product_images_command(project_id: int, account: str, template_id: str) -> str:
+def _product_images_command(project_id: int, account: str, template_id: str, *, mode: str = "stale") -> str:
     return (
         f"python -m bworkflow_sql product-images {project_id} "
-        f"--account {account} --mode stale --product-card-template-id {template_id}"
+        f"--account {account} --mode {mode} --product-card-template-id {template_id}"
     )
 
 

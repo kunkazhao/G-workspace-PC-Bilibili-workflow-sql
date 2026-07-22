@@ -120,25 +120,25 @@ def test_rongrong_remotion_template_1_video_slot_is_projected_from_metadata() ->
     assert metadata["displayName"] == "荣荣模板1"
     assert metadata["account"] == "荣荣"
     assert metadata["coverMediaSlot"] == {
-        "x": 24,
-        "y": 166,
-        "width": 496,
-        "height": 279,
+        "x": 39,
+        "y": 20,
+        "width": 515,
+        "height": 290,
         "sourceWidth": 970,
         "sourceHeight": 480,
         "fitMode": "contain",
         "anchor": "center",
     }
     assert display_video_slot_for_product_card_template_id("muban-rongrong-1") == {
-        "x": 48,
-        "y": 332,
-        "width": 982,
-        "height": 558,
+        "x": 77,
+        "y": 40,
+        "width": 1019,
+        "height": 580,
         "sourceWidth": 1920,
         "sourceHeight": 1080,
         "coordinate_mode": "canvas_rect",
         "templateId": "muban-rongrong-1",
-        "templateVersion": "1.1.0",
+        "templateVersion": "2.0.0",
         "display_scale": 0.52,
     }
 
@@ -321,7 +321,7 @@ def test_xiaowai_template_2_uses_html_cover_stage_slot() -> None:
     }
 
 
-def test_muban_rongrong_2_uses_video_overlay_slot_for_calibration_height() -> None:
+def test_muban_rongrong_2_uses_right_aligned_16_by_9_video_slot_for_calibration() -> None:
     metadata = get_remotion_template_metadata("muban-rongrong-2")
     assert metadata["coverMediaSlot"] == {
         "x": 549,
@@ -333,13 +333,21 @@ def test_muban_rongrong_2_uses_video_overlay_slot_for_calibration_height() -> No
         "fitMode": "contain",
         "anchor": "center",
     }
-    assert metadata["videoOverlaySlot"]["height"] == 260
+    assert metadata["videoOverlaySlot"]["clearSlot"] == {
+        "x": 558,
+        "y": 62,
+        "width": 412,
+        "height": 340,
+        "sourceWidth": 970,
+        "sourceHeight": 480,
+    }
+    assert metadata["videoOverlaySlot"]["clearColour"] == "0xe7f1ff"
 
     assert display_video_slot_for_product_card_template_id("muban-rongrong-2") == {
-        "x": 1087,
-        "y": 232,
-        "width": 816,
-        "height": 520,
+        "x": 1136,
+        "y": 244,
+        "width": 784,
+        "height": 440,
         "sourceWidth": 1920,
         "sourceHeight": 1080,
         "coordinate_mode": "canvas_rect",

@@ -400,6 +400,34 @@ def test_workflow_doctor_blocks_on_script_before_voice_or_template(tmp_path: Pat
     assert calls == ["script:寮曡█1"]
 
 
+def test_workflow_doctor_exposes_featured_products_for_phase7_confirmation(tmp_path: Path, monkeypatch):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE products SET product_card_json=? WHERE project_id=? AND uid='YXEJ002'",
+            (json.dumps({"featured": True}, ensure_ascii=False), project_id),
+        )
+
+    monkeypatch.setattr(
+        service,
+        "script_doctor",
+        lambda project_id_arg, *, intro_label="": {
+            "ok": False,
+            "status": "needs_sync",
+            "issues": [],
+            "next": {"action": "sync_markdown"},
+        },
+    )
+
+    result = service.workflow_doctor(project_id, account_label="灏忕噧")
+
+    assert result["checks"]["phase7_selection"] == {
+        "featured_count": 1,
+        "featured_products": [{"uid": "YXEJ002", "title": "竹林鸟夜莺Z1"}],
+    }
+
+
 def test_workflow_doctor_blocks_on_missing_voice_after_script_ready(tmp_path: Path, monkeypatch):
     db, project_id = seed_project(tmp_path)
     service = WorkflowService(db)
@@ -833,7 +861,7 @@ def test_expired_voice_generation_overwrites_original_filename(tmp_path: Path):
     assert not old_path.with_name(f"{old_path.stem}-1{old_path.suffix}").exists()
 
 
-def test_upserting_new_voice_deletes_stale_generated_voice_file(tmp_path: Path):
+def test_upserting_new_voice_registers_stale_file_without_deleting_it(tmp_path: Path):
     db, project_id = seed_project(tmp_path)
     service = WorkflowService(db)
     repo = Repository(db)
@@ -891,8 +919,19 @@ def test_upserting_new_voice_deletes_stale_generated_voice_file(tmp_path: Path):
         "SELECT status FROM asset_bindings WHERE project_id=? AND path=?",
         (project_id, str(stale_path)),
     )
+    candidate = db.fetchone(
+        """
+        SELECT status, resource_kind, reason
+        FROM resource_cleanup_candidates
+        WHERE project_id=? AND path=?
+        """,
+        (project_id, str(stale_path)),
+    )
     assert stale_asset["status"] == "expired"
-    assert not stale_path.exists()
+    assert stale_path.exists()
+    assert candidate["status"] == "pending"
+    assert candidate["resource_kind"] == "asset_voice"
+    assert candidate["reason"] == "voice_generation_identity_changed"
     assert new_path.exists()
 
 

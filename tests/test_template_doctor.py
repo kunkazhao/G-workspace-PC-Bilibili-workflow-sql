@@ -97,6 +97,26 @@ def _diagnose_template_flow():
     return module.diagnose_template_flow
 
 
+def test_template_doctor_image_hint_uses_exact_regeneration_scope():
+    module = importlib.import_module("bworkflow_sql.template_doctor")
+
+    missing = module._next_hint(
+        3,
+        "xiaobo",
+        "muban-xiaobo-1",
+        [{"code": "missing_ready_image_binding"}],
+    )
+    mixed = module._next_hint(
+        3,
+        "xiaobo",
+        "muban-xiaobo-1",
+        [{"code": "missing_ready_image_binding"}, {"code": "stale_product_image"}],
+    )
+
+    assert "--mode missing" in missing["command"]
+    assert "--mode all" in mixed["command"]
+
+
 def test_template_doctor_requires_explicit_product_card_template(tmp_path: Path):
     db, project_id = _seed_template_doctor_project(tmp_path)
     diagnose_template_flow = _diagnose_template_flow()

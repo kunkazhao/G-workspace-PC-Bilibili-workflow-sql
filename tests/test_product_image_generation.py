@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 from bworkflow_sql.db import Database
@@ -196,6 +197,12 @@ def test_regenerate_product_card_images_targets_default_account_template_dir(
 
     assert result["regenerated"][0]["path"] == str(expected_path)
     assert calls == [(calls[0][0], "P001", expected_path)]
+    replaced = db.fetchone(
+        "SELECT resource_kind, status FROM resource_cleanup_candidates WHERE path=?",
+        (str(wrong_template_path),),
+    )
+    assert replaced["resource_kind"] == "replaced_product_image"
+    assert replaced["status"] == "pending"
 
 
 def test_regenerate_product_card_images_stale_regenerates_wrong_template_binding(
@@ -395,20 +402,21 @@ def test_regenerate_product_card_images_uses_cutme_adapter_by_default(
 
     db, project_id, image_path = _seed_project_with_stale_image(tmp_path)
     monkeypatch.setattr(product_images, "PRODUCT_IMAGE_RENDER_JOB_ROOT", tmp_path / "jobs")
-    calls: list[tuple[Path, str, Path]] = []
+    calls: list[tuple[Path, list[tuple[str, Path]], int]] = []
 
     class FakeCutMeAdapter:
-        def render_product_card(
+        def render_product_cards(
             self,
             package_path: Path,
+            outputs: list[tuple[str, Path]],
             *,
-            product_uid: str,
-            output_path: Path,
+            max_workers: int,
         ) -> dict:
-            calls.append((package_path, product_uid, output_path))
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(b"adapter image")
-            return {"ok": True, "artifacts": {"output_path": str(output_path)}}
+            calls.append((package_path, outputs, max_workers))
+            for _uid, output_path in outputs:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(b"adapter image")
+            return {"ok": True, "artifacts": {"output_paths": [str(path) for _uid, path in outputs]}}
 
     monkeypatch.setattr(product_images, "CutMeAdapter", FakeCutMeAdapter)
 
@@ -423,11 +431,18 @@ def test_regenerate_product_card_images_uses_cutme_adapter_by_default(
 
     assert result["regenerated"][0]["path"] == str(image_path)
     assert len(calls) == 1
-    package_path, product_uid, output_path = calls[0]
-    assert product_uid == "P001"
-    assert output_path == image_path
+    package_path, outputs, max_workers = calls[0]
+    assert outputs == [("P001", image_path)]
+    assert max_workers == 1
     package = json.loads(package_path.read_text(encoding="utf-8"))
     assert package["output"]["mode"] == "product_card_still"
+    candidate = db.fetchone(
+        "SELECT resource_kind, status, path FROM resource_cleanup_candidates WHERE path=?",
+        (str(package_path.parent),),
+    )
+    assert result["resource_lifecycle"]["status"] == "registered"
+    assert candidate["resource_kind"] == "product_image_job"
+    assert candidate["status"] == "pending"
 
 
 def test_product_card_fingerprint_changes_when_template_version_changes() -> None:
@@ -446,3 +461,60 @@ def test_product_card_fingerprint_changes_when_template_version_changes() -> Non
     second = product_card_content_fingerprint(product, changed)
 
     assert first != second
+
+
+def test_regenerate_product_card_images_renders_with_bounded_parallel_workers(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.product_image_generation as product_images
+
+    db, project_id, _image_path = _seed_project_with_stale_image(tmp_path)
+    monkeypatch.setattr(product_images, "PRODUCT_IMAGE_RENDER_JOB_ROOT", tmp_path / "jobs")
+    second_cover = tmp_path / "covers" / "P002.png"
+    second_cover.write_bytes(b"cover-2")
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE products SET product_card_json=? WHERE project_id=? AND uid='P002'",
+            (
+                json.dumps(
+                    {
+                        "dataMap": {
+                            "title": "Beta Keyboard",
+                            "price": "399",
+                            "cover": str(second_cover),
+                        },
+                        "coverAsset": str(second_cover),
+                    }
+                ),
+                project_id,
+            ),
+        )
+    barrier = threading.Barrier(2, timeout=2)
+    thread_ids: set[int] = set()
+
+    def fake_render(package_path: Path, product_uid: str, output_path: Path) -> Path:
+        thread_ids.add(threading.get_ident())
+        barrier.wait()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(product_uid.encode("utf-8"))
+        return output_path
+
+    result = regenerate_product_card_images(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        mode="all",
+        product_card_template_id="muban-xiaobo-1",
+        render_product_card_still=fake_render,
+        max_workers=2,
+    )
+
+    assert [item["uid"] for item in result["regenerated"]] == ["P001", "P002"]
+    assert result["workers"] == {"requested": 2, "used": 2}
+    assert result["timings"]["prepare_seconds"] >= 0
+    assert result["timings"]["render_seconds"] >= 0
+    assert result["timings"]["total_seconds"] >= result["timings"]["render_seconds"]
+    assert len(thread_ids) == 2
+    batch_package = json.loads(Path(result["regenerated"][0]["package_path"]).read_text(encoding="utf-8"))
+    assert [segment["productUid"] for segment in batch_package["segments"]] == ["P001", "P002"]

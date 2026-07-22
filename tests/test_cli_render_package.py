@@ -80,6 +80,7 @@ def test_product_images_parser_registers_command():
     assert args.mode == "missing"
     assert args.product_uid == "P001"
     assert args.product_card_template_id == "muban-xiaobo-1"
+    assert args.workers == 3
 
 
 def test_product_card_preflight_parser_registers_command():
@@ -512,7 +513,7 @@ def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):
     calls: list[dict[str, object]] = []
 
     class FakeWorkflow:
-        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):
+        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id, max_workers):
             calls.append(
                 {
                     "project_id": project_id,
@@ -520,6 +521,7 @@ def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):
                     "mode": mode,
                     "product_uid": product_uid,
                     "product_card_template_id": product_card_template_id,
+                    "max_workers": max_workers,
                 }
             )
             return {
@@ -540,6 +542,7 @@ def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):
             mode="stale",
             product_uid="P001",
             product_card_template_id="muban-xiaobo-1",
+            workers=3,
         )
     )
 
@@ -553,6 +556,7 @@ def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):
             "mode": "stale",
             "product_uid": "P001",
             "product_card_template_id": "muban-xiaobo-1",
+            "max_workers": 3,
         }
     ]
 

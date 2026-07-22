@@ -139,11 +139,15 @@ python -m bworkflow_sql resolve-blue-link-backfill <Master任务UUID> --workspac
 python -m bworkflow_sql confirm-blue-link-title-candidates <Master任务UUID> --workspace-id <Master工作空间UUID> --decision-file <UTF-8 JSON>
 ```
 
-By default the command uses the existing current-month folder under
-`G:\2026项目-b站\已发布视频`, or that root if the month folder is absent; it does
-not create a missing month folder. Use `--archive-dir` to override. For a
-manually moved file, use `--current-path
-<当前完整MP4路径>`. The command reuses `production_runs` and the existing pipeline
+By default the command archives the complete delivery directory under the
+existing current-month folder in `G:\2026项目-b站\已发布视频`, or under that root
+if the month folder is absent. It preserves the original project-directory
+name and does not create a missing month folder. Use `--archive-dir` to provide
+the exact destination project directory. For a manually moved complete project
+directory, use `--current-path <该目录内的正式成片路径>`. The command atomically
+rewrites delivery-root paths in the pipeline, including artifact approvals, and
+revalidates bound hashes before updating `production_runs`. It reuses
+`production_runs` and the existing pipeline
 publishing phase; it does not create a second publishing-status store.
 Publishing now enters `blue_link_backfill` instead of ending the workflow.
 `publishing-context` exposes the production's fixed Master account UUID,
@@ -232,6 +236,9 @@ a successful observation (`ok=true`); blocked work is represented by
 v1 observation to stdout and exit nonzero. The former raw JSON shape is removed
 and has no compatibility flag. The producer Schema and examples live under
 `contracts/schemas` and `contracts/examples`.
+`checks.phase7_selection.featured_products` exposes the ordered UID and full
+name of active Master-synced featured products so TotalControl can ask the
+phase-7 all-or-none pinning question without reading SQLite directly.
 
 ## Exact-transcript subtitle alignment
 
@@ -276,6 +283,40 @@ Output rules:
 - Standalone voice files default to `G:\2026项目-b站` and do not write `asset_bindings`.
 - Final MP4 can be produced with `python -m bworkflow_sql render-final-video <project_id> --account <账号> --product-media-mode video_preferred --pipeline <.pipeline.json>`. With `--pipeline`, the command automatically resolves the hash-bound accepted intro MP4 and its source plan; changed or mismatched artifacts block before rendering. A successful run writes the current readable script to `1.口播文案\{project}\{month}月-{account}.md`, writes an immutable `完整口播稿.md` beside the run RenderPackage, and binds both hashes plus the RenderPackage hash into the run manifest and pipeline. Use `materialize-final-script --run-manifest <run.json> --pipeline <.pipeline.json>` to backfill this evidence for an existing run without rerendering its MP4.
 
+## Resource lifecycle audit
+
+Generated resources use an event-driven, delayed-cleanup contract. Product-card
+render job directories are registered after a successful render with a seven-day
+retention window. When an image binding moves to another template or output path,
+the replaced generated PNG is registered with a fourteen-day retention window.
+Registration never moves or deletes a file.
+
+Use `python -m bworkflow_sql resource-audit <project_id> [--pipeline <path>]`
+for a read-only classification of current references, formal history, missing
+metadata, reclaimable generated resources, recent working caches, and unresolved
+source files. Use `resource-reconcile` with the same arguments to persist only the
+high-confidence cleanup candidates; it still does not delete anything. If the
+current `.pipeline.json` is missing, ordinary inactive assets fail closed as
+`uncertain`. Cache-only product-image jobs may still be identified independently.
+
+`resource_cleanup_candidates` is the delayed cleanup ledger. Permanent deletion
+is never automatic and does not use a quarantine directory. First list the
+eligible and blocked candidates, then prepare one fingerprinted batch. Only the
+one-time token returned for that unchanged batch can authorize deletion:
+
+```powershell
+python -m bworkflow_sql resource-cleanup-list <project_id> --pipeline <path>
+python -m bworkflow_sql resource-cleanup-plan <project_id> --pipeline <path> --account <账号> --kind asset_voice
+python -m bworkflow_sql resource-cleanup-delete --batch-id <batch_id> --confirm <token>
+python -m bworkflow_sql resource-history <project_id> --account <账号> --kind voice --state expired
+```
+
+Deletion re-checks current pipeline, asset-binding, production-run, managed-root,
+file type, size, modification time and fingerprint evidence. Any change rejects
+the batch without deleting files. Successful deletion keeps the candidate row,
+batch item and `resource_state_events` tombstone. `resource-reconcile` also
+corrects `ready` bindings whose files are missing to `missing`.
+
 ## Voice Generation Notes
 
 - Workflow voice generation is provider-based. `bworkflow_sql.tts_contracts`
@@ -299,7 +340,8 @@ Output rules:
   by the account write path.
 - A generated voice is reusable only when account, text hash, provider, model,
   voice ID, and synthesis settings match. Generation writes a unique new file,
-  commits its binding, and only then removes stale generated files; a database
+  commits its binding, marks older mismatched bindings `expired`, and registers
+  their files for delayed cleanup. It does not delete old files; a database
   failure preserves the previous ready file.
 - MiniMax API keys are read from the `MINIMAX_API_KEY` environment variable first, then from `C:\Users\zhaoer\.codex\skills\zhaoer-tools-minimax-tts\.env`, then the legacy `C:\Users\zhaoer\.codex\skills\minimax-tts\.env`, then the current working directory `.env`.
 - Known MiniMax voice aliases include `小博 -> xiaobo-v2`, `小燃 -> xiaoran-v2`, `小歪 -> xiaowai-v6`, `知了 -> bilibili-zhiliao`, and `荣荣/蓉蓉 -> rongrong-v2`.

@@ -4,7 +4,10 @@ import json
 import re
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable
 
 from .asset_paths import project_category_folder
@@ -13,6 +16,11 @@ from .db import Database
 from .render_package_builder import (
     product_card_content_fingerprint,
     product_card_payload_for_product,
+)
+from .resource_lifecycle import (
+    DERIVED_ASSET_RETENTION_DAYS,
+    register_cleanup_candidate_in_connection,
+    register_completed_product_image_job,
 )
 from .repositories import Repository
 from .settings import DEFAULT_IMAGE_ROOT, INTERNAL_WORKSPACE_ROOT
@@ -33,7 +41,9 @@ def regenerate_product_card_images(
     product_uid: str = "",
     product_card_template_id: str = "",
     render_product_card_still: ProductCardStillRenderer | None = None,
+    max_workers: int = 1,
 ) -> dict[str, Any]:
+    total_started = perf_counter()
     mode_value = safe_text(mode) or "stale"
     if mode_value not in {"stale", "missing", "all"}:
         raise ValueError(f"unsupported product image regenerate mode: {mode_value}")
@@ -45,16 +55,6 @@ def regenerate_product_card_images(
         raise ValueError(f"project does not exist: {project_id}")
 
     renderer = render_product_card_still
-    if renderer is None:
-        cutme = CutMeAdapter()
-
-        def renderer(package_path: Path, product_uid: str, output_path: Path) -> Path:
-            cutme.render_product_card(
-                package_path,
-                product_uid=product_uid,
-                output_path=output_path,
-            )
-            return output_path
     selected_template = resolve_product_card_template(
         account_label,
         product_card_template_id,
@@ -69,6 +69,7 @@ def regenerate_product_card_images(
     accounts = {safe_text(item.get("label")): item for item in repo.accounts()}
     regenerated: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
 
     products = repo.products(project_id, include_removed=False)
     if target_uid:
@@ -138,37 +139,93 @@ def regenerate_product_card_images(
             skipped.append({"uid": uid, "reason": "already_has_ready_image_binding"})
             continue
 
-        package_path = _write_product_card_job_package(
-            project=project,
-            product=product,
-            product_card=product_card,
-            fingerprint=fingerprint,
-        )
-        renderer(package_path, uid, image_path)
-        if not image_path.is_file():
-            raise RuntimeError(f"product card renderer did not create image: {image_path}")
         if is_unknown_legacy_hash:
             regenerate_reason = "unknown_legacy_image_hash"
-        _upsert_image_binding_ready(
-            db,
-            binding_id=binding_id,
-            project_id=project_id,
-            product=product,
-            account_label=account_label,
-            account=accounts.get(safe_text(account_label), {}),
-            image_path=image_path,
-            fingerprint=fingerprint,
-        )
-        regenerated.append(
+        pending.append(
             {
                 "uid": uid,
-                "title": safe_text(product.get("title")),
-                "path": str(image_path),
+                "image_path": image_path,
+                "binding_id": binding_id,
+                "product": product,
+                "product_card": product_card,
                 "fingerprint": fingerprint,
-                "package_path": str(package_path),
                 "reason": regenerate_reason,
             }
         )
+
+    package_path = _write_product_card_batch_job_package(project=project, items=pending) if pending else None
+    for item in pending:
+        item["package_path"] = package_path
+
+    prepare_seconds = round(perf_counter() - total_started, 3)
+    requested_workers = max(1, min(int(max_workers), 4))
+    used_workers = min(requested_workers, len(pending)) if pending else 0
+
+    def render_pending(item: dict[str, Any]) -> None:
+        if renderer is None:
+            raise RuntimeError("individual renderer is not configured")
+        renderer(item["package_path"], item["uid"], item["image_path"])
+
+    render_started = perf_counter()
+    if used_workers and renderer is None:
+        CutMeAdapter().render_product_cards(
+            package_path,
+            [(item["uid"], item["image_path"]) for item in pending],
+            max_workers=used_workers,
+        )
+    elif used_workers == 1:
+        for item in pending:
+            render_pending(item)
+    elif used_workers > 1:
+        with ThreadPoolExecutor(max_workers=used_workers, thread_name_prefix="product-card") as executor:
+            list(executor.map(render_pending, pending))
+    render_seconds = round(perf_counter() - render_started, 3)
+
+    for item in pending:
+        image_path = item["image_path"]
+        if not image_path.is_file():
+            raise RuntimeError(f"product card renderer did not create image: {image_path}")
+        _upsert_image_binding_ready(
+            db,
+            binding_id=item["binding_id"],
+            project_id=project_id,
+            product=item["product"],
+            account_label=account_label,
+            account=accounts.get(safe_text(account_label), {}),
+            image_path=image_path,
+            fingerprint=item["fingerprint"],
+        )
+        regenerated.append(
+            {
+                "uid": item["uid"],
+                "title": safe_text(item["product"].get("title")),
+                "path": str(image_path),
+                "fingerprint": item["fingerprint"],
+                "package_path": str(item["package_path"]),
+                "reason": item["reason"],
+            }
+        )
+
+    lifecycle = {"status": "not_applicable", "candidate_registered": False}
+    if package_path is not None:
+        try:
+            register_completed_product_image_job(
+                db,
+                project_id=project_id,
+                package_path=package_path,
+            )
+            lifecycle = {
+                "status": "registered",
+                "candidate_registered": True,
+                "resource_kind": "product_image_job",
+                "path": str(package_path.parent),
+            }
+        except Exception as exc:
+            lifecycle = {
+                "status": "warning",
+                "candidate_registered": False,
+                "message": f"resource lifecycle registration failed: {exc}",
+            }
 
     return {
         "ok": True,
@@ -177,8 +234,15 @@ def regenerate_product_card_images(
         "mode": mode_value,
         "product_uid": target_uid or None,
         "product_card_template_id": selected_template_id or None,
+        "workers": {"requested": requested_workers, "used": used_workers},
+        "timings": {
+            "prepare_seconds": prepare_seconds,
+            "render_seconds": render_seconds,
+            "total_seconds": round(perf_counter() - total_started, 3),
+        },
         "regenerated": regenerated,
         "skipped": skipped,
+        "resource_lifecycle": lifecycle,
     }
 
 
@@ -226,26 +290,45 @@ def _ready_image_asset(
     )[0]
 
 
-def _write_product_card_job_package(
+def _write_product_card_batch_job_package(
     *,
     project: dict[str, Any],
-    product: dict[str, Any],
-    product_card: dict[str, Any],
-    fingerprint: str,
+    items: list[dict[str, Any]],
 ) -> Path:
-    uid = safe_text(product.get("uid")) or "product"
     job_root = (
         PRODUCT_IMAGE_RENDER_JOB_ROOT
         / f"project-{int(project.get('id') or 0)}"
-        / f"{_safe_path_component(uid)}-{int(time.time() * 1000)}"
+        / f"batch-{time.time_ns()}"
     )
     job_root.mkdir(parents=True, exist_ok=True)
-    local_card = _localize_product_card_assets(
-        product_card,
-        job_root=job_root,
-        product=product,
-        project=project,
-    )
+    segments: list[dict[str, Any]] = []
+    for item in items:
+        product = item["product"]
+        uid = safe_text(product.get("uid")) or "product"
+        local_card = _localize_product_card_assets(
+            item["product_card"],
+            job_root=job_root,
+            product=product,
+            project=project,
+        )
+        segments.append(
+            {
+                "type": "product_recommendation",
+                "id": f"product-{uid}",
+                "productUid": uid,
+                "productTitle": safe_text(product.get("title")),
+                "priceRangeLabel": safe_text(product.get("price_label")),
+                "spokenText": "",
+                "voiceAsset": None,
+                "imageCardAsset": None,
+                "videoAsset": None,
+                "productMediaMode": "cover_only",
+                "duration": 1,
+                "productCard": local_card,
+                "productCardFingerprint": item["fingerprint"],
+                "subtitles": [],
+            }
+        )
     package = {
         "schemaVersion": "1.0.0",
         "packageType": "bilibili_video",
@@ -263,24 +346,7 @@ def _write_product_card_job_package(
             "height": 1080,
         },
         "audio": {"loudnessTarget": {"integrated": -11, "truePeak": -1.0, "lra": 11}},
-        "segments": [
-            {
-                "type": "product_recommendation",
-                "id": f"product-{uid}",
-                "productUid": uid,
-                "productTitle": safe_text(product.get("title")),
-                "priceRangeLabel": safe_text(product.get("price_label")),
-                "spokenText": "",
-                "voiceAsset": None,
-                "imageCardAsset": None,
-                "videoAsset": None,
-                "productMediaMode": "cover_only",
-                "duration": 1,
-                "productCard": local_card,
-                "productCardFingerprint": fingerprint,
-                "subtitles": [],
-            }
-        ],
+        "segments": segments,
         "assets": {},
         "approval": {},
     }
@@ -364,6 +430,7 @@ def _localize_product_card_assets(
                 / "assets"
                 / "product-covers"
                 / _safe_path_component(project_category_folder(project))
+                / _safe_path_component(safe_text(product.get("uid")) or "product")
             ),
             fallback_name=(
                 _safe_path_component(safe_text(product.get("uid")) or "product")
@@ -408,6 +475,12 @@ def _upsert_image_binding_ready(
     ts = now_iso()
     with db.connect() as conn:
         if binding_id:
+            existing = conn.execute(
+                "SELECT path, source_kind FROM asset_bindings WHERE id=?",
+                (binding_id,),
+            ).fetchone()
+            previous_path = Path(safe_text(existing["path"])) if existing else None
+            previous_source = safe_text(existing["source_kind"]) if existing else ""
             conn.execute(
                 """
                 UPDATE asset_bindings
@@ -429,6 +502,22 @@ def _upsert_image_binding_ready(
                     binding_id,
                 ),
             )
+            if (
+                previous_path
+                and previous_source != "manual"
+                and previous_path != image_path
+                and previous_path.is_file()
+            ):
+                register_cleanup_candidate_in_connection(
+                    conn,
+                    project_id=project_id,
+                    resource_kind="replaced_product_image",
+                    path=previous_path,
+                    reason="image_binding_moved_to_new_template_or_output_path",
+                    eligible_at=datetime.now(timezone.utc)
+                    + timedelta(days=DERIVED_ASSET_RETENTION_DAYS),
+                    details={"replacement_path": str(image_path), "binding_id": binding_id},
+                )
             return
         conn.execute(
             """

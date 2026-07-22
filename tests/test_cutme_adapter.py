@@ -279,6 +279,45 @@ def test_render_product_card_builds_explicit_argv(
     assert process.communicate_timeouts == [module.RENDER_PRODUCT_CARD_TIMEOUT_SECONDS]
 
 
+def test_render_product_cards_builds_one_batch_argv_and_cleans_manifest(tmp_path: Path):
+    module = _adapter_module()
+    cutme_root = _cutme_root(tmp_path / "CutMe")
+    package_path = _touch(cutme_root / "job" / "render-package.json")
+    outputs = [
+        ("SKU-001", _touch(cutme_root / "output" / "one.png")),
+        ("SKU-002", _touch(cutme_root / "output" / "two.png")),
+    ]
+    process = FakeProcess(
+        stdout=_json_stdout(
+            _success(
+                "render_product_cards",
+                {
+                    "job_package_path": str(package_path),
+                    "output_paths": [str(path) for _uid, path in outputs],
+                },
+            )
+        )
+    )
+    factory = FakeProcessFactory(process)
+    adapter = module.CutMeAdapter(cutme_root=cutme_root, process_factory=factory)
+
+    adapter.render_product_cards(package_path, outputs, max_workers=2)
+
+    argv, _ = factory.calls[0]
+    manifest_path = Path(argv[argv.index("--outputs-json") + 1])
+    assert argv[:6] == [
+        sys.executable,
+        "-m",
+        "cutme.render_cli",
+        "render-product-cards",
+        "--package",
+        str(package_path.resolve()),
+    ]
+    assert argv[-2:] == ["--workers", "2"]
+    assert not manifest_path.exists()
+    assert process.communicate_timeouts == [module.RENDER_PRODUCT_CARDS_TIMEOUT_SECONDS]
+
+
 @pytest.mark.parametrize("returncode", (0, 5))
 def test_failed_envelope_raises_its_stable_error_for_any_process_exit(
     tmp_path: Path,
