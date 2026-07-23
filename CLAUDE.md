@@ -28,8 +28,8 @@
 | 小歪当前音色 | IndexTTS 参考音频：`G:\Tools\自己用的音色\小歪10秒新.mp3`；MiniMax voice id：`xiaowai-v6`。 |
 | 小歪结尾配音 | `accounts.closing_audio_path` 当前为 `G:\2026项目-b站\素材-配音\公共-结尾\小歪\结尾-小歪.mp3`；生成草稿时 `_closing_manifest_entry(...)` 只在文件存在时写入结尾音频。 |
 | 弹窗居中 | 新建 `CTkToplevel` 后统一调用 `_center_dialog(dialog)`；该函数按父窗口/主窗口居中，只有父窗口几何不可用时才兜底按屏幕居中。不要新写 `winfo_screenwidth()` 居中逻辑。 |
-| 模板视频位置校准 | 商品视频位置、`display_video_slot`、封面区域对齐、新增/修改商品图模板、剪映坐标/X/Y/缩放问题，先用 `zhaoer-flow-templatepreset` skill；再运行 `python -m bworkflow_sql template-calibrate <project_id> --account <账号> --product-uid <UID> --draft-name 模板校准-<账号>-<UID>` 生成单商品校准草稿，不要跑整批草稿调一个位置。 |
-| 模板坐标转换 | 默认 `template_config.py` 的 x/y/width/height 是 1920x1080 画布像素坐标；但 `coordinate_mode="clip_transform_pixels"` 表示剪映位置面板坐标，负数 X/Y 可能是正确值，不能按画布左上角重新解释。转剪映 UI 值前先确认坐标模式。 |
+| 动态商品卡 | 正式路线只使用结构化 `productCard` 直渲 Remotion 商品短片；先运行 `product-card-preflight`，任一商品价格段、配音或媒体错误都在 job/cache 写入前整体阻断。 |
+| 退役入口 | `product-images`、剪映 UI/公开 CLI 和模板校准草稿已退役；历史图片、草稿和引擎不删除，但后续模板/槽位无需兼容。 |
 | 字幕断行 | `split_subtitle_text(...)` 对超长分句做语义断行，保留数字+单位、英文型号、小数和 `的/地/得` 结构，优先在连词前断。 |
 | 验证命令 | 从仓库根目录运行 `python -m pytest`，不要用裸 `pytest`。最小回归常用：`python -m pytest -q tests/test_workflow_service.py tests/test_ui_helpers.py tests/test_repositories.py tests/test_sync_service.py`。 |
 | 非价格过渡口播稿 | 当品类按用途/标签分组而非价格段时（如充电宝按品类标签），软件无法直接生成口播稿。完整流程和踩坑记录见 `docs/operator-runbook.md` 的「非价格过渡口播稿」章节。参考脚本：`scripts/batch_tts_chongdianbao.py`（批量配音）、`scripts/gen_manifest_chongdianbao.py`（生成 manifest）。 |

@@ -28,9 +28,9 @@
 | 小歪当前音色 | IndexTTS 参考音频：`G:\Tools\自己用的音色\小歪10秒新.mp3`；MiniMax voice id：`xiaowai-v6`。 |
 | 小歪结尾配音 | `accounts.closing_audio_path` 当前为 `G:\2026项目-b站\素材-配音\公共-结尾\小歪\结尾-小歪.mp3`；生成草稿时 `_closing_manifest_entry(...)` 只在文件存在时写入结尾音频。 |
 | 弹窗居中 | 新建 `CTkToplevel` 后统一调用 `_center_dialog(dialog)`；该函数按父窗口/主窗口居中，只有父窗口几何不可用时才兜底按屏幕居中。不要新写 `winfo_screenwidth()` 居中逻辑。 |
-| 模板视频位置校准 | 商品视频位置、`display_video_slot`、封面区域对齐、新增/修改商品图模板、剪映坐标/X/Y/缩放问题，先用 `zhaoer-flow-templatepreset` skill；再运行 `python -m bworkflow_sql template-calibrate <project_id> --account <账号> --product-uid <UID> --draft-name 模板校准-<账号>-<UID>` 生成单商品校准草稿，不要跑整批草稿调一个位置。 |
+| 动态商品卡 | 正式路线只使用结构化 `productCard` 直渲 Remotion 商品短片；先运行 `product-card-preflight`，任一商品价格段、配音或媒体错误都在 job/cache 写入前整体阻断。 |
 | 字幕断行 | 统一维护在 `bworkflow_sql/subtitle_rules.py::split_subtitle_text(...)`；SRT 导出和剪映文本字幕轨都复用它。对超长分句做语义断行，保留数字+单位、英文型号、小数和 `的/地/得` 结构，优先在连词前断。 |
-| 完整 MP4 | `render-final-video` 默认 ASR，生成一个包含无字幕引言、价格/商品段和账号固定结尾的 RenderPackage；一次 CutMe 渲染、一份全局 ASS、一个完整 MP4。不要恢复 B-Workflow 外层引言 concat 或单独商品段交付。 |
+| 完整 MP4 | `render-final-video` 默认 ASR，生成一个包含无字幕引言、动态商品段和账号固定结尾的 RenderPackage；正式商品段不读取/生成整卡 PNG。一次 CutMe 渲染、一份全局 ASS、一个完整 MP4。 |
 | 媒体工作区 | `create-project` 自动为所有启用账号创建配音、实际配置模板商品图、Roll-B 和引言展示视频目录；旧项目用 `scaffold` 幂等修复，不手工复制目录逻辑。 |
 | 正式成片履历 | run manifest 只证明生成过。只有用户确认后执行 `confirm-production` 才写入 SQLite `production_runs`；测试、预览、校准不计入。下次选模板先查 `production-history`。 |
 | 产物确认凭证 | 引言验收使用 `confirm-intro-video`，正式成片使用 `confirm-production`。两者都向 `.pipeline.json` 写入绑定路径、SHA-256、大小、来源版本和确认时间的 `artifact_approvals`；文件变化后旧确认失效。首次新确认会为旧 pipeline 固化稳定 `episode_id`。 |
@@ -38,5 +38,5 @@
 | 蓝链回流 | 发布归档后进入 `phases.blue_link_backfill`，不直接结束。`publishing-context` 只通过正式成片的本地 `account_id` 读取固定 Master UUID/B站 MID/方案 ID；`resolve-blue-link-backfill <backfill_id> --workspace-id <uuid>` 依次触发无 ID 行的严格/模糊标题候选，再只租约无候选或已拒绝的浏览器行，每条只尝试一次并立即回写。`resolve-blue-links` 仅作单链接诊断。标题决定必须带扫描版本和稳定批次 ID；`stored_slot_conflict` 会整批回滚，需保留旧槽位、排除冲突项并用新批次 ID 提交其余项；最高分并列必须等待用户指定 UID。京东请求默认限速，明确 403 后持久熔断两小时且不阻塞淘宝；库内缺商品、旧链冲突、延后和安全挂起行不会重复打开。未完成汇报必须读取 Master 持久化分组，并为每类给出最多三条可点击源链接。`record-blue-link-backfill` 必须读取 Master 快照核验身份和计数后再写同一 `production_runs` 行。 |
 | 视频组件与剪辑模板 | 进入 `zhaoer-bilibili-video-design`，按“静态预览确认 -> 动画短样片确认 -> 正式组件接入”推进。禁止把视频画面做成网页/HUD，禁止为视觉方便改写结构化槽位；正式随机必须记录稳定 id 和 seed。 |
 | 手动测试目录 | 预览、短样片、RenderPackage、ASS、抽帧和测试缓存统一放在 `data\workspace\manual-tests\{测试主题}\`，每个主题独立目录；默认不写正式 `.pipeline.json`，CutMe 临时 job 验证后只清理该次明确生成的目录。 |
-| 剪映字幕轨 | `bworkflow_sql jianying` 默认仍跳过字幕；显式加 `--with-subtitles` 才生成可编辑文本轨。当前机器如遇 onnxruntime/VAD 初始化失败，再加 `--subtitle-no-vad`。 |
+| 退役入口 | `product-images`、剪映 UI/公开 CLI 和模板校准草稿已退役；历史图片、草稿和引擎不删除，但后续模板/槽位无需兼容。 |
 | 验证命令 | 从仓库根目录运行 `python -m pytest`，不要用裸 `pytest`。最小回归常用：`python -m pytest -q tests/test_workflow_service.py tests/test_ui_helpers.py tests/test_repositories.py tests/test_sync_service.py`。 |

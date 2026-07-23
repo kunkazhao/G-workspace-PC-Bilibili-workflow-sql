@@ -1,16 +1,23 @@
 # B-Workflow SQL 运维手册
 
-## 商品图快速生成
+## 动态商品卡正式生成
 
-先运行 `product-card-preflight`。仅缺图时用 `--mode missing`，仅已有图过期或
-模板错误时用 `--mode stale`，两类问题并存才用 `--mode all`。CLI 默认
-`--workers 3`，允许 1-4 路有界并发；返回 JSON 的 `workers` 和
-`timings.prepare_seconds`、`render_seconds`、`total_seconds` 是批量阶段的耗时证据。封面或模板发生变化时，先用
-`--product-uid` 生成一张代表样图，确认后再批量生成。
-正式批量会把本次商品卡写入一个 job package，由 CutMe 的
-`render-product-cards` 在同一进程中只执行一次 Remotion `bundle()`，再按有界
-并发输出全部 PNG；不要退回逐商品启动 CutMe 的旧路径。
+正式商品段只走 `动态 ProductCard -> Remotion 短 MP4 -> 完整 MP4`，不读取、
+不生成整卡 PNG，也不做静态回退。先确认阶段 7，再运行：
 
+```powershell
+python -m bworkflow_sql product-card-preflight <project_id> --account <账号> --product-card-template-id <模板>
+python -m bworkflow_sql render-final-video <project_id> --pipeline <.pipeline.json> --account <账号> --product-card-template-id <模板> --product-media-mode video_preferred
+```
+
+预检使用同一份冻结 Master 方案快照检查全部商品；商品名称、实际整数元价格、
+唯一价格段、当前配音、商品视频或封面、模板必填槽位任何一项失败，都在
+CutMe job 和缓存写入前整体阻断并返回 UID。缓存固定在
+`data/workspace/project-<id>/render/final-video-cache`，不跨项目且不自动清理。
+
+`product-images`、剪映公开 CLI/UI 和模板校准草稿已退役。历史图片、绑定、
+草稿和引擎保留但不再兼容新槽位/模板。CutMe still 只用于模板压力预览和
+人工验收。
 ## 按产物身份确认
 
 不要通过手工修改 `status` 验收引言。用户确认后运行
@@ -141,7 +148,10 @@ python -m bworkflow_sql resolve-blue-link-backfill <backfill_id> --workspace-id 
 同时返回非零退出码；调用方不要解析 stderr、traceback 或内部 `next/command`
 字段。Schema 与三种状态示例位于 `contracts/`。
 
-## 模板校准标准入口
+## 已退役：剪映模板校准记录
+
+以下内容仅保留为历史排障记录。相关公开命令已经删除，不得按此段启动新
+生产；当前模板验收使用 CutMe 静态压力预览和短 Remotion 动态样片。
 
 模板位置校准不要临时猜商品、账号或模板。标准目标清单在
 `config/template-calibration-targets.json`，每个目标固定 `project_id`、
@@ -208,7 +218,11 @@ Remotion-first 商品图模板从 CutMe 元数据进入账号模板列表，显�
 `WorkflowService._voice_provider_registry(...)` 注册；不要在生成循环、账号页面
 或换音色脚本里复制 provider 分支。
 
-## 非价格过渡口播稿（品类过渡 / 自定义分组过渡）
+## 历史记录：非价格过渡剪映流程（已退役）
+
+本节只解释旧项目数据来源，不是当前操作步骤。剪映公开入口已经退役；如需
+支持非价格分组的正式 MP4，应在动态 RenderPackage 合同内单独设计，不得调用
+下列旧命令。
 
 软件的口播稿流程默认按价格段切分商品（`## 价格过渡文案`）。当品类需要按用途、功能或自定义标签分组时（如充电宝按"高性价比款/日常款/小巧精致款/磁吸便捷款/高性能款"），软件无法直接生成，需要手动走以下流程。
 
@@ -635,8 +649,8 @@ python -m pytest -q tests/test_intro_plan_writer.py tests/test_cutme_intro.py te
 
 ## RenderPackage 跨仓边界
 
-- 正常生产只运行 `python -m bworkflow_sql render-final-video ...` 或
-  `product-images ...`。B-Workflow 内部统一经过 `CutMeAdapter`；不要从业务
+- 正常生产只运行 `python -m bworkflow_sql render-final-video ...`。
+  B-Workflow 内部统一经过 `CutMeAdapter`；不要从业务
   模块直接调用 CutMe npm、拼 `cutme.render_cli` argv，或解析人类可读路径。
 - B-Workflow 的代表性 producer fixture 位于
   `contracts/examples/cutme-render-package.v1.json`。修改 RenderPackage 字段后，
