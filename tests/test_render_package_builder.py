@@ -1234,7 +1234,7 @@ def test_build_package_uses_account_remotion_product_card_template(
     )
 
     assert product["productCard"]["templateId"] == "muban-xiaobo-1"
-    assert product["productCard"]["templateVersion"] == "1.1.0"
+    assert product["productCard"]["templateVersion"] == "1.1.1"
     assert result.package["output"]["productCardTemplateId"] == "muban-xiaobo-1"
     assert product["productCard"]["coverMediaSlot"]["x"] == 442
     assert product["productCard"]["cardPlacement"] == {
@@ -1291,7 +1291,7 @@ def test_build_package_records_explicit_product_card_template_selection(
     assert result.package["output"]["productCardTemplate"] == {
         "id": "muban-xiaobo-1",
         "displayName": get_remotion_template_metadata("muban-xiaobo-1")["displayName"],
-        "version": "1.1.0",
+        "version": "1.1.1",
         "confirmed": True,
         "selectionSource": "explicit",
     }
@@ -1317,7 +1317,7 @@ def test_build_package_marks_account_default_template_as_compatibility_fallback(
     assert result.package["output"]["productCardTemplate"] == {
         "id": "muban-xiaobo-1",
         "displayName": get_remotion_template_metadata("muban-xiaobo-1")["displayName"],
-        "version": "1.1.0",
+        "version": "1.1.1",
         "confirmed": False,
         "selectionSource": "account_default_compat",
     }
