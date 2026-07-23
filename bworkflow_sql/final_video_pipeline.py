@@ -109,8 +109,6 @@ def run_final_video_pipeline(
     account_label: str,
     product_media_mode: str = "video_preferred",
     product_order_strategy: str = "price_segment_shuffle",
-    product_image_mode: str = "missing",
-    stale_product_image_policy: str = "block",
     mode: str = "standard",
     top_uids: str = "",
     product_card_template_id: str = "",
@@ -232,9 +230,6 @@ def run_final_video_pipeline(
         elif delivery_layout:
             target_mp4 = delivery_layout["full_mp4"]
 
-    product_images: dict[str, Any] | None = None
-    timings.set_zero("product_images_ms")
-
     with timings.measure("render_package_ms"):
         package_result = workflow.prepare_product_recommendation_output(
             project_id,
@@ -242,7 +237,6 @@ def run_final_video_pipeline(
             output_mode="final_mp4",
             product_media_mode=product_media_mode,
             product_order_strategy=product_order_strategy,
-            stale_product_image_policy=stale_product_image_policy,
             mode=mode,
             top_uids=top_uids,
             product_card_template_id=product_card_template_id,
@@ -259,7 +253,6 @@ def run_final_video_pipeline(
         return {
             "ok": False,
             "stage": "render_package",
-            "product_images": product_images,
             "render_package": package_result,
         }
 
@@ -370,7 +363,6 @@ def run_final_video_pipeline(
         "product_media_mode": product_media_mode,
         "product_order_strategy": product_order_strategy,
         "subtitle_alignment": subtitle_mode,
-        "product_image_mode": product_image_mode,
         "product_card_template_id": safe_text(product_card_template_id) or None,
         "package_path": str(package_path),
         "job_package_path": str(job_package_path),
@@ -387,7 +379,6 @@ def run_final_video_pipeline(
         "acceptance_mode": acceptance,
         "phase7_selection_hash": (phase7_selection or {}).get("selection_hash"),
         "phase7_selection_source": (phase7_selection or {}).get("source"),
-        "product_images": product_images,
         "render_package": package_result,
         "cutme": {
             "result": cutme_result,
@@ -956,7 +947,6 @@ def _final_video_run_manifest_payload(
         "selection": {
             "product_media_mode": result.get("product_media_mode"),
             "product_order_strategy": result.get("product_order_strategy"),
-            "product_image_mode": result.get("product_image_mode"),
             "product_card_template_id": result.get("product_card_template_id"),
             "mode": _safe_text_or_default(result.get("price_transition_report", {}).get("mode"), result.get("mode")),
             "top_uids": result.get("price_transition_report", {}).get("top_uids") or [],
@@ -1015,7 +1005,6 @@ def _run_manifest_segments(package: dict[str, Any]) -> dict[str, list[dict[str, 
                     "uid": _segment_product_uid(segment),
                     "title": safe_text(segment.get("title") or segment.get("productTitle")),
                     "voiceAsset": safe_text(segment.get("voiceAsset")),
-                    "imageCardAsset": safe_text(segment.get("imageCardAsset")),
                     "videoAsset": safe_text(segment.get("videoAsset")),
                 }
             )

@@ -31,10 +31,8 @@ from .subtitle_helpers import (
     probe_media_duration_seconds,
 )
 from .template_config import (
-    display_template_from_image_path,
     get_remotion_template_metadata,
     get_template_slot,
-    image_set_for_template,
     remotion_template_id_for_user,
     resolve_product_card_template,
 )
@@ -49,7 +47,7 @@ from .price_transition_plan import (
 )
 
 
-SUPPORTED_OUTPUT_MODES = {"jianying_draft", "final_mp4"}
+SUPPORTED_OUTPUT_MODES = {"final_mp4"}
 SUPPORTED_PRODUCT_MEDIA_MODES = {"cover_only", "video_preferred"}
 DEFAULT_PRODUCT_MEDIA_MODE = "video_preferred"
 SUPPORTED_PRODUCT_ORDER_STRATEGIES = {"price_segment_shuffle", "stable"}
@@ -658,7 +656,7 @@ def build_product_recommendation_package(
     *,
     project_id: int,
     account_label: str,
-    output_mode: str = "jianying_draft",
+    output_mode: str = "final_mp4",
     product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
     product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
     product_card_template_id: str = "",
@@ -691,10 +689,6 @@ def build_product_recommendation_package(
         account_label,
         product_card_template_id,
     )
-    selected_image_set = image_set_for_template(
-        safe_text(selected_template.get("displayName"))
-    )
-
     repo = Repository(db)
     project = repo.project(project_id)
     if not project:
@@ -709,11 +703,6 @@ def build_product_recommendation_package(
     )
     blocks = repo.script_blocks(project_id)
     assets = repo.asset_bindings(project_id)
-    product_blocks = {
-        safe_text(block.get("owner_uid")): block
-        for block in blocks
-        if safe_text(block.get("script_type")) == "product"
-    }
     price_blocks = [
         block
         for block in blocks
@@ -836,144 +825,6 @@ def build_product_recommendation_package(
                     }
                 )
             continue
-        block = product_blocks.get(uid)
-        if not block:
-            missing.append(
-                {
-                    "kind": "product_script",
-                    "uid": uid,
-                    "title": title,
-                    "message": "missing product script",
-                }
-            )
-            continue
-
-        image = _ready_asset(
-            assets,
-            asset_type="image",
-            uid=uid,
-            account_label=account,
-            allow_unscoped_account=True,
-            preferred_image_set=selected_image_set,
-        )
-        voice = _ready_asset(
-            assets,
-            asset_type="voice",
-            uid=uid,
-            account_label=account,
-            script_block_id=int(block.get("id") or 0),
-            text_hash=safe_text(block.get("text_hash")),
-        )
-        video = _ready_asset(assets, asset_type="video", uid=uid)
-        product_missing = False
-        if not voice:
-            product_missing = True
-            missing.append(
-                {
-                    "kind": "product_voice",
-                    "uid": uid,
-                    "title": title,
-                    "script_block_id": int(block.get("id") or 0),
-                    "message": "missing ready voice for product script",
-                }
-            )
-
-        image_path = _absolute_file_path(image.get("path")) if image else None
-        video_path = (
-            _absolute_file_path(video.get("path"))
-            if media_mode == "video_preferred" and video
-            else None
-        )
-        try:
-            product_card = _product_card_payload(
-                product,
-                project=project,
-                fallback_image_path=image_path,
-                account_label=account,
-                product_card_template_id=safe_text(selected_template.get("templateId")),
-            )
-        except ValueError as exc:
-            missing.append(
-                {
-                    "kind": "product_cover",
-                    "uid": uid,
-                    "title": title,
-                    "message": str(exc),
-                }
-            )
-            continue
-        if not image and (output_mode == "jianying_draft" or not product_card):
-            product_missing = True
-            missing.append(
-                {
-                    "kind": "product_image",
-                    "uid": uid,
-                    "title": title,
-                    "message": "missing ready image for product",
-                }
-            )
-        if product_missing:
-            continue
-
-        voice_path = _absolute_file_path(voice.get("path"))
-        duration = get_audio_duration_seconds(voice_path)
-        product_segment = {
-            "type": "product_recommendation",
-            "id": f"product-{uid}",
-            "productUid": uid,
-            "motionSeed": _product_motion_seed(project_id, account, uid),
-            "productTitle": title,
-            "priceRangeLabel": safe_text(product.get("price_label")),
-            "spokenText": safe_text(block.get("body")),
-            "voiceAsset": str(voice_path),
-            "imageCardAsset": str(image_path) if image_path else None,
-            "videoAsset": str(video_path) if video_path else None,
-            "productMediaMode": media_mode,
-            "duration": duration,
-            "sourceScriptBlockId": int(block.get("id") or 0),
-            "assetBindingIds": {
-                "image": int(image.get("id") or 0) if image else None,
-                "voice": int(voice.get("id") or 0),
-                "video": int(video.get("id") or 0) if video else None,
-            },
-            "subtitles": (
-                []
-                if subtitle_mode == "asr"
-                else _segment_subtitles(
-                    safe_text(block.get("body")),
-                    duration,
-                    subtitle_alignment=subtitle_mode,
-                )
-            )
-            if output_mode == "final_mp4"
-            else [],
-        }
-        if product_card:
-            product_segment["productCard"] = product_card
-            card_fingerprint = product_card_content_fingerprint(product, product_card)
-            if card_fingerprint:
-                product_segment["productCardFingerprint"] = card_fingerprint
-                stored_image_fingerprint = safe_text(image.get("text_hash")) if image else ""
-                if stored_image_fingerprint and stored_image_fingerprint != card_fingerprint:
-                    stale_product_images.append(
-                        {
-                            "kind": "stale_product_image",
-                            "uid": uid,
-                            "title": title,
-                            "asset_binding_id": int(image.get("id") or 0) if image else None,
-                            "path": str(image_path) if image_path else "",
-                            "stored_fingerprint": stored_image_fingerprint,
-                            "expected_fingerprint": card_fingerprint,
-                            "message": "product card image content fingerprint changed",
-                        }
-                    )
-        elif video_path and image_path:
-            display_template = display_template_from_image_path(str(image_path), account_label=account)
-            if display_template:
-                product_segment["displayTemplate"] = display_template
-                product_segment["displayVideoSlot"] = _display_video_slot_for_template(display_template)
-        product_segments[uid] = product_segment
-
     segments = _arrange_segments(
         [
             {

@@ -145,7 +145,6 @@ from .render_package_builder import (
     _has_matching_price_groups,
     product_card_payload_for_product,
 )
-from .product_image_generation import regenerate_product_card_images
 from .template_doctor import diagnose_template_flow
 from .script_doctor import diagnose_script_flow
 from .episode_materializer import materialize_episode_markdown
@@ -390,7 +389,6 @@ class WorkflowService:
         output_mode: str,
         product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
         product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
-        stale_product_image_policy: str = "block",
         mode: str = "standard",
         top_uids: str | list[str] | None = None,
         product_uids: str | list[str] | None = None,
@@ -404,7 +402,7 @@ class WorkflowService:
         dynamic_product_contexts: list[dict[str, Any]] | None = None,
         master_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
-        output_mode_value = safe_text(output_mode) or "jianying_draft"
+        output_mode_value = safe_text(output_mode) or "final_mp4"
         if output_mode_value not in SUPPORTED_OUTPUT_MODES:
             raise ValueError(f"unsupported output_mode: {output_mode_value}")
         media_mode = safe_text(product_media_mode) or DEFAULT_PRODUCT_MEDIA_MODE
@@ -418,9 +416,6 @@ class WorkflowService:
         subtitle_mode = safe_text(subtitle_alignment) or "proportional"
         if subtitle_mode not in SUPPORTED_SUBTITLE_ALIGNMENTS:
             raise ValueError(f"unsupported subtitle_alignment: {subtitle_mode}")
-        stale_policy = safe_text(stale_product_image_policy) or "block"
-        if stale_policy not in {"block", "reuse"}:
-            raise ValueError(f"unsupported stale_product_image_policy: {stale_policy}")
         sequence_mode = safe_text(mode) or "standard"
         top_uid_list = split_csv(top_uids) if isinstance(top_uids, str) else list(top_uids or [])
         product_uid_list = (
@@ -489,36 +484,15 @@ class WorkflowService:
             "product_uids": product_uid_list,
             "package_path": str(output_path),
             "missing": result.missing,
-            "stale_product_images": getattr(result, "stale_product_images", []),
         }
         if result.missing:
             return {"ok": False, **base_payload, "next": None}
-        if base_payload["stale_product_images"] and stale_policy == "block":
-            return {
-                "ok": False,
-                **base_payload,
-                "next": render_package_stale_product_image_next_step(
-                    base_payload["stale_product_images"],
-                    project_id=project_id,
-                    account_label=account_label,
-                    product_card_template_id=product_card_template_id,
-                ),
-            }
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
             json.dumps(result.package, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
-        jianying_manifest_path: Path | None = None
-        if output_mode_value == "jianying_draft":
-            jianying_manifest_path = output_path.with_suffix(".jianying.manifest.json")
-            render_package_to_jianying_manifest(
-                result.package,
-                jianying_manifest_path,
-                project_id=project_id,
-                account_label=account_label,
-            )
         return {
             "ok": True,
             **base_payload,
@@ -528,7 +502,7 @@ class WorkflowService:
                 account_label=account_label,
                 output_mode=output_mode_value,
                 package_path=output_path,
-                jianying_manifest_path=jianying_manifest_path,
+                jianying_manifest_path=None,
             ),
         }
 
@@ -610,6 +584,9 @@ class WorkflowService:
         account_label: str,
         product_card_template_id: str,
     ) -> dict[str, Any]:
+        # Historical low-level helper only. No public CLI or UI route calls it.
+        from .product_image_generation import regenerate_product_card_images
+
         from .product_card_preflight import dynamic_product_card_preflight
 
         return dynamic_product_card_preflight(

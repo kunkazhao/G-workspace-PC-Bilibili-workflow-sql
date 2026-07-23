@@ -8,7 +8,6 @@ _PAGE_REGISTRY: dict[str, tuple[str, str]] = {
     "用户管理": (".account_page", "AccountPage"),
     "生成配音": (".voice_page", "VoicePage"),
     "组合口播稿": (".assemble_page", "AssemblePage"),
-    "生成剪映草稿": (".jianying_page", "JianyingPage"),
     "单独配音": (".standalone_voice_page", "StandaloneVoicePage"),
     "roll-b改名": (".rollb_rename_page", "RollBRenamePage"),
     "导出字幕 SRT": (".subtitle_srt_page", "SubtitleSrtPage"),
