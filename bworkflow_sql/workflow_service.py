@@ -352,35 +352,6 @@ class WorkflowService:
             cmd += ["--display-template", display_template]
         return cmd
 
-    def build_jianying_command(
-        self,
-        project_id: int,
-        *,
-        draft_name: str = "",
-        spoken_markdown_path: str | Path | None = None,
-        intro_video_path: str | Path | None = None,
-    ) -> list[str]:
-        project = self.repo.project(project_id)
-        if not project:
-            raise ValueError("请先选择品类项目。")
-        output_markdown = self._spoken_markdown_path(project, spoken_markdown_path)
-        manifest = self.spoken_manifest_path(project_id, output_markdown)
-        cmd = [
-            f"{INTERNAL_PREFIX}jianying",
-            "--project-id",
-            str(project_id),
-            "--manifest",
-            str(manifest),
-            "--draft-name",
-            safe_path_component(draft_name or safe_text(project.get("name")) or "B-Workflow-SQL"),
-            "--draft-root",
-            str(DEFAULT_JIANYING_DRAFT_ROOT),
-        ]
-        intro_video = safe_text(intro_video_path)
-        if intro_video:
-            cmd += ["--intro-video", intro_video]
-        return cmd
-
     def prepare_product_recommendation_output(
         self,
         project_id: int,
@@ -1782,14 +1753,6 @@ class WorkflowService:
                 product_uids=split_csv(args.get("uids", "")),
                 output_markdown_path=args.get("output-markdown", ""),
                 display_template=args.get("display-template", ""),
-            )
-        if cmd[0] == f"{INTERNAL_PREFIX}jianying":
-            return self.generate_jianying_draft(
-                project_id,
-                manifest_path=args.get("manifest", ""),
-                draft_name=args.get("draft-name", ""),
-                draft_root=args.get("draft-root", DEFAULT_JIANYING_DRAFT_ROOT),
-                intro_video_path=args.get("intro-video", ""),
             )
         raise ValueError(f"未知内部任务：{cmd[0]}")
 

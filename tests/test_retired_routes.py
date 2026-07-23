@@ -5,6 +5,7 @@ import pytest
 from bworkflow_sql import cli
 from bworkflow_sql.pages import PAGE_MAP
 from bworkflow_sql.render_package_builder import SUPPORTED_OUTPUT_MODES
+from bworkflow_sql.workflow_service import WorkflowService
 
 
 def test_public_cli_keeps_final_video_and_hides_retired_routes(capsys) -> None:
@@ -35,3 +36,19 @@ def test_final_video_parser_has_no_static_image_controls() -> None:
 
     assert "--product-image-mode" not in option_names
     assert "--stale-product-image-policy" not in option_names
+
+
+def test_workflow_service_has_no_jianying_command_builder() -> None:
+    assert not hasattr(WorkflowService, "build_jianying_command")
+
+
+def test_internal_jianying_dispatch_is_rejected(monkeypatch) -> None:
+    service = object.__new__(WorkflowService)
+    monkeypatch.setattr(
+        WorkflowService,
+        "generate_jianying_draft",
+        lambda *args, **kwargs: object(),
+    )
+
+    with pytest.raises(ValueError):
+        service.run_command(["internal:jianying", "--project-id", "1"])
