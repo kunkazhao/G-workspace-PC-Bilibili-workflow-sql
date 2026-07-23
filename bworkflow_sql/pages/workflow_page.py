@@ -192,11 +192,7 @@ class WorkflowPage(BasePage):
                 output_markdown_path=self._remember_spoken_md(project["id"]),
                 display_template=self._display_template_for_account(),
             )
-        return self.workflow.build_jianying_command(
-            project["id"], draft_name=self.account_var.get().strip(),
-            spoken_markdown_path=self._remember_spoken_md(project["id"]),
-            intro_video_path=self.intro_video_var.get().strip(),
-        )
+        raise ValueError("剪映草稿输出已停用。")
 
     def _browse_spoken_md(self) -> None:
         p = self.app.current_project()

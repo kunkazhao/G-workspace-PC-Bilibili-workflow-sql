@@ -27,7 +27,7 @@ def test_confirm_phase7_selection_writes_explicit_hash_bound_state(tmp_path: Pat
         output_branch="final_mp4",
         account="荣荣",
         product_card_template_id="muban-rongrong-1",
-        product_media_mode="cover_only",
+        product_media_mode="video_preferred",
         product_order_strategy="price_segment_shuffle",
         mode="standard",
         confirmed_at="2026-07-19T12:00:00+08:00",
@@ -38,8 +38,7 @@ def test_confirm_phase7_selection_writes_explicit_hash_bound_state(tmp_path: Pat
     assert result["selection_hash"].startswith("sha256:")
     assert confirmation["source"] == "explicit_user_confirmation"
     assert confirmation["selection_hash"] == result["selection_hash"]
-    assert confirmation["selection"]["product_media_mode"] == "cover_only"
-    assert payload["phases"]["assembly"]["generate_jianying_draft"] is False
+    assert confirmation["selection"]["product_media_mode"] == "video_preferred"
 
 
 def test_formal_render_rejects_missing_phase7_confirmation(tmp_path: Path) -> None:
@@ -63,10 +62,10 @@ def test_formal_render_rejects_arguments_that_differ_from_user_confirmation(tmp_
     pipeline = _pipeline(tmp_path)
     confirm_phase7_selection(
         pipeline,
-        output_branch="both",
+        output_branch="final_mp4",
         account="荣荣",
         product_card_template_id="muban-rongrong-1",
-        product_media_mode="cover_only",
+        product_media_mode="video_preferred",
         product_order_strategy="price_segment_shuffle",
         mode="standard",
     )
@@ -78,18 +77,18 @@ def test_formal_render_rejects_arguments_that_differ_from_user_confirmation(tmp_
             account="荣荣",
             product_card_template_id="muban-rongrong-1",
             product_media_mode="video_preferred",
-            product_order_strategy="price_segment_shuffle",
+            product_order_strategy="stable",
             mode="standard",
         )
 
     assert caught.value.code == "phase7_selection_mismatch"
 
 
-def test_formal_render_accepts_both_branch_for_each_confirmed_output(tmp_path: Path) -> None:
+def test_formal_render_accepts_confirmed_final_mp4_output(tmp_path: Path) -> None:
     pipeline = _pipeline(tmp_path)
     confirmed = confirm_phase7_selection(
         pipeline,
-        output_branch="both",
+        output_branch="final_mp4",
         account="荣荣",
         product_card_template_id="muban-rongrong-1",
         product_media_mode="video_preferred",
@@ -100,7 +99,7 @@ def test_formal_render_accepts_both_branch_for_each_confirmed_output(tmp_path: P
 
     validated = validated_phase7_selection(
         pipeline,
-        required_output="jianying_draft",
+        required_output="final_mp4",
         account="荣荣",
         product_card_template_id="muban-rongrong-1",
         product_media_mode="video_preferred",

@@ -54,6 +54,54 @@ class _TimingCollector:
         return payload
 
 
+def _run_dynamic_product_preflight(
+    workflow: Any,
+    *,
+    project_id: int,
+    account_label: str,
+    product_card_template_id: str,
+) -> dict[str, Any]:
+    method = getattr(workflow, "dynamic_product_card_preflight", None)
+    if not callable(method):
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error_code": "dynamic_product_preflight_unavailable",
+            "issues": [
+                {
+                    "code": "dynamic_product_preflight_unavailable",
+                    "product_uid": "",
+                    "field": "workflow",
+                    "message": "Workflow does not expose the required dynamic product-card preflight.",
+                }
+            ],
+            "contexts": [],
+            "snapshot_id": None,
+        }
+    result = method(
+        project_id,
+        account_label=account_label,
+        product_card_template_id=product_card_template_id,
+    )
+    if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error_code": "invalid_dynamic_product_preflight_result",
+            "issues": [
+                {
+                    "code": "invalid_dynamic_product_preflight_result",
+                    "product_uid": "",
+                    "field": "dynamic_product_preflight",
+                    "message": "Dynamic product-card preflight returned an invalid result.",
+                }
+            ],
+            "contexts": [],
+            "snapshot_id": None,
+        }
+    return result
+
+
 def run_final_video_pipeline(
     workflow: Any,
     *,
@@ -61,8 +109,6 @@ def run_final_video_pipeline(
     account_label: str,
     product_media_mode: str = "video_preferred",
     product_order_strategy: str = "price_segment_shuffle",
-    product_image_mode: str = "missing",
-    stale_product_image_policy: str = "block",
     mode: str = "standard",
     top_uids: str = "",
     product_card_template_id: str = "",
@@ -91,6 +137,23 @@ def run_final_video_pipeline(
     acceptance = safe_text(acceptance_mode) or "full"
     if acceptance not in {"none", "quick", "visual", "full"}:
         raise ValueError(f"unsupported acceptance_mode: {acceptance}")
+    explicit_output_path = bool(output_path)
+    explicit_full_output_path = bool(full_output_path)
+    explicit_media_output = explicit_output_path or explicit_full_output_path
+    dynamic_preflight = _run_dynamic_product_preflight(
+        workflow,
+        project_id=project_id,
+        account_label=account,
+        product_card_template_id=product_card_template_id,
+    )
+    if dynamic_preflight.get("ok") is not True:
+        return {
+            "ok": False,
+            "stage": "dynamic_product_preflight",
+            "error_code": safe_text(dynamic_preflight.get("error_code"))
+            or "dynamic_product_preflight_failed",
+            "preflight": dynamic_preflight,
+        }
     phase7_selection = None
     if pipeline_path:
         phase7_selection = validated_phase7_selection(
@@ -130,8 +193,10 @@ def run_final_video_pipeline(
     )
     if delivery_layout:
         package_output_path = package_output_path or delivery_layout["package_path"]
-        output_path = output_path or delivery_layout["candidate_mp4"]
-        full_output_path = full_output_path or delivery_layout["candidate_mp4"]
+        if not explicit_output_path:
+            output_path = delivery_layout["candidate_mp4"]
+        if not explicit_full_output_path and not explicit_output_path:
+            full_output_path = delivery_layout["candidate_mp4"]
     package_path = _absolute_path(package_output_path) if package_output_path else render_root / f"{stem}.json"
     target_mp4 = _absolute_path(output_path) if output_path else package_path.with_suffix(".mp4")
     intro_mp4 = _absolute_path(intro_video_path) if intro_video_path else None
@@ -156,27 +221,14 @@ def run_final_video_pipeline(
             raise ValueError(
                 "intro subtitle blocked: raw intro video requires transcript text or a source plan with full_script."
             )
-        if full_output_path:
+        if explicit_full_output_path:
+            target_mp4 = _absolute_path(full_output_path)
+        elif explicit_output_path:
+            target_mp4 = _absolute_path(output_path)
+        elif full_output_path:
             target_mp4 = _absolute_path(full_output_path)
         elif delivery_layout:
             target_mp4 = delivery_layout["full_mp4"]
-
-    product_images: dict[str, Any] | None = None
-    with timings.measure("product_images_ms"):
-        if product_image_mode != "skip":
-            product_images = workflow.regenerate_product_card_images(
-                project_id,
-                account_label=account,
-                mode=product_image_mode,
-                product_uid="",
-                product_card_template_id=product_card_template_id,
-            )
-        if product_images is not None and product_images.get("ok") is False:
-            return {
-                "ok": False,
-                "stage": "product_images",
-                "product_images": product_images,
-            }
 
     with timings.measure("render_package_ms"):
         package_result = workflow.prepare_product_recommendation_output(
@@ -185,7 +237,6 @@ def run_final_video_pipeline(
             output_mode="final_mp4",
             product_media_mode=product_media_mode,
             product_order_strategy=product_order_strategy,
-            stale_product_image_policy=stale_product_image_policy,
             mode=mode,
             top_uids=top_uids,
             product_card_template_id=product_card_template_id,
@@ -195,12 +246,13 @@ def run_final_video_pipeline(
             intro_video_text=resolved_intro_text,
             include_outro=True,
             closing_text=DEFAULT_CLOSING_TEXT,
+            dynamic_product_contexts=dynamic_preflight.get("contexts"),
+            master_snapshot_id=safe_text(dynamic_preflight.get("snapshot_id")),
         )
     if package_result.get("ok") is not True:
         return {
             "ok": False,
             "stage": "render_package",
-            "product_images": product_images,
             "render_package": package_result,
         }
 
@@ -291,7 +343,7 @@ def run_final_video_pipeline(
 
     # The delivery root only receives a complete candidate after all requested
     # automated gates have passed. Failed or unaccepted renders stay internal.
-    if delivery_layout and acceptance != "none":
+    if delivery_layout and acceptance != "none" and not explicit_media_output:
         promoted_path = delivery_layout["full_mp4"]
         promoted_path.parent.mkdir(parents=True, exist_ok=True)
         staging_dir = target_mp4.parent if target_mp4.parent.name == ".bworkflow-staging" else None
@@ -311,7 +363,6 @@ def run_final_video_pipeline(
         "product_media_mode": product_media_mode,
         "product_order_strategy": product_order_strategy,
         "subtitle_alignment": subtitle_mode,
-        "product_image_mode": product_image_mode,
         "product_card_template_id": safe_text(product_card_template_id) or None,
         "package_path": str(package_path),
         "job_package_path": str(job_package_path),
@@ -328,7 +379,6 @@ def run_final_video_pipeline(
         "acceptance_mode": acceptance,
         "phase7_selection_hash": (phase7_selection or {}).get("selection_hash"),
         "phase7_selection_source": (phase7_selection or {}).get("source"),
-        "product_images": product_images,
         "render_package": package_result,
         "cutme": {
             "result": cutme_result,
@@ -897,7 +947,6 @@ def _final_video_run_manifest_payload(
         "selection": {
             "product_media_mode": result.get("product_media_mode"),
             "product_order_strategy": result.get("product_order_strategy"),
-            "product_image_mode": result.get("product_image_mode"),
             "product_card_template_id": result.get("product_card_template_id"),
             "mode": _safe_text_or_default(result.get("price_transition_report", {}).get("mode"), result.get("mode")),
             "top_uids": result.get("price_transition_report", {}).get("top_uids") or [],
@@ -956,7 +1005,6 @@ def _run_manifest_segments(package: dict[str, Any]) -> dict[str, list[dict[str, 
                     "uid": _segment_product_uid(segment),
                     "title": safe_text(segment.get("title") or segment.get("productTitle")),
                     "voiceAsset": safe_text(segment.get("voiceAsset")),
-                    "imageCardAsset": safe_text(segment.get("imageCardAsset")),
                     "videoAsset": safe_text(segment.get("videoAsset")),
                 }
             )

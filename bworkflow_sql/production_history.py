@@ -23,6 +23,7 @@ from .production_recipe import sha256_file, validate_production_recipe
 from .cutme_adapter import CutMeAdapter
 from .settings import INTERNAL_WORKSPACE_ROOT
 from .final_spoken_script import validate_spoken_script_evidence
+from .artifact_approvals import atomic_update_pipeline
 
 
 def _sha256(path: Path) -> str:
@@ -41,6 +42,72 @@ def default_published_archive_dir(
     published_root = Path(root).expanduser().resolve()
     month_dir = published_root / f"{(now or datetime.now()).month}月"
     return month_dir if month_dir.is_dir() else published_root
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _rewrite_directory_paths(value: Any, old_root: Path, new_root: Path) -> Any:
+    """Recursively migrate absolute paths stored below one delivery directory."""
+    if isinstance(value, dict):
+        return {key: _rewrite_directory_paths(item, old_root, new_root) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_rewrite_directory_paths(item, old_root, new_root) for item in value]
+    if not isinstance(value, str) or not value.strip():
+        return value
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        return value
+    candidate = candidate.resolve()
+    if not _path_is_within(candidate, old_root):
+        return value
+    return str(new_root / candidate.relative_to(old_root))
+
+
+def _validate_migrated_approvals(payload: dict[str, Any]) -> None:
+    approvals = payload.get("artifact_approvals")
+    if not isinstance(approvals, dict):
+        return
+    for name, approval in approvals.items():
+        if not isinstance(approval, dict) or not safe_text(approval.get("path")):
+            continue
+        artifact = Path(safe_text(approval["path"])).expanduser().resolve()
+        if not artifact.is_file():
+            raise ValueError(f"归档后审批产物不存在: {name}: {artifact}")
+        expected_size = int(approval.get("size") or 0)
+        if expected_size and artifact.stat().st_size != expected_size:
+            raise ValueError(f"归档后审批产物大小不一致: {name}: {artifact}")
+        expected_hash = safe_text(approval.get("sha256")).removeprefix("sha256:")
+        if expected_hash and _sha256(artifact) != expected_hash:
+            raise ValueError(f"归档后审批产物哈希不一致: {name}: {artifact}")
+
+
+def _validate_directory_mirror(source: Path, target: Path) -> None:
+    """Require every source file to have an identical target copy before cleanup."""
+    for source_file in source.rglob("*"):
+        if not source_file.is_file():
+            continue
+        target_file = target / source_file.relative_to(source)
+        if not target_file.is_file():
+            raise ValueError(f"归档目标缺少项目文件: {target_file}")
+        if source_file.stat().st_size != target_file.stat().st_size:
+            raise ValueError(f"归档目标文件大小不一致: {target_file}")
+        if _sha256(source_file) != _sha256(target_file):
+            raise ValueError(f"归档目标文件哈希不一致: {target_file}")
+
+
+def _remove_verified_source_directory(source: Path) -> None:
+    try:
+        shutil.rmtree(source)
+    except PermissionError as exc:
+        raise ValueError(
+            f"项目目录已完整复制到归档位置，但源文件仍被其他程序占用；关闭剪辑/播放软件后重试: {source}"
+        ) from exc
 
 
 class ProductionHistoryService:
@@ -312,84 +379,176 @@ class ProductionHistoryService:
     ) -> dict[str, Any]:
         if archive_dir and current_path:
             raise ValueError("--archive-dir 和 --current-path 不能同时指定")
-        if not archive_dir and not current_path:
-            archive_dir = default_published_archive_dir(published_root, now=now)
         record = self.repository.production_run(production_run_id)
         if not record:
             raise ValueError(f"正式成片记录不存在: {production_run_id}")
+
+        pipeline = Path(pipeline_path).expanduser().resolve()
+        original_payload = json.loads(pipeline.read_text(encoding="utf-8-sig"))
+        if not isinstance(original_payload, dict):
+            raise ValueError("pipeline must contain a JSON object")
+
         expected_hash = safe_text(record.get("full_mp4_sha256"))
         expected_size = int(record.get("full_mp4_size") or 0)
-        source = Path(safe_text(record.get("full_mp4_path"))).expanduser().resolve()
+        recorded_source = Path(safe_text(record.get("full_mp4_path"))).expanduser().resolve()
+        configured_delivery = safe_text(original_payload.get("output_dir"))
+        old_delivery = (
+            Path(configured_delivery).expanduser().resolve()
+            if configured_delivery
+            else recorded_source.parent
+        )
         moved = False
-        if archive_dir:
-            if not source.is_file():
-                raise ValueError(f"当前成片不存在，无法自动归档: {source}")
-            _validate_video_identity(source, expected_hash=expected_hash, expected_size=expected_size)
-            target_dir = Path(archive_dir).expanduser().resolve()
-            target_dir.mkdir(parents=True, exist_ok=True)
-            target = target_dir / source.name
-            if target != source:
-                if target.exists() and _sha256(target) != (expected_hash or _sha256(source)):
-                    raise ValueError(f"归档目标存在不同文件: {target}")
-                if not target.exists():
-                    shutil.move(str(source), str(target))
-                    moved = True
-        else:
+        repaired_loose_source = False
+        directory_moved = False
+        source = recorded_source
+
+        if current_path:
             target = Path(current_path).expanduser().resolve()
+            new_delivery = target.parent
+            if old_delivery != new_delivery and old_delivery.exists():
+                raise ValueError("--current-path 只能重绑已整体移动的项目目录；原交付目录仍存在")
+        else:
+            archive_parent = default_published_archive_dir(published_root, now=now)
+            new_delivery = (
+                Path(archive_dir).expanduser().resolve()
+                if archive_dir
+                else archive_parent / old_delivery.name
+            )
+            if not old_delivery.is_dir():
+                if new_delivery.is_dir():
+                    old_delivery = new_delivery
+                else:
+                    raise ValueError(f"当前项目交付目录不存在，无法整体归档: {old_delivery}")
+            if not source.is_file():
+                mapped_source = new_delivery / source.name
+                if mapped_source.is_file():
+                    source = mapped_source
+                else:
+                    raise ValueError(f"当前成片不存在，无法自动归档: {source}")
+            _validate_video_identity(source, expected_hash=expected_hash, expected_size=expected_size)
+            if old_delivery != new_delivery:
+                if new_delivery.exists() and not old_delivery.exists():
+                    raise ValueError(f"归档目标项目目录已存在，拒绝合并覆盖: {new_delivery}")
+                if not new_delivery.exists() and not _path_is_within(source, old_delivery):
+                    repaired_target = old_delivery / source.name
+                    if repaired_target.exists():
+                        raise ValueError(f"项目目录内已存在同名成片，拒绝覆盖: {repaired_target}")
+                    shutil.move(str(source), str(repaired_target))
+                    source = repaired_target
+                    repaired_loose_source = True
+                if new_delivery.exists():
+                    _validate_directory_mirror(old_delivery, new_delivery)
+                    _remove_verified_source_directory(old_delivery)
+                else:
+                    new_delivery.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        old_delivery.replace(new_delivery)
+                    except OSError:
+                        shutil.copytree(old_delivery, new_delivery)
+                        _validate_directory_mirror(old_delivery, new_delivery)
+                        _remove_verified_source_directory(old_delivery)
+                directory_moved = True
+                moved = True
+            target = new_delivery / source.name
+
         if not target.is_file():
             raise ValueError(f"归档成片不存在: {target}")
         _validate_video_identity(target, expected_hash=expected_hash, expected_size=expected_size)
         timestamp = safe_text(record.get("archived_at")) or now_iso()
-        stored = self.repository.mark_production_published(
-            production_run_id,
-            current_path=str(target),
-            published_at=timestamp,
-            archived_at=timestamp,
-        )
-        pipeline = Path(pipeline_path).expanduser().resolve()
-        payload = json.loads(pipeline.read_text(encoding="utf-8-sig"))
+
+        payload = _rewrite_directory_paths(original_payload, old_delivery, new_delivery)
+        payload["output_dir"] = str(new_delivery)
         phases = payload.get("phases") if isinstance(payload.get("phases"), dict) else {}
         assembly = phases.get("assembly") if isinstance(phases.get("assembly"), dict) else {}
         assembly["final_mp4_path"] = str(target)
         assembly["full_mp4_path"] = str(target)
+        manifest_path = safe_text(assembly.get("run_manifest_path"))
+        if manifest_path and Path(manifest_path).is_file():
+            manifest_payload = json.loads(Path(manifest_path).read_text(encoding="utf-8-sig"))
+            manifest_outputs = manifest_payload.get("outputs") if isinstance(manifest_payload.get("outputs"), dict) else {}
+            generated_product = safe_text(
+                manifest_outputs.get("product_mp4") or manifest_outputs.get("product_output_mp4")
+            )
+            if generated_product:
+                generated_path = Path(generated_product).expanduser().resolve()
+                historical_full = safe_text(record.get("original_full_mp4_path"))
+                historical_delivery = (
+                    Path(historical_full).expanduser().resolve().parent
+                    if historical_full
+                    else old_delivery
+                )
+                if _path_is_within(generated_path, historical_delivery):
+                    archived_product = new_delivery / generated_path.relative_to(historical_delivery)
+                    if archived_product.is_file():
+                        assembly["product_mp4_path"] = str(archived_product)
         phases["assembly"] = assembly
-        phases["publishing"] = {
+        publishing = phases.get("publishing") if isinstance(phases.get("publishing"), dict) else {}
+        publishing.update({
             "status": "done",
             "production_run_id": production_run_id,
             "published_at": timestamp,
             "archive_status": "archived",
             "current_mp4_path": str(target),
-        }
+        })
+        phases["publishing"] = publishing
         existing_backfill = phases.get("blue_link_backfill") if isinstance(phases.get("blue_link_backfill"), dict) else {}
-        if safe_text(existing_backfill.get("status")) in {"complete", "partial"}:
-            phases["blue_link_backfill"] = existing_backfill
-        else:
-            phases["blue_link_backfill"] = {
+        if safe_text(existing_backfill.get("status")) not in {"complete", "partial"}:
+            existing_backfill = {
                 "status": "pending",
                 "production_run_id": production_run_id,
                 "matched_count": 0,
                 "unresolved_count": 0,
             }
+        phases["blue_link_backfill"] = existing_backfill
         paths = payload.get("paths") if isinstance(payload.get("paths"), dict) else {}
         paths["final_mp4"] = str(target)
         paths["full_mp4"] = str(target)
+        paths["final_mp4_relative"] = target.name
+        if safe_text(assembly.get("product_mp4_path")):
+            product_path = Path(safe_text(assembly["product_mp4_path"]))
+            paths["product_mp4"] = str(product_path)
+            paths["product_mp4_relative"] = product_path.name
         payload["phases"] = phases
         payload["paths"] = paths
-        backfill_status = safe_text(phases["blue_link_backfill"].get("status"))
+        backfill_status = safe_text(existing_backfill.get("status"))
         if backfill_status == "complete":
             payload["current_phase"] = "done"
             payload["next_action"] = "视频已发布，蓝链已全部回流。"
         elif backfill_status == "partial":
             payload["current_phase"] = "blue_link_backfill"
-            payload["next_action"] = (
-                f"仍有 {int(phases['blue_link_backfill'].get('unresolved_count') or 0)} 条蓝链待浏览器补解析。"
-            )
+            payload["next_action"] = f"仍有 {int(existing_backfill.get('unresolved_count') or 0)} 条蓝链待浏览器补解析。"
         else:
             payload["current_phase"] = "blue_link_backfill"
             payload["next_action"] = "视频已发布并归档；请提供 B站视频地址，提取置顶评论蓝链并回流。"
         payload["updated_at"] = timestamp
-        pipeline.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"ok": True, "moved": moved, "production": stored, "pipeline_path": str(pipeline)}
+        try:
+            _validate_migrated_approvals(payload)
+            atomic_update_pipeline(pipeline, lambda current: (current.clear(), current.update(payload)))
+            stored = self.repository.mark_production_published(
+                production_run_id,
+                current_path=str(target),
+                published_at=timestamp,
+                archived_at=timestamp,
+            )
+        except Exception:
+            atomic_update_pipeline(
+                pipeline,
+                lambda current: (current.clear(), current.update(original_payload)),
+            )
+            if directory_moved and new_delivery.exists() and not old_delivery.exists():
+                shutil.move(str(new_delivery), str(old_delivery))
+            if repaired_loose_source:
+                restored = old_delivery / source.name
+                if restored.exists() and not recorded_source.exists():
+                    shutil.move(str(restored), str(recorded_source))
+            raise
+        return {
+            "ok": True,
+            "moved": moved,
+            "archive_directory": str(new_delivery),
+            "production": stored,
+            "pipeline_path": str(pipeline),
+        }
 
     def publishing_context(self, production_run_id: int) -> dict[str, Any]:
         record = self.repository.production_run(production_run_id)

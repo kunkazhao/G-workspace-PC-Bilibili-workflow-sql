@@ -1,6 +1,9 @@
-# Jianying Engine
+# Jianying Engine (Retained Historical Runtime)
 
-This directory owns the Jianying draft generator used by B-Workflow SQL.
+This directory keeps the former B-Workflow SQL draft generator for historical
+projects. Jianying is no longer exposed through the public UI/CLI or phase-7
+workflow, and this runtime receives no new product-card template or slot
+compatibility work.
 
 Runtime entry:
 

@@ -52,7 +52,14 @@ DEFAULT_VOICE_ROOT = Path(r"G:\2026项目-b站\素材-配音")
 DEFAULT_STANDALONE_VOICE_ROOT = Path(r"G:\2026项目-b站")
 DEFAULT_PUBLISHED_VIDEO_ROOT = Path(r"G:\2026项目-b站\已发布视频")
 DEFAULT_OUTPUT_ROOT = DATA_DIR / "workspace"
-DEFAULT_SPOKEN_MD_ROOT = Path(r"G:\WriteSpace\B站-文案脚本\10_b站文案\1.口播文案")
+
+
+def _default_spoken_md_root() -> Path:
+    override = os.environ.get("BWORKFLOW_SPOKEN_MD_ROOT", "").strip()
+    return Path(override) if override else Path(r"G:\WriteSpace\B站-文案脚本\10_b站文案\1.口播文案")
+
+
+DEFAULT_SPOKEN_MD_ROOT = _default_spoken_md_root()
 DEFAULT_JIANYING_DRAFT_ROOT = Path(r"E:\剪辑-剪映\草稿\JianyingPro Drafts")
 INTERNAL_WORKSPACE_ROOT = DATA_DIR / "workspace"
 

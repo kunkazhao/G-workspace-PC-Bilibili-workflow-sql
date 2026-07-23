@@ -72,7 +72,10 @@ class App(ctk.CTk):
     def workflow(self):
         if self._workflow is None:
             from .workflow_service import WorkflowService
-            self._workflow = WorkflowService(self.db)
+            self._workflow = WorkflowService(
+                self.db,
+                master_contracts=self.master_contracts,
+            )
         return self._workflow
 
     @property

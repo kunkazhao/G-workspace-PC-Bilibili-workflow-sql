@@ -10,8 +10,8 @@ from .artifact_approvals import atomic_update_pipeline
 from .utils import safe_text
 
 
-PHASE7_OUTPUT_BRANCHES = {"jianying_draft", "final_mp4", "both"}
-PHASE7_PRODUCT_MEDIA_MODES = {"cover_only", "video_preferred"}
+PHASE7_OUTPUT_BRANCHES = {"final_mp4"}
+PHASE7_PRODUCT_MEDIA_MODES = {"video_preferred"}
 PHASE7_ORDER_STRATEGIES = {"price_segment_shuffle", "stable"}
 PHASE7_SEQUENCE_MODES = {"standard", "top"}
 PHASE7_SELECTION_SOURCE = "explicit_user_confirmation"
@@ -113,7 +113,7 @@ def confirm_phase7_selection(
         phases = payload.get("phases") if isinstance(payload.get("phases"), dict) else {}
         assembly = phases.get("assembly") if isinstance(phases.get("assembly"), dict) else {}
         assembly.update(selection)
-        assembly["generate_jianying_draft"] = selection["output_branch"] in {"jianying_draft", "both"}
+        assembly.pop("generate_jianying_draft", None)
         assembly["selection_confirmation"] = {
             "status": "confirmed",
             "source": PHASE7_SELECTION_SOURCE,
@@ -182,10 +182,7 @@ def validated_phase7_selection(
         top_uids=top_uids,
     )
     required = safe_text(required_output)
-    allowed_outputs = {
-        "final_mp4": {"final_mp4", "both"},
-        "jianying_draft": {"jianying_draft", "both"},
-    }
+    allowed_outputs = {"final_mp4": {"final_mp4"}}
     if required not in allowed_outputs or safe_text(stored_selection.get("output_branch")) not in allowed_outputs[required]:
         raise Phase7SelectionError(
             "phase7_selection_mismatch",

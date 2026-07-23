@@ -6,12 +6,36 @@ from pathlib import Path
 import pytest
 
 from bworkflow_sql.cutme_adapter import CutMeAdapterError
-from bworkflow_sql.final_video_pipeline import _run_command, run_final_video_pipeline
+from bworkflow_sql.final_video_pipeline import (
+    _run_command,
+    _run_dynamic_product_preflight as REAL_DYNAMIC_PREFLIGHT,
+    run_final_video_pipeline,
+)
 from bworkflow_sql.phase7_selection import confirm_phase7_selection
 from bworkflow_sql.artifact_approvals import confirm_intro_video
 
 
-pytestmark = pytest.mark.usefixtures("isolated_final_video_workspace")
+pytestmark = pytest.mark.usefixtures(
+    "isolated_final_video_workspace",
+    "ready_dynamic_preflight",
+)
+
+
+@pytest.fixture
+def ready_dynamic_preflight(monkeypatch: pytest.MonkeyPatch):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_dynamic_product_preflight",
+        lambda workflow, **kwargs: {
+            "ok": True,
+            "status": "ready",
+            "issues": [],
+            "contexts": [],
+            "snapshot_id": "test-snapshot",
+        },
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +81,202 @@ def fake_cutme_boundary(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(pipeline_module, "CutMeAdapter", FakeCutMeAdapter)
     return calls
+
+
+def test_dynamic_preflight_failure_has_no_render_or_cache_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    workspace = tmp_path / "workspace"
+    monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", workspace)
+    render_root = workspace / "project-23" / "render"
+    cache_manifest = render_root / "final-video-cache" / "clip-cache-manifest.json"
+    cache_manifest.parent.mkdir(parents=True)
+    sentinel = b"sentinel-cache-bytes"
+    cache_manifest.write_bytes(sentinel)
+    before_paths = sorted(path.relative_to(render_root) for path in render_root.rglob("*"))
+    calls = {"preflight": 0, "regenerate": 0, "prepare": 0, "cutme": 0}
+
+    class FakeWorkflow:
+        def dynamic_product_card_preflight(self, *args, **kwargs):
+            calls["preflight"] += 1
+            return {
+                "ok": False,
+                "status": "blocked",
+                "error_code": "master_unavailable",
+                "issues": [{"code": "invalid_product_price", "product_uid": "P001"}],
+                "contexts": [],
+                "snapshot_id": "snapshot-1",
+            }
+
+        def regenerate_product_card_images(self, *args, **kwargs):
+            calls["regenerate"] += 1
+            raise AssertionError("image regeneration must not run")
+
+        def prepare_product_recommendation_output(self, *args, **kwargs):
+            calls["prepare"] += 1
+            raise AssertionError("package preparation must not run")
+
+    class FakeCutMe:
+        def render_final(self, *args, **kwargs):
+            calls["cutme"] += 1
+            raise AssertionError("CutMe must not run")
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_dynamic_product_preflight",
+        REAL_DYNAMIC_PREFLIGHT,
+    )
+
+    result = run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=23,
+        account_label="xiaobo",
+        product_card_template_id="muban-test-1",
+        cutme_adapter=FakeCutMe(),
+        acceptance_mode="none",
+    )
+
+    assert result["ok"] is False
+    assert result["stage"] == "dynamic_product_preflight"
+    assert result["error_code"] == "master_unavailable"
+    assert calls == {"preflight": 1, "regenerate": 0, "prepare": 0, "cutme": 0}
+    assert cache_manifest.read_bytes() == sentinel
+    assert sorted(path.relative_to(render_root) for path in render_root.rglob("*")) == before_paths
+
+
+def test_dynamic_preflight_failure_does_not_create_render_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    workspace = tmp_path / "workspace"
+    monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", workspace)
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_dynamic_product_preflight",
+        REAL_DYNAMIC_PREFLIGHT,
+    )
+
+    result = run_final_video_pipeline(
+        object(),
+        project_id=24,
+        account_label="xiaobo",
+        product_card_template_id="muban-test-1",
+        acceptance_mode="none",
+    )
+
+    assert result["stage"] == "dynamic_product_preflight"
+    assert result["preflight"]["error_code"] == "dynamic_product_preflight_unavailable"
+    assert not (workspace / "project-24" / "render").exists()
+
+
+def test_dynamic_preflight_success_enters_existing_package_flow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    workspace = tmp_path / "workspace"
+    monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", workspace)
+    calls = {"preflight": 0, "prepare": 0}
+    frozen_contexts = [{"product_uid": "P001", "data_map": {"title": "Frozen"}}]
+    captured_kwargs = {}
+
+    class FakeWorkflow:
+        def dynamic_product_card_preflight(self, *args, **kwargs):
+            calls["preflight"] += 1
+            return {
+                "ok": True,
+                "issues": [],
+                "contexts": frozen_contexts,
+                "snapshot_id": "snapshot-1",
+            }
+
+        def prepare_product_recommendation_output(self, *args, **kwargs):
+            calls["prepare"] += 1
+            captured_kwargs.update(kwargs)
+            return {"ok": False, "missing": [{"kind": "expected-test-stop"}]}
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_dynamic_product_preflight",
+        REAL_DYNAMIC_PREFLIGHT,
+    )
+
+    result = run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=25,
+        account_label="xiaobo",
+        product_card_template_id="muban-test-1",
+        acceptance_mode="none",
+    )
+
+    assert calls == {"preflight": 1, "prepare": 1}
+    assert captured_kwargs["dynamic_product_contexts"] is frozen_contexts
+    assert captured_kwargs["master_snapshot_id"] == "snapshot-1"
+    assert result["stage"] == "render_package"
+    assert (workspace / "project-25" / "render").is_dir()
+
+
+@pytest.mark.parametrize(
+    "business_code",
+    ["master_unavailable", "invalid_product_card_template"],
+)
+def test_dynamic_preflight_preserves_business_error_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    business_code: str,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_dynamic_product_preflight",
+        REAL_DYNAMIC_PREFLIGHT,
+    )
+
+    class FakeWorkflow:
+        def dynamic_product_card_preflight(self, *args, **kwargs):
+            return {"ok": False, "error_code": business_code, "issues": [], "contexts": []}
+
+    result = run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=26,
+        account_label="xiaobo",
+        product_card_template_id="muban-test-1",
+        acceptance_mode="none",
+    )
+    assert result["error_code"] == business_code
+
+
+def test_dynamic_preflight_programming_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_dynamic_product_preflight",
+        REAL_DYNAMIC_PREFLIGHT,
+    )
+
+    class BrokenWorkflow:
+        def dynamic_product_card_preflight(self, *args, **kwargs):
+            raise AssertionError("programming bug")
+
+    with pytest.raises(AssertionError, match="programming bug"):
+        run_final_video_pipeline(
+            BrokenWorkflow(),
+            project_id=27,
+            account_label="xiaobo",
+            product_card_template_id="muban-test-1",
+            acceptance_mode="none",
+        )
 
 
 def test_run_final_video_pipeline_uses_one_adapter_call_and_preserves_cutme_result(
@@ -367,10 +587,6 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
     package_path.write_text(json.dumps(package), encoding="utf-8")
 
     class FakeWorkflow:
-        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):
-            calls.append(("images", project_id, account_label, mode, product_uid, product_card_template_id))
-            return {"ok": True, "regenerated": [{"uid": "P001"}], "skipped": []}
-
         def prepare_product_recommendation_output(
             self,
             project_id,
@@ -379,7 +595,6 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             output_mode,
             product_media_mode,
             product_order_strategy,
-            stale_product_image_policy,
             mode,
             top_uids,
             product_card_template_id,
@@ -389,6 +604,8 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             intro_video_text="",
             include_outro=False,
             closing_text="",
+            dynamic_product_contexts=None,
+            master_snapshot_id=None,
         ):
             calls.append(
                 (
@@ -398,13 +615,14 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
                     output_mode,
                     product_media_mode,
                     product_order_strategy,
-                    stale_product_image_policy,
                     mode,
                     top_uids,
                     product_card_template_id,
                     package_output_path,
                     subtitle_alignment,
-                )
+                    dynamic_product_contexts,
+                    master_snapshot_id,
+                    )
             )
             return {
                 "ok": True,
@@ -434,8 +652,6 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
         account_label="小燃",
         product_media_mode="video_preferred",
         product_order_strategy="stable",
-        product_image_mode="missing",
-        stale_product_image_policy="block",
         mode="standard",
         top_uids="",
         product_card_template_id="muban-xiaobo-1",
@@ -457,8 +673,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
         "product-video",
         "later-product",
     ]
-    assert calls[:2] == [
-        ("images", 3, "小燃", "missing", "", "muban-xiaobo-1"),
+    assert calls[:1] == [
         (
             "package",
             3,
@@ -466,12 +681,13 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             "final_mp4",
             "video_preferred",
             "stable",
-            "block",
             "standard",
             "",
             "muban-xiaobo-1",
             str(package_path),
             "asr",
+            [],
+            "test-snapshot",
         ),
     ]
     assert result["verification"]["ffprobe"]["duration"] == 10.0
@@ -506,6 +722,7 @@ def test_run_final_video_pipeline_renders_intro_and_outro_in_one_mp4_with_quick_
     job_package_path = tmp_path / "job" / "render-package.json"
     product_mp4 = tmp_path / "product.mp4"
     full_mp4 = tmp_path / "full.mp4"
+    formal_delivery_dir = tmp_path / "formal-delivery"
     intro_mp4 = tmp_path / "intro-subtitle.mp4"
     intro_mp4.write_bytes(b"intro")
     package_path.write_text(
@@ -553,6 +770,7 @@ def test_run_final_video_pipeline_renders_intro_and_outro_in_one_mp4_with_quick_
         intro_video_path=intro_mp4,
         intro_video_text="引言口播文字",
         full_output_path=full_mp4,
+        delivery_dir=formal_delivery_dir,
         acceptance_mode="quick",
         mode="top",
         top_uids="P001",
@@ -565,6 +783,8 @@ def test_run_final_video_pipeline_renders_intro_and_outro_in_one_mp4_with_quick_
     assert result["ok"] is True
     assert result["output_mp4"] == str(full_mp4)
     assert result["full_output_mp4"] == str(full_mp4)
+    assert full_mp4.is_file()
+    assert not list(formal_delivery_dir.glob("*.mp4"))
     assert result["full_output_mp4_link"] == f"[打开完整 MP4]({full_mp4.as_posix()})"
     assert result["acceptance_mode"] == "quick"
     assert result["verification"]["loudnorm"] is None
@@ -584,6 +804,60 @@ def test_run_final_video_pipeline_renders_intro_and_outro_in_one_mp4_with_quick_
     assert manifest["selection"]["mode"] == "top"
     assert manifest["selection"]["top_uids"] == ["P001"]
     assert manifest["reports"]["price_transition_report"]["items"][0]["after_top_products"] == 1
+
+
+def test_run_final_video_pipeline_keeps_explicit_output_with_intro_and_delivery_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    package_path = tmp_path / "render-package.json"
+    explicit_output = tmp_path / "requested" / "custom-final.mp4"
+    delivery_dir = tmp_path / "delivery"
+    intro_mp4 = tmp_path / "intro.mp4"
+    intro_mp4.write_bytes(b"intro")
+    package_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "1.0.0",
+                "segments": [{"type": "product_recommendation", "productUid": "P001", "duration": 3.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeWorkflow:
+        def prepare_product_recommendation_output(self, project_id, **kwargs):
+            return {
+                "ok": True,
+                "package_path": str(package_path),
+                "next": {"target_mp4": str(tmp_path / "ignored-default.mp4")},
+            }
+
+    result = run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=23,
+        account_label="小博",
+        package_output_path=package_path,
+        output_path=explicit_output,
+        delivery_dir=delivery_dir,
+        intro_video_path=intro_mp4,
+        intro_video_text="引言口播文字",
+        acceptance_mode="quick",
+        cutme_root=tmp_path,
+        probe_video=lambda path: {"duration": 3.0, "path": str(path)},
+        measure_loudness=lambda path: {"output_i": "-11.0"},
+    )
+
+    assert explicit_output.is_file()
+    assert result["output_mp4"] == str(explicit_output)
+    assert result["full_output_mp4"] == str(explicit_output)
+    assert not list(delivery_dir.glob("*.mp4"))
+    manifest = json.loads(Path(result["run_manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["outputs"]["product_mp4"] == str(explicit_output)
+    assert manifest["outputs"]["full_mp4"] == str(explicit_output)
 
 
 def test_run_final_video_pipeline_keeps_only_final_mp4_in_delivery_dir(
@@ -1099,8 +1373,8 @@ def test_run_final_video_pipeline_records_latest_run_in_pipeline(tmp_path: Path,
         pipeline_path,
         output_branch="final_mp4",
         account="小博",
-        product_card_template_id="muban-xiaobo-3",
-        product_media_mode="cover_only",
+        product_card_template_id="muban-xiaobo-1",
+        product_media_mode="video_preferred",
         product_order_strategy="price_segment_shuffle",
         mode="top",
         top_uids="P001",
@@ -1128,9 +1402,9 @@ def test_run_final_video_pipeline_records_latest_run_in_pipeline(tmp_path: Path,
         FakeWorkflow(),
         project_id=23,
         account_label="小博",
-        product_media_mode="cover_only",
+        product_media_mode="video_preferred",
         product_order_strategy="price_segment_shuffle",
-        product_card_template_id="muban-xiaobo-3",
+        product_card_template_id="muban-xiaobo-1",
         mode="top",
         top_uids="P001",
         package_output_path=package_path,
@@ -1152,7 +1426,7 @@ def test_run_final_video_pipeline_records_latest_run_in_pipeline(tmp_path: Path,
     assert saved["phases"]["assembly"]["run_manifest_path"] == result["run_manifest_path"]
     assert saved["phases"]["assembly"]["final_mp4_path"] == str(full_mp4)
     assert "product_only_mp4_path" not in saved["phases"]["assembly"]
-    assert saved["phases"]["assembly"]["product_card_template_id"] == "muban-xiaobo-3"
+    assert saved["phases"]["assembly"]["product_card_template_id"] == "muban-xiaobo-1"
     assert saved["phases"]["assembly"]["mode"] == "top"
     assert saved["phases"]["assembly"]["top_uids"] == ["P001"]
     assert saved["paths"]["manifest"] == result["run_manifest_path"]

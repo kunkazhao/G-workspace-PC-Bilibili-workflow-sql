@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from .settings import resolve_cutme_root
 VALIDATE_TIMEOUT_SECONDS = 60.0
 RENDER_FINAL_TIMEOUT_SECONDS = 7200.0
 RENDER_PRODUCT_CARD_TIMEOUT_SECONDS = 180.0
+RENDER_PRODUCT_CARDS_TIMEOUT_SECONDS = 1200.0
 MAX_DIAGNOSTIC_CHARS = 2048
 
 _SECRET_ASSIGNMENT = re.compile(
@@ -156,6 +158,65 @@ class CutMeAdapter:
             timeout=RENDER_PRODUCT_CARD_TIMEOUT_SECONDS,
             required_artifacts=("job_package_path", "output_path"),
         )
+
+    def render_product_cards(
+        self,
+        package_path: str | Path,
+        outputs: list[tuple[str, str | Path]],
+        *,
+        max_workers: int = 3,
+    ) -> dict[str, Any]:
+        package = Path(package_path).resolve()
+        normalized = [(str(uid).strip(), Path(path).resolve()) for uid, path in outputs]
+        if not normalized or any(not uid for uid, _path in normalized):
+            raise CutMeAdapterError(
+                "cutme_contract_invalid",
+                "render_product_cards requires at least one output with a product uid",
+            )
+        manifest_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=".json",
+                prefix="cutme-product-card-outputs-",
+                dir=package.parent,
+                delete=False,
+            ) as handle:
+                manifest_path = Path(handle.name)
+                json.dump(
+                    [
+                        {"product_uid": uid, "output_path": str(output)}
+                        for uid, output in normalized
+                    ],
+                    handle,
+                    ensure_ascii=False,
+                )
+            result = self._invoke(
+                [
+                    "render-product-cards",
+                    "--package",
+                    str(package),
+                    "--outputs-json",
+                    str(manifest_path),
+                    "--workers",
+                    str(max(1, min(int(max_workers), 4))),
+                ],
+                operation="render_product_cards",
+                timeout=RENDER_PRODUCT_CARDS_TIMEOUT_SECONDS,
+                required_artifacts=("job_package_path",),
+            )
+        finally:
+            if manifest_path is not None:
+                manifest_path.unlink(missing_ok=True)
+        missing = [str(path) for _uid, path in normalized if not path.is_file()]
+        if missing:
+            raise CutMeAdapterError(
+                "cutme_artifact_missing",
+                f"CutMe product-card batch is missing outputs: {missing}",
+                result=result,
+            )
+        return result
 
     def _invoke(
         self,

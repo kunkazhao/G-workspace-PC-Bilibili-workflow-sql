@@ -1,18 +1,102 @@
 from __future__ import annotations
 
+import json
+from io import BytesIO
 from pathlib import Path
+
+import pytest
+from PIL import Image
 
 from bworkflow_sql.db import Database
 from bworkflow_sql.render_package_builder import (
     _product_motion_seed,
     _price_transition_sound_effects,
-    build_product_recommendation_package,
-    product_card_content_fingerprint,
+    build_product_recommendation_package as _build_product_recommendation_package,
 )
 from bworkflow_sql.repositories import Repository
 from bworkflow_sql.subtitle_rules import split_subtitle_text
 from bworkflow_sql.template_config import get_remotion_template_metadata
 from bworkflow_sql.utils import now_iso, text_hash
+
+
+def _contexts_for_builder_test(db: Database, project_id: int) -> list[dict[str, object]]:
+    import bworkflow_sql.render_package_builder as builder
+
+    repo = Repository(db)
+    products = repo.products(project_id, include_removed=False)
+    blocks = {
+        str(item.get("owner_uid") or ""): item
+        for item in repo.script_blocks(project_id)
+        if item.get("script_type") == "product"
+    }
+    price_blocks = [
+        item for item in repo.script_blocks(project_id)
+        if item.get("script_type") == "price_transition"
+    ]
+    assets = repo.asset_bindings(project_id)
+    root = Path(db.path).parent / "dynamic-context-assets"
+    root.mkdir(parents=True, exist_ok=True)
+    contexts: list[dict[str, object]] = []
+    for product in products:
+        uid = str(product.get("uid") or "")
+        block = blocks[uid]
+        voice = next(
+            item for item in assets
+            if item.get("asset_type") == "voice"
+            and item.get("uid") == uid
+            and int(item.get("script_block_id") or 0) == int(block.get("id") or 0)
+        )
+        video = next(
+            (
+                item for item in assets
+                if item.get("asset_type") == "video"
+                and item.get("uid") == uid
+                and Path(str(item.get("path") or "")).is_file()
+            ),
+            None,
+        )
+        if video:
+            media_kind = "video"
+            media_asset = str(video["path"])
+        else:
+            cover = root / f"{uid}.png"
+            cover.write_bytes(b"dynamic cover")
+            media_kind = "cover"
+            media_asset = str(cover)
+        raw_card = str(product.get("product_card_json") or "")
+        card = json.loads(raw_card) if raw_card else {}
+        raw_data = card.get("dataMap") if isinstance(card.get("dataMap"), dict) else {}
+        price_band = builder._matching_price_label(product, price_blocks) or str(
+            product.get("price_label") or "test-price-band"
+        )
+        contexts.append(
+            {
+                "product_uid": uid,
+                "data_map": {
+                    "title": str(product.get("title") or uid),
+                    "displayPrice": f"{builder._first_number(str(product.get('price_label') or '0')) or 0:g}元",
+                    "review": str(raw_data.get("remark") or ""),
+                    "priceBandLabel": price_band,
+                    "categoryLabel": "test-category",
+                    "productMedia": media_asset,
+                },
+                "specs": card.get("slots") if isinstance(card.get("slots"), list) else [],
+                "media_kind": media_kind,
+                "media_asset": media_asset,
+                "voice_asset": str(voice["path"]),
+                "spoken_text": str(block.get("body") or ""),
+                "source_script_block_id": int(block.get("id") or 0),
+            }
+        )
+    return contexts
+
+
+def build_product_recommendation_package(db: Database, **kwargs):
+    if kwargs.get("output_mode") == "final_mp4" and "dynamic_product_contexts" not in kwargs:
+        project_id = int(kwargs["project_id"])
+        kwargs["dynamic_product_contexts"] = _contexts_for_builder_test(db, project_id)
+        kwargs["master_snapshot_id"] = f"test-snapshot-{project_id}"
+    return _build_product_recommendation_package(db, **kwargs)
 
 
 def _seed_project(tmp_path: Path) -> tuple[Database, int]:
@@ -303,7 +387,54 @@ def _seed_price_group_package_data(tmp_path: Path) -> tuple[Database, int]:
     return db, project_id
 
 
-def test_build_product_recommendation_package_from_ready_assets(
+def _dynamic_contexts(tmp_path: Path) -> list[dict[str, object]]:
+    second_cover = tmp_path / "assets" / "P002-cover.png"
+    second_cover.write_bytes(b"cover")
+    return [
+        {
+            "product_uid": "P001",
+            "data_map": {
+                "title": "Frozen Alpha",
+                "displayPrice": "299元",
+                "review": "Frozen review",
+                "priceBandLabel": "200-300",
+                "categoryLabel": "机械键盘",
+                "productMedia": str(tmp_path / "assets" / "P001.mp4"),
+            },
+            "specs": [{"label": "轴体", "value": "银轴"}],
+            "media_kind": "video",
+            "media_asset": str(tmp_path / "assets" / "P001.mp4"),
+            "voice_asset": str(tmp_path / "assets" / "P001.wav"),
+            "spoken_text": "Frozen Alpha voice text.",
+            "source_script_block_id": 101,
+        },
+        {
+            "product_uid": "P002",
+            "data_map": {
+                "title": "Frozen Beta",
+                "displayPrice": "259元",
+                "review": "",
+                "priceBandLabel": "200-300",
+                "categoryLabel": "机械键盘",
+                "productMedia": str(second_cover),
+            },
+            "specs": [],
+            "media_kind": "cover",
+            "media_asset": str(second_cover),
+            "voice_asset": str(tmp_path / "assets" / "P002.wav"),
+            "spoken_text": "Frozen Beta voice text.",
+            "source_script_block_id": 102,
+        },
+    ]
+
+
+def _encoded_image_bytes(image_format: str = "PNG") -> bytes:
+    output = BytesIO()
+    Image.new("RGB", (4, 3), (12, 34, 56)).save(output, format=image_format)
+    return output.getvalue()
+
+
+def test_final_mp4_uses_only_frozen_dynamic_contexts_and_no_product_png(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -311,50 +442,146 @@ def test_build_product_recommendation_package_from_ready_assets(
 
     db, project_id = _seed_ready_package_data(tmp_path)
     monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    monkeypatch.setattr(builder, "_price_transition_sound_effects", lambda: {})
 
     result = build_product_recommendation_package(
         db,
         project_id=project_id,
         account_label="小博",
-        output_mode="jianying_draft",
+        output_mode="final_mp4",
         product_order_strategy="stable",
+        subtitle_alignment="proportional",
+        dynamic_product_contexts=_dynamic_contexts(tmp_path),
+        master_snapshot_id="snapshot-frozen-1",
     )
 
     assert result.missing == []
-    assert result.package["schemaVersion"] == "1.0.0"
-    assert result.package["output"]["mode"] == "jianying_draft"
-    assert result.package["approval"]["productRecommendationBatch"]["status"] == "pending"
-    assert [segment["type"] for segment in result.package["segments"]] == [
-        "price_transition",
-        "product_recommendation",
-        "product_recommendation",
-    ]
-    price_transition = result.package["segments"][0]
-    assert price_transition["priceTransitionCard"]["rangeLabel"] == "200-300"
-    assert price_transition["priceTransitionCard"]["keyPoints"]
+    assert result.package["project"]["masterSnapshotId"] == "snapshot-frozen-1"
     products = [
-        segment
-        for segment in result.package["segments"]
-        if segment["type"] == "product_recommendation"
+        item for item in result.package["segments"]
+        if item["type"] == "product_recommendation"
     ]
-    assert [segment["productUid"] for segment in products] == ["P001", "P002"]
-    assert products[0]["videoAsset"]
-    assert products[1]["videoAsset"] is None
-    product_card = products[0]["productCard"]
-    assert product_card["templateId"] == "muban-xiaobo-1"
-    assert product_card["templateVersion"] == "1.0.2"
-    assert product_card["dataMap"]["title"] == "Alpha Keyboard"
-    assert product_card["dataMap"]["price"] == "200-300"
-    assert product_card["dataMap"]["remark"] == "A compact keyboard with stable wireless connection."
-    assert product_card["coverAsset"].endswith("P001.png")
-    assert "fallbackImageAsset" not in product_card
-    assert product_card["slots"] == [
-        {"label": "switch", "value": "silver"},
-        {"label": "battery", "value": "4000mAh"},
+    assert [item["productUid"] for item in products] == ["P001", "P002"]
+    first = products[0]
+    assert "imageCardAsset" not in first
+    assert "image" not in first.get("assetBindingIds", {})
+    assert first["productMediaMode"] == "video_preferred"
+    assert first["productTitle"] == "Frozen Alpha"
+    assert first["spokenText"] == "Frozen Alpha voice text."
+    assert first["sourceScriptBlockId"] == 101
+    assert first["productCard"]["dataMap"] == {
+        "title": "Frozen Alpha",
+        "displayPrice": "299元",
+        "review": "Frozen review",
+        "priceBandLabel": "200-300",
+        "categoryLabel": "机械键盘",
+    }
+    assert first["productCard"]["slots"] == [{"label": "轴体", "value": "银轴"}]
+    assert first["priceRangeLabel"] == "200-300"
+    assert first["videoAsset"].endswith("P001.mp4")
+    assert "coverAsset" not in first["productCard"]
+    second = products[1]
+    assert "videoAsset" not in second
+    assert second["productCard"]["coverAsset"].endswith("P002-cover.png")
+
+
+def test_final_mp4_rejects_missing_duplicate_and_unknown_dynamic_contexts(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    monkeypatch.setattr(builder, "_price_transition_sound_effects", lambda: {})
+    contexts = _dynamic_contexts(tmp_path)
+
+    for malformed in (
+        contexts[:1],
+        [contexts[0], contexts[0]],
+        [*contexts, {**contexts[0], "product_uid": "UNKNOWN"}],
+    ):
+        result = build_product_recommendation_package(
+            db,
+            project_id=project_id,
+            account_label="小博",
+            output_mode="final_mp4",
+            product_order_strategy="stable",
+            subtitle_alignment="proportional",
+            dynamic_product_contexts=malformed,
+            master_snapshot_id="snapshot-frozen-1",
+        )
+        assert any(item["kind"] == "dynamic_product_context" for item in result.missing)
+        assert not any(
+            item["type"] == "product_recommendation"
+            for item in result.package["segments"]
+        )
+
+
+def test_final_context_validation_aggregates_before_any_remote_cover_mutation(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    contexts = _contexts_for_builder_test(db, project_id)
+    remote_url = "https://img.example.com/covers/P001.jpg"
+    contexts[0]["media_kind"] = "cover"
+    contexts[0]["media_asset"] = remote_url
+    contexts[1]["data_map"] = {
+        **contexts[1]["data_map"],
+        "title": 123,
+        "review": [],
+    }
+    contexts[1]["specs"] = [
+        {"label": ["not", "text"], "value": "valid"},
+        {"label": "valid", "value": 42},
     ]
-    assert "productCard" not in products[1]
-    assert all(Path(segment["voiceAsset"]).is_absolute() for segment in result.package["segments"])
-    assert all(Path(segment["imageCardAsset"]).is_absolute() for segment in products)
+    contexts[1]["spoken_text"] = ["not", "text"]
+    contexts[1]["source_script_block_id"] = {}
+    contexts[1]["media_kind"] = True
+    contexts[1]["media_asset"] = []
+    contexts[1]["voice_asset"] = 123
+    cache_root = tmp_path / "cover-cache"
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", cache_root)
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    target = builder._cover_cache_path(category="keyboard", uid="P001", url=remote_url)
+    target.parent.mkdir(parents=True)
+    sentinel = b"cache-must-not-be-inspected-before-all-contexts-validate"
+    target.write_bytes(sentinel)
+    downloads = []
+    monkeypatch.setattr(builder, "_download_url_bytes", lambda url: downloads.append(url))
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+        product_order_strategy="stable",
+        subtitle_alignment="proportional",
+        dynamic_product_contexts=contexts,
+        master_snapshot_id="snapshot-invalid-context",
+    )
+
+    issue_fields = {item.get("field") for item in result.missing}
+    assert {
+        "data_map.title",
+        "data_map.review",
+        "specs[0].label",
+        "specs[1].value",
+        "spoken_text",
+        "source_script_block_id",
+        "media_kind",
+        "media_asset",
+        "voice_asset",
+    }.issubset(issue_fields)
+    assert downloads == []
+    assert target.read_bytes() == sentinel
+    assert not any(
+        item["type"] == "product_recommendation"
+        for item in result.package["segments"]
+    )
 
 
 def test_final_mp4_builds_one_batch_with_deterministic_whole_video_outro(
@@ -499,7 +726,6 @@ def test_final_mp4_package_can_align_subtitles_with_asr(
     import bworkflow_sql.render_package_builder as builder
 
     db, project_id = _seed_ready_package_data(tmp_path)
-    monkeypatch.setattr(builder, "resolve_product_card_template", lambda *_args, **_kwargs: {})
     text = "Alpha first. Beta second."
     with db.connect() as conn:
         conn.execute(
@@ -826,151 +1052,6 @@ def test_structured_price_transition_timings_are_rebased_to_asr_subtitles():
     assert starts == sorted(starts)
 
 
-def test_build_product_recommendation_package_reports_stale_product_image(
-    tmp_path: Path,
-    monkeypatch,
-):
-    import bworkflow_sql.render_package_builder as builder
-
-    db, project_id = _seed_ready_package_data(tmp_path)
-    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
-    with db.connect() as conn:
-        conn.execute(
-            "UPDATE asset_bindings SET text_hash='old-card-fingerprint' WHERE asset_type='image' AND uid='P001'"
-        )
-
-    result = build_product_recommendation_package(
-        db,
-        project_id=project_id,
-        account_label="小博",
-        output_mode="jianying_draft",
-    )
-
-    stale = result.stale_product_images
-    product = next(
-        segment
-        for segment in result.package["segments"]
-        if segment.get("productUid") == "P001"
-    )
-
-    assert result.missing == []
-    assert len(stale) == 1
-    assert stale[0]["kind"] == "stale_product_image"
-    assert stale[0]["uid"] == "P001"
-    assert stale[0]["stored_fingerprint"] == "old-card-fingerprint"
-    assert stale[0]["expected_fingerprint"] == product_card_content_fingerprint(
-        {"uid": "P001", "title": "Alpha Keyboard", "price_label": "200-300"},
-        product["productCard"],
-    )
-    assert product["productCardFingerprint"] == stale[0]["expected_fingerprint"]
-
-
-def test_build_product_recommendation_package_prefers_selected_template_image_binding(
-    tmp_path: Path,
-    monkeypatch,
-):
-    import bworkflow_sql.render_package_builder as builder
-
-    db, project_id = _seed_ready_package_data(tmp_path)
-    account_label = get_remotion_template_metadata("muban-xiaobo-2")["account"]
-    selected_image = tmp_path / "assets" / account_label / "模板2" / "P001.png"
-    _insert_asset(
-        db,
-        project_id,
-        uid="P001",
-        asset_type="image",
-        path=selected_image,
-        account_label=account_label,
-    )
-    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
-
-    result = build_product_recommendation_package(
-        db,
-        project_id=project_id,
-        account_label=account_label,
-        output_mode="jianying_draft",
-        product_card_template_id="muban-xiaobo-2",
-    )
-
-    product = next(
-        segment
-        for segment in result.package["segments"]
-        if segment.get("productUid") == "P001"
-    )
-
-    assert product["imageCardAsset"] == str(selected_image)
-    assert product["productCard"]["templateId"] == "muban-xiaobo-2"
-
-
-def test_build_product_recommendation_package_can_force_cover_only_media(
-    tmp_path: Path,
-    monkeypatch,
-):
-    import bworkflow_sql.render_package_builder as builder
-
-    db, project_id = _seed_ready_package_data(tmp_path)
-    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
-
-    result = build_product_recommendation_package(
-        db,
-        project_id=project_id,
-        account_label="小博",
-        output_mode="final_mp4",
-        product_media_mode="cover_only",
-    )
-
-    products = [
-        segment
-        for segment in result.package["segments"]
-        if segment["type"] == "product_recommendation"
-    ]
-    assert result.package["output"]["productMediaMode"] == "cover_only"
-    assert products[0]["productMediaMode"] == "cover_only"
-    assert products[0]["videoAsset"] is None
-
-
-def test_build_package_adds_display_video_slot_without_product_card(
-    tmp_path: Path,
-    monkeypatch,
-):
-    import bworkflow_sql.render_package_builder as builder
-
-    db, project_id = _seed_ready_package_data(tmp_path)
-    image_path = tmp_path / "素材-商品ppt图片" / "keyboard" / "小博" / "模板2" / "P001.png"
-    image_path.parent.mkdir(parents=True, exist_ok=True)
-    image_path.write_bytes(b"image")
-    with db.connect() as conn:
-        conn.execute("UPDATE products SET product_card_json='' WHERE project_id=? AND uid='P001'", (project_id,))
-        conn.execute(
-            "UPDATE asset_bindings SET path=? WHERE project_id=? AND asset_type='image' AND uid='P001'",
-            (str(image_path), project_id),
-        )
-    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
-
-    result = build_product_recommendation_package(
-        db,
-        project_id=project_id,
-        account_label="小博",
-        output_mode="final_mp4",
-        product_media_mode="video_preferred",
-    )
-
-    product = next(segment for segment in result.package["segments"] if segment.get("productUid") == "P001")
-
-    assert "productCard" not in product
-    assert product["videoAsset"]
-    assert product["displayTemplate"] == "小博-模板2"
-    assert product["displayVideoSlot"] == {
-        "x": 1015,
-        "y": 154,
-        "width": 680,
-        "height": 520,
-        "display_scale": 0.52,
-        "sourceWidth": 1920,
-        "sourceHeight": 1080,
-    }
-
-
 def test_build_product_recommendation_package_orders_price_groups_after_top_products(
     tmp_path: Path,
     monkeypatch,
@@ -1130,44 +1211,7 @@ def test_build_product_recommendation_package_does_not_shuffle_when_no_price_gro
     ]
 
 
-def test_build_final_mp4_package_uses_product_card_without_legacy_image(
-    tmp_path: Path,
-    monkeypatch,
-):
-    import bworkflow_sql.render_package_builder as builder
-
-    db, project_id = _seed_ready_package_data(tmp_path)
-    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
-    with db.connect() as conn:
-        conn.execute("UPDATE asset_bindings SET status='missing' WHERE asset_type='image' AND uid='P001'")
-        account_label = conn.execute(
-            "SELECT account_label FROM asset_bindings WHERE asset_type='voice' AND uid='P001'"
-        ).fetchone()[0]
-
-    result = build_product_recommendation_package(
-        db,
-        project_id=project_id,
-        account_label=account_label,
-        output_mode="final_mp4",
-    )
-
-    product = next(
-        segment
-        for segment in result.package["segments"]
-        if segment.get("productUid") == "P001"
-    )
-
-    assert not any(
-        item["kind"] == "product_image" and item["uid"] == "P001"
-        for item in result.missing
-    )
-    assert product["imageCardAsset"] is None
-    assert product["assetBindingIds"]["image"] is None
-    assert product["productCard"]["coverAsset"].endswith("P001.png")
-    assert "fallbackImageAsset" not in product["productCard"]
-
-
-def test_build_package_overrides_legacy_product_card_template_with_account_remotion_template(
+def test_build_package_uses_account_remotion_product_card_template(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -1190,7 +1234,7 @@ def test_build_package_overrides_legacy_product_card_template_with_account_remot
     )
 
     assert product["productCard"]["templateId"] == "muban-xiaobo-1"
-    assert product["productCard"]["templateVersion"] == "1.0.2"
+    assert product["productCard"]["templateVersion"] == "1.1.1"
     assert result.package["output"]["productCardTemplateId"] == "muban-xiaobo-1"
     assert product["productCard"]["coverMediaSlot"]["x"] == 442
     assert product["productCard"]["cardPlacement"] == {
@@ -1222,7 +1266,8 @@ def test_build_package_passes_rongrong_2_video_overlay_slot_to_cutme():
     assert product_card is not None
     assert product_card["templateId"] == "muban-rongrong-2"
     assert product_card["coverMediaSlot"]["height"] == 340
-    assert product_card["videoOverlaySlot"]["height"] == 260
+    assert product_card["videoOverlaySlot"]["height"] == 220
+    assert product_card["videoOverlaySlot"]["clearSlot"]["height"] == 340
 
 
 def test_build_package_records_explicit_product_card_template_selection(
@@ -1246,7 +1291,7 @@ def test_build_package_records_explicit_product_card_template_selection(
     assert result.package["output"]["productCardTemplate"] == {
         "id": "muban-xiaobo-1",
         "displayName": get_remotion_template_metadata("muban-xiaobo-1")["displayName"],
-        "version": "1.0.2",
+        "version": "1.1.1",
         "confirmed": True,
         "selectionSource": "explicit",
     }
@@ -1272,7 +1317,7 @@ def test_build_package_marks_account_default_template_as_compatibility_fallback(
     assert result.package["output"]["productCardTemplate"] == {
         "id": "muban-xiaobo-1",
         "displayName": get_remotion_template_metadata("muban-xiaobo-1")["displayName"],
-        "version": "1.0.2",
+        "version": "1.1.1",
         "confirmed": False,
         "selectionSource": "account_default_compat",
     }
@@ -1285,23 +1330,27 @@ def test_build_product_recommendation_package_downloads_remote_cover_to_category
     import bworkflow_sql.render_package_builder as builder
 
     db, project_id = _seed_ready_package_data(tmp_path)
-    with db.connect() as conn:
-        conn.execute(
-            "UPDATE products SET product_card_json=? WHERE project_id=? AND uid='P001'",
-            (
-                '{"coverAsset":"https://img.example.com/covers/P001.webp","dataMap":{"title":"Alpha Keyboard","price":"200-300","cover":"https://img.example.com/covers/P001.webp"},"slots":[]}',
-                project_id,
-            ),
-        )
+    contexts = _contexts_for_builder_test(db, project_id)
+    contexts[0]["media_kind"] = "cover"
+    contexts[0]["media_asset"] = "https://img.example.com/covers/P001.webp"
     monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
     monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", tmp_path / "cover-cache")
-    monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: b"cover-bytes")
+    png_bytes = _encoded_image_bytes()
+    download_calls = []
+
+    def download(_url):
+        download_calls.append(_url)
+        return png_bytes
+
+    monkeypatch.setattr(builder, "_download_url_bytes", download)
 
     result = build_product_recommendation_package(
         db,
         project_id=project_id,
         account_label="小博",
         output_mode="final_mp4",
+        dynamic_product_contexts=contexts,
+        master_snapshot_id="snapshot-remote-cover",
     )
 
     product = next(
@@ -1315,9 +1364,15 @@ def test_build_product_recommendation_package_downloads_remote_cover_to_category
         category="keyboard",
         uid="P001",
         url="https://img.example.com/covers/P001.webp",
-    )
-    assert cover_path.read_bytes() == b"cover-bytes"
-    assert product["productCard"]["dataMap"]["cover"] == str(cover_path)
+    ).with_suffix(".png")
+    assert cover_path.read_bytes() == png_bytes
+    assert "cover" not in product["productCard"]["dataMap"]
+    assert builder._ensure_remote_cover_cached(
+        "https://img.example.com/covers/P001.webp",
+        category="keyboard",
+        uid="P001",
+    ) == cover_path
+    assert len(download_calls) == 1
 
 
 def test_build_product_recommendation_package_downloads_data_map_cover_url(
@@ -1327,23 +1382,21 @@ def test_build_product_recommendation_package_downloads_data_map_cover_url(
     import bworkflow_sql.render_package_builder as builder
 
     db, project_id = _seed_ready_package_data(tmp_path)
-    with db.connect() as conn:
-        conn.execute(
-            "UPDATE products SET product_card_json=? WHERE project_id=? AND uid='P001'",
-            (
-                '{"dataMap":{"title":"Alpha Keyboard","price":"200-300","cover":"https://img.example.com/covers/P001.jpg"},"slots":[]}',
-                project_id,
-            ),
-        )
+    contexts = _contexts_for_builder_test(db, project_id)
+    contexts[0]["media_kind"] = "cover"
+    contexts[0]["media_asset"] = "https://img.example.com/covers/P001.jpg"
     monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
     monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", tmp_path / "cover-cache")
-    monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: b"cover-bytes")
+    jpeg_bytes = _encoded_image_bytes("JPEG")
+    monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: jpeg_bytes)
 
     result = build_product_recommendation_package(
         db,
         project_id=project_id,
         account_label="小博",
         output_mode="final_mp4",
+        dynamic_product_contexts=contexts,
+        master_snapshot_id="snapshot-data-map-cover",
     )
 
     product = next(
@@ -1358,7 +1411,239 @@ def test_build_product_recommendation_package_downloads_data_map_cover_url(
     )
 
     assert product["productCard"]["coverAsset"] == str(cover_path)
-    assert product["productCard"]["dataMap"]["cover"] == str(cover_path)
+    assert "cover" not in product["productCard"]["dataMap"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        b"<html><body>200 OK but not an image</body></html>",
+        b"RIFF\x10\x00\x00\x00WEBPbroken",
+        b"\xff\xd8\xff\xe0truncated-jpeg",
+    ),
+    ids=("html-200", "broken-webp", "truncated-jpeg"),
+)
+def test_formal_remote_cover_rejects_invalid_payload_without_cache_or_package(
+    tmp_path: Path,
+    monkeypatch,
+    payload: bytes,
+):
+    import bworkflow_sql.render_package_builder as builder
+    import bworkflow_sql.workflow_service as workflow_service
+    from bworkflow_sql.workflow_service import WorkflowService
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    contexts = _contexts_for_builder_test(db, project_id)
+    url = "https://img.example.com/covers/P001.jpg"
+    contexts[0]["media_kind"] = "cover"
+    contexts[0]["media_asset"] = url
+    cache_root = tmp_path / "cover-cache"
+    output = tmp_path / "formal-render-package.json"
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    monkeypatch.setattr(builder, "_price_transition_sound_effects", lambda: {})
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", cache_root)
+    monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: payload)
+    monkeypatch.setattr(workflow_service, "_product_card_text_capacity_issues", lambda **_kwargs: [])
+
+    result = WorkflowService(db).prepare_product_recommendation_output(
+        project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+        product_order_strategy="stable",
+        package_output_path=output,
+        subtitle_alignment="proportional",
+        dynamic_product_contexts=contexts,
+        master_snapshot_id="snapshot-invalid-cover",
+    )
+
+    assert result["ok"] is False
+    assert any(
+        item["kind"] == "product_cover"
+        and item["uid"] == "P001"
+        and "P001" in item["message"]
+        and url in item["message"]
+        for item in result["missing"]
+    )
+    target = builder._cover_cache_path(category="keyboard", uid="P001", url=url)
+    assert not target.exists()
+    assert not target.with_suffix(".png").exists()
+    assert not list(target.parent.glob("*.tmp"))
+    assert not output.exists()
+
+
+def test_formal_remote_cover_download_failure_is_uid_scoped_missing(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    contexts = _contexts_for_builder_test(db, project_id)
+    contexts[0]["media_kind"] = "cover"
+    contexts[0]["media_asset"] = "https://img.example.com/covers/P001.jpg"
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", tmp_path / "cover-cache")
+
+    def fail_download(_url):
+        raise OSError("network unavailable")
+
+    monkeypatch.setattr(builder, "_download_url_bytes", fail_download)
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+        dynamic_product_contexts=contexts,
+        master_snapshot_id="snapshot-download-failure",
+    )
+
+    assert any(
+        item["kind"] == "product_cover"
+        and item["uid"] == "P001"
+        and "failed to cache product cover" in item["message"]
+        for item in result.missing
+    )
+
+
+def test_remote_cover_atomic_replace_failure_cleans_temporary_file(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    url = "https://img.example.com/covers/P001.png"
+    cache_root = tmp_path / "cover-cache"
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", cache_root)
+    monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: _encoded_image_bytes())
+
+    def fail_replace(self, target):
+        raise OSError("replace denied")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+
+    with pytest.raises(
+        builder.ProductCoverMaterializationError,
+        match=r"P001.*https://img\.example\.com/covers/P001\.png.*replace denied",
+    ):
+        builder._ensure_remote_cover_cached(url, category="keyboard", uid="P001")
+
+    target = builder._cover_cache_path(category="keyboard", uid="P001", url=url)
+    assert not target.exists()
+    assert not list(target.parent.glob("*.tmp"))
+
+
+def test_corrupt_remote_cover_cache_is_replaced_by_valid_redownload(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    url = "https://img.example.com/covers/P001.jpg"
+    cache_root = tmp_path / "cover-cache"
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", cache_root)
+    target = builder._cover_cache_path(category="keyboard", uid="P001", url=url)
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"<html>corrupt cache</html>")
+    valid_jpeg = _encoded_image_bytes("JPEG")
+    downloads = []
+
+    def download(_url):
+        downloads.append(_url)
+        return valid_jpeg
+
+    monkeypatch.setattr(builder, "_download_url_bytes", download)
+
+    resolved = builder._ensure_remote_cover_cached(url, category="keyboard", uid="P001")
+
+    assert resolved == target
+    assert target.read_bytes() == valid_jpeg
+    assert downloads == [url]
+
+
+def test_remote_cover_cache_read_error_preserves_candidate(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    url = "https://img.example.com/covers/P001.jpg"
+    cache_root = tmp_path / "cover-cache"
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", cache_root)
+    target = builder._cover_cache_path(category="keyboard", uid="P001", url=url)
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"unreadable-sentinel")
+    original_read_bytes = Path.read_bytes
+
+    def fail_target_read(path):
+        if path == target:
+            raise PermissionError("read denied")
+        return original_read_bytes(path)
+
+    downloads = []
+    monkeypatch.setattr(Path, "read_bytes", fail_target_read)
+    monkeypatch.setattr(builder, "_download_url_bytes", lambda value: downloads.append(value))
+
+    with pytest.raises(builder.ProductCoverMaterializationError, match="read denied"):
+        builder._ensure_remote_cover_cached(url, category="keyboard", uid="P001")
+
+    assert target.exists()
+    assert downloads == []
+
+
+def test_failed_remote_cover_call_does_not_delete_concurrent_valid_cache(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    url = "https://img.example.com/covers/P001.jpg"
+    cache_root = tmp_path / "cover-cache"
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", cache_root)
+    target = builder._cover_cache_path(category="keyboard", uid="P001", url=url)
+    valid_jpeg = _encoded_image_bytes("JPEG")
+
+    def interleaved_failure(_url):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(valid_jpeg)
+        raise OSError("first caller failed after another caller completed")
+
+    monkeypatch.setattr(builder, "_download_url_bytes", interleaved_failure)
+
+    with pytest.raises(builder.ProductCoverMaterializationError):
+        builder._ensure_remote_cover_cached(url, category="keyboard", uid="P001")
+
+    assert target.read_bytes() == valid_jpeg
+
+
+def test_two_successful_remote_cover_calls_share_atomic_cache(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from concurrent.futures import ThreadPoolExecutor
+    import bworkflow_sql.render_package_builder as builder
+
+    url = "https://img.example.com/covers/P001.png"
+    cache_root = tmp_path / "cover-cache"
+    valid_png = _encoded_image_bytes("PNG")
+    monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", cache_root)
+    monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: valid_png)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda _index: builder._ensure_remote_cover_cached(
+                    url,
+                    category="keyboard",
+                    uid="P001",
+                ),
+                range(2),
+            )
+        )
+
+    assert results[0] == results[1]
+    assert results[0].read_bytes() == valid_png
+    assert not list(results[0].parent.glob("*.tmp"))
 
 
 def test_remote_cover_cache_path_changes_when_url_changes_but_suffix_does_not(
@@ -1387,14 +1672,16 @@ def test_remote_cover_cache_path_changes_when_url_changes_but_suffix_does_not(
     assert new_path.suffix == ".jpg"
 
 
-def test_remote_cover_cache_uses_detected_webp_suffix_when_url_ends_with_jpg(
+def test_remote_cover_cache_decodes_webp_as_png_when_url_ends_with_jpg(
     tmp_path: Path,
     monkeypatch,
 ):
     import bworkflow_sql.render_package_builder as builder
 
     monkeypatch.setattr(builder, "PRODUCT_COVER_CACHE_ROOT", tmp_path / "cover-cache")
-    webp_bytes = b"RIFF\x08\x00\x00\x00WEBPVP8 "
+    webp_buffer = BytesIO()
+    Image.new("RGBA", (3, 2), (12, 34, 56, 128)).save(webp_buffer, format="WEBP", lossless=True)
+    webp_bytes = webp_buffer.getvalue()
     monkeypatch.setattr(builder, "_download_url_bytes", lambda _url: webp_bytes)
 
     cover_path = builder._ensure_remote_cover_cached(
@@ -1403,11 +1690,13 @@ def test_remote_cover_cache_uses_detected_webp_suffix_when_url_ends_with_jpg(
         uid="P001",
     )
 
-    assert cover_path.suffix == ".webp"
-    assert cover_path.read_bytes() == webp_bytes
+    assert cover_path.suffix == ".png"
+    with Image.open(cover_path) as decoded:
+        assert decoded.format == "PNG"
+        assert decoded.size == (3, 2)
 
 
-def test_build_product_recommendation_package_reports_missing_required_assets(
+def test_build_product_recommendation_package_reports_missing_price_voice(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -1416,24 +1705,16 @@ def test_build_product_recommendation_package_reports_missing_required_assets(
     db, project_id = _seed_ready_package_data(tmp_path)
     monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
     with db.connect() as conn:
-        conn.execute("UPDATE asset_bindings SET status='missing' WHERE asset_type='image' AND uid='P001'")
-        conn.execute("UPDATE asset_bindings SET status='missing' WHERE asset_type='voice' AND uid='P002'")
         conn.execute("UPDATE asset_bindings SET status='missing' WHERE asset_type='voice' AND uid='PRICE_TRANSITION'")
 
     result = build_product_recommendation_package(
         db,
         project_id=project_id,
         account_label="小博",
-        output_mode="jianying_draft",
+        output_mode="final_mp4",
     )
 
-    assert {item["kind"] for item in result.missing} == {
-        "product_image",
-        "product_voice",
-        "price_voice",
-    }
-    assert any(item["uid"] == "P001" for item in result.missing)
-    assert any(item["uid"] == "P002" for item in result.missing)
+    assert {item["kind"] for item in result.missing} == {"price_voice"}
 
 
 def test_build_product_recommendation_package_skips_missing_price_script(
@@ -1451,7 +1732,7 @@ def test_build_product_recommendation_package_skips_missing_price_script(
         db,
         project_id=project_id,
         account_label="小博",
-        output_mode="jianying_draft",
+        output_mode="final_mp4",
     )
 
     assert result.missing == []

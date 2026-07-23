@@ -101,7 +101,7 @@ Workflow:
 
 - 生成配音
 - 组合口播稿
-- 生成剪映草稿
+- 动态商品卡预检并生成 Remotion MP4
 
 Tools:
 
@@ -116,7 +116,7 @@ The UI is intentionally direct and database-first. JSON/Markdown support is comp
 2. Use `预览 Master 方案变化`, then sync Master products into SQLite after confirming the product boundary.
 3. Sync the MD copy. The importer only accepts products that are already in the current Master scheme; extra MD products are reported but not imported.
 4. Sync asset folders. Image/video/voice files are matched to current products by UID in the filename or path and saved as database bindings.
-5. Use the workflow pages in order: `生成配音` -> `组合口播稿` -> `生成剪映草稿`. The spoken-script output MD is chosen in `组合口播稿`, not in the category project.
+5. Use the active workflow in order: `生成配音` -> `组合口播稿` -> confirm phase 7 -> `render-final-video`. The spoken-script output MD is chosen in `组合口播稿`, not in the category project.
 6. After reviewing a complete MP4, run `confirm-production` only when the user
    accepts it as an actual production.
 7. Complete the cover workflow: five AI copy options, one user-confirmed copy,
@@ -139,11 +139,15 @@ python -m bworkflow_sql resolve-blue-link-backfill <Master任务UUID> --workspac
 python -m bworkflow_sql confirm-blue-link-title-candidates <Master任务UUID> --workspace-id <Master工作空间UUID> --decision-file <UTF-8 JSON>
 ```
 
-By default the command uses the existing current-month folder under
-`G:\2026项目-b站\已发布视频`, or that root if the month folder is absent; it does
-not create a missing month folder. Use `--archive-dir` to override. For a
-manually moved file, use `--current-path
-<当前完整MP4路径>`. The command reuses `production_runs` and the existing pipeline
+By default the command archives the complete delivery directory under the
+existing current-month folder in `G:\2026项目-b站\已发布视频`, or under that root
+if the month folder is absent. It preserves the original project-directory
+name and does not create a missing month folder. Use `--archive-dir` to provide
+the exact destination project directory. For a manually moved complete project
+directory, use `--current-path <该目录内的正式成片路径>`. The command atomically
+rewrites delivery-root paths in the pipeline, including artifact approvals, and
+revalidates bound hashes before updating `production_runs`. It reuses
+`production_runs` and the existing pipeline
 publishing phase; it does not create a second publishing-status store.
 Publishing now enters `blue_link_backfill` instead of ending the workflow.
 `publishing-context` exposes the production's fixed Master account UUID,
@@ -232,6 +236,9 @@ a successful observation (`ok=true`); blocked work is represented by
 v1 observation to stdout and exit nonzero. The former raw JSON shape is removed
 and has no compatibility flag. The producer Schema and examples live under
 `contracts/schemas` and `contracts/examples`.
+`checks.phase7_selection.featured_products` exposes the ordered UID and full
+name of active Master-synced featured products so TotalControl can ask the
+phase-7 all-or-none pinning question without reading SQLite directly.
 
 ## Exact-transcript subtitle alignment
 
@@ -272,9 +279,58 @@ Output rules:
 - `assemble-plan` and `assemble` accept `--product-uids UID1,UID2,...` to reproduce a product order before rendering. They cannot prove exact reconstruction of an already rendered MP4 when a product has multiple script-block versions; use that run's RenderPackage or `materialize-final-script` instead.
 - The spoken script manifest is an internal task file under `data/workspace/project-<id>/manifests/`.
 - Internal generated files are kept under `data/workspace`.
-- Jianying drafts are written to `E:\剪辑-剪映\草稿\JianyingPro Drafts`.
+- Jianying UI and public CLI output are retired. Existing drafts and the
+  historical engine remain on disk but are unsupported and receive no new
+  template/slot compatibility.
 - Standalone voice files default to `G:\2026项目-b站` and do not write `asset_bindings`.
-- Final MP4 can be produced with `python -m bworkflow_sql render-final-video <project_id> --account <账号> --product-media-mode video_preferred --pipeline <.pipeline.json>`. With `--pipeline`, the command automatically resolves the hash-bound accepted intro MP4 and its source plan; changed or mismatched artifacts block before rendering. A successful run writes the current readable script to `1.口播文案\{project}\{month}月-{account}.md`, writes an immutable `完整口播稿.md` beside the run RenderPackage, and binds both hashes plus the RenderPackage hash into the run manifest and pipeline. Use `materialize-final-script --run-manifest <run.json> --pipeline <.pipeline.json>` to backfill this evidence for an existing run without rerendering its MP4.
+- Final MP4 uses structured dynamic Product Cards only:
+  `python -m bworkflow_sql render-final-video <project_id> --account <账号>
+  --product-media-mode video_preferred --pipeline <.pipeline.json>
+  --product-card-template-id <模板>`. B-Workflow freezes one Master snapshot and
+  checks every product before any job/cache write. Actual price, unique current
+  scheme price range, current voice, and video-or-cover media are hard gates.
+  Product clips render directly with Remotion; formal output does not read or
+  generate whole-card PNGs.
+- The project-local clip cache stays under
+  `data/workspace/project-<id>/render/final-video-cache`, is not shared between
+  projects, and is not automatically cleaned.
+- Explicit final output has priority over `--delivery-dir` and pipeline
+  `output_dir`. Set `BWORKFLOW_SPOKEN_MD_ROOT` during isolated validation to
+  keep readable final-script Markdown out of normal WriteSpace.
+
+## Resource lifecycle audit
+
+Generated resources use an event-driven, delayed-cleanup contract. Product-card
+render job directories are registered after a successful render with a seven-day
+retention window. When an image binding moves to another template or output path,
+the replaced generated PNG is registered with a fourteen-day retention window.
+Registration never moves or deletes a file.
+
+Use `python -m bworkflow_sql resource-audit <project_id> [--pipeline <path>]`
+for a read-only classification of current references, formal history, missing
+metadata, reclaimable generated resources, recent working caches, and unresolved
+source files. Use `resource-reconcile` with the same arguments to persist only the
+high-confidence cleanup candidates; it still does not delete anything. If the
+current `.pipeline.json` is missing, ordinary inactive assets fail closed as
+`uncertain`. Cache-only product-image jobs may still be identified independently.
+
+`resource_cleanup_candidates` is the delayed cleanup ledger. Permanent deletion
+is never automatic and does not use a quarantine directory. First list the
+eligible and blocked candidates, then prepare one fingerprinted batch. Only the
+one-time token returned for that unchanged batch can authorize deletion:
+
+```powershell
+python -m bworkflow_sql resource-cleanup-list <project_id> --pipeline <path>
+python -m bworkflow_sql resource-cleanup-plan <project_id> --pipeline <path> --account <账号> --kind asset_voice
+python -m bworkflow_sql resource-cleanup-delete --batch-id <batch_id> --confirm <token>
+python -m bworkflow_sql resource-history <project_id> --account <账号> --kind voice --state expired
+```
+
+Deletion re-checks current pipeline, asset-binding, production-run, managed-root,
+file type, size, modification time and fingerprint evidence. Any change rejects
+the batch without deleting files. Successful deletion keeps the candidate row,
+batch item and `resource_state_events` tombstone. `resource-reconcile` also
+corrects `ready` bindings whose files are missing to `missing`.
 
 ## Voice Generation Notes
 
@@ -299,7 +355,8 @@ Output rules:
   by the account write path.
 - A generated voice is reusable only when account, text hash, provider, model,
   voice ID, and synthesis settings match. Generation writes a unique new file,
-  commits its binding, and only then removes stale generated files; a database
+  commits its binding, marks older mismatched bindings `expired`, and registers
+  their files for delayed cleanup. It does not delete old files; a database
   failure preserves the previous ready file.
 - MiniMax API keys are read from the `MINIMAX_API_KEY` environment variable first, then from `C:\Users\zhaoer\.codex\skills\zhaoer-tools-minimax-tts\.env`, then the legacy `C:\Users\zhaoer\.codex\skills\minimax-tts\.env`, then the current working directory `.env`.
 - Known MiniMax voice aliases include `小博 -> xiaobo-v2`, `小燃 -> xiaoran-v2`, `小歪 -> xiaowai-v6`, `知了 -> bilibili-zhiliao`, and `荣荣/蓉蓉 -> rongrong-v2`.
@@ -317,26 +374,17 @@ Output rules:
   - internal silence over `800ms` is trimmed to `350ms`.
 - Fine-grained word-internal pause correction is intentionally left for a later ASR-alignment tool instead of aggressive automatic trimming during generation.
 
-## Jianying Draft Notes
+## Retired Static And Jianying Routes
 
-- Draft generation is owned by the project-local engine at `scripts\jianying_engine\generate_jianying_draft.py`.
-- The engine directory can be overridden with `BWORKFLOW_JIANYING_ENGINE_DIR`; archived `C:\Users\zhaoer\.codex\skills_archived\b-workflow-20260625\scripts` is only a migration fallback.
-- The engine dependencies are listed in `scripts\jianying_engine\requirements-jianying.txt`; an optional engine-local virtualenv belongs at `scripts\jianying_engine\.venv`.
-- The default image-index data file is `data\jianying_engine\image_index.json`.
-- Closing voice clips come from `accounts.closing_audio_path`. Current 小歪 closing audio is `G:\2026项目-b站\素材-配音\公共-结尾\小歪\结尾-小歪.mp3`.
-- Product images remain on the main media track. Product videos are also written as `display_video_path` and placed on the separate `display_video` track.
-- Voice clips use a `100ms` timeline gap between adjacent clips.
-- Template slots normally use 1920x1080 canvas rectangle coordinates: `x`, `y`, `width`, and `height`.
-- `小燃-模板1` uses Jianying position-panel coordinates instead: `x=-830`, `y=-77`, `width=970`, `height=590`, with `coordinate_mode="clip_transform_pixels"`.
-- For product-video/template alignment checks, use the one-product calibration command before generating a full draft:
-
-```powershell
-python -m bworkflow_sql template-calibrate <project_id> --account <账号> --product-uid <UID> --draft-name 模板校准-<账号>-<UID>
-```
-
-It refreshes the RenderPackage/Jianying manifest, extracts the requested product only, writes a probe manifest under `data/workspace/project-<id>/template-calibration/`, and creates a short Jianying draft for visual confirmation.
-- Subtitle export uses semantic line breaking for long clauses: it keeps decimal numbers, number-unit phrases, English model names, and `的/地/得` structures together where possible.
-
+- B-Workflow no longer exposes `product-images`, `jianying`, template
+  calibration drafts, or their UI pages as active production operations.
+- Historical whole-card PNGs, bindings, drafts, and
+  `scripts/jianying_engine` are preserved; this retirement performs no deletion
+  and promises no compatibility with future slots/templates.
+- CutMe still rendering remains available outside B-Workflow for manual
+  template preview and visual evidence only.
+- The supported formal route is dynamic Product Card -> Remotion product clips
+  -> complete MP4.
 ## Markdown Contract
 
 The parser uses fixed headings instead of guessing:

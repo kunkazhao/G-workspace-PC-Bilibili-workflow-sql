@@ -72,26 +72,140 @@ REMOTION_TEMPLATE_METADATA_PATH = Path(
     )
 )
 
+_PRODUCT_CARD_SLOT_TYPES = frozenset({"text", "media", "label_value_list"})
+
+
+def _is_trimmed_non_empty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value) and value == value.strip()
+
+
+def _validated_slot_registry(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        raise ValueError("CutMe product-card slotRegistry must be an object")
+    registry: dict[str, dict[str, Any]] = {}
+    for raw_key, raw_definition in value.items():
+        if not _is_trimmed_non_empty_string(raw_key) or not isinstance(
+            raw_definition, dict
+        ):
+            raise ValueError(f"Invalid slotRegistry definition for {raw_key!r}")
+        key = raw_key
+        slot_type = raw_definition.get("type")
+        if not isinstance(slot_type, str) or slot_type not in _PRODUCT_CARD_SLOT_TYPES:
+            raise ValueError(f"Invalid slot type for {key!r}: {slot_type!r}")
+        source = raw_definition.get("source")
+        if not _is_trimmed_non_empty_string(source):
+            raise ValueError(
+                f"Slot {key!r} source must be a trimmed non-empty string"
+            )
+        registry[key] = {"type": slot_type, "source": source}
+    return registry
+
+
+def _validated_slot_declarations(
+    template_id: str,
+    value: Any,
+    registry: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ValueError(f"Template {template_id} slotDeclarations must be a list")
+    declarations: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_declaration in value:
+        if not isinstance(raw_declaration, dict):
+            raise ValueError(f"Template {template_id} has an invalid slot declaration")
+        raw_key = raw_declaration.get("key")
+        if not _is_trimmed_non_empty_string(raw_key):
+            raise ValueError(
+                f"Template {template_id} declaration key must be a trimmed non-empty string"
+            )
+        key = raw_key
+        if key not in registry:
+            raise ValueError(
+                f"Template {template_id} declares {key!r}, which is not registered in slotRegistry"
+            )
+        if key in seen:
+            raise ValueError(f"Template {template_id} declares slot {key!r} more than once")
+        required = raw_declaration.get("required")
+        if type(required) is not bool:
+            raise ValueError(
+                f"Template {template_id} slot {key!r} required must be a boolean"
+            )
+        if required:
+            if "emptyPolicy" in raw_declaration:
+                raise ValueError(
+                    f"Template {template_id} required slot {key!r} must not set emptyPolicy"
+                )
+            declarations.append({"key": key, "required": True})
+        else:
+            if raw_declaration.get("emptyPolicy") != "preserve":
+                raise ValueError(
+                    f"Template {template_id} optional slot {key!r} emptyPolicy must be preserve"
+                )
+            declarations.append(
+                {"key": key, "required": False, "emptyPolicy": "preserve"}
+            )
+        seen.add(key)
+    return declarations
+
+
+@lru_cache(maxsize=1)
+def _remotion_template_contract() -> tuple[
+    dict[str, dict[str, Any]], dict[str, dict[str, Any]]
+]:
+    if not REMOTION_TEMPLATE_METADATA_PATH.exists():
+        return {}, {}
+    try:
+        raw_payload = REMOTION_TEMPLATE_METADATA_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(
+            f"Failed to read CutMe product-card metadata at "
+            f"{REMOTION_TEMPLATE_METADATA_PATH}: {exc}"
+        ) from exc
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid CutMe product-card metadata JSON at "
+            f"{REMOTION_TEMPLATE_METADATA_PATH}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError("CutMe product-card template metadata must be an object")
+    registry = _validated_slot_registry(payload.get("slotRegistry"))
+    templates = payload.get("templates")
+    if not isinstance(templates, list):
+        raise ValueError("CutMe product-card templates must be a list")
+    result: dict[str, dict[str, Any]] = {}
+    seen_template_ids: set[str] = set()
+    for item in templates:
+        if not isinstance(item, dict):
+            raise ValueError("CutMe product-card template entry must be an object")
+        template_id = item.get("templateId")
+        if not _is_trimmed_non_empty_string(template_id):
+            raise ValueError(
+                "CutMe product-card templateId must be a trimmed non-empty string"
+            )
+        if template_id in seen_template_ids:
+            raise ValueError(f"Duplicate CutMe product-card templateId: {template_id}")
+        seen_template_ids.add(template_id)
+        validated = dict(item)
+        validated["slotDeclarations"] = _validated_slot_declarations(
+            template_id, item.get("slotDeclarations"), registry
+        )
+        result[template_id] = validated
+    return registry, result
+
 
 @lru_cache(maxsize=1)
 def _remotion_template_metadata() -> dict[str, dict[str, Any]]:
-    if not REMOTION_TEMPLATE_METADATA_PATH.exists():
-        return {}
-    try:
-        payload = json.loads(REMOTION_TEMPLATE_METADATA_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    templates = payload.get("templates")
-    if not isinstance(templates, list):
-        return {}
-    result: dict[str, dict[str, Any]] = {}
-    for item in templates:
-        if not isinstance(item, dict):
-            continue
-        template_id = str(item.get("templateId") or "").strip()
-        if template_id:
-            result[template_id] = dict(item)
-    return result
+    return _remotion_template_contract()[1]
+
+
+def get_remotion_slot_registry() -> dict[str, dict[str, Any]]:
+    """读取 CutMe 的商品卡槽位注册表，不在 B-Workflow 复制槽位常量。"""
+    return {
+        key: dict(definition)
+        for key, definition in _remotion_template_contract()[0].items()
+    }
 
 
 def get_remotion_template_metadata(template_id: str) -> dict[str, Any]:
@@ -100,6 +214,66 @@ def get_remotion_template_metadata(template_id: str) -> dict[str, Any]:
     if metadata is None:
         raise ValueError(f"未知 Remotion 商品图模板：{template_id}")
     return dict(metadata)
+
+
+def _value_at_slot_source(product_card: dict[str, Any], source: str) -> Any:
+    value: Any = product_card
+    for part in source.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return None
+        value = value[part]
+    return value
+
+
+def _slot_value_is_present(
+    product_card: dict[str, Any], definition: dict[str, Any]
+) -> bool:
+    value = _value_at_slot_source(product_card, str(definition.get("source") or ""))
+    slot_type = str(definition.get("type") or "")
+    if slot_type == "label_value_list":
+        return (
+            isinstance(value, list)
+            and bool(value)
+            and all(
+                isinstance(item, dict)
+                and isinstance(item.get("label"), str)
+                and bool(item["label"].strip())
+                and isinstance(item.get("value"), str)
+                and bool(item["value"].strip())
+                for item in value
+            )
+        )
+    return isinstance(value, str) and bool(value.strip())
+
+
+def product_card_slot_issues(
+    template_id: str,
+    product_card: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """仅为声明为 required 且缺值的槽位返回阻断问题。"""
+    metadata = get_remotion_template_metadata(template_id)
+    registry = get_remotion_slot_registry()
+    card = product_card if isinstance(product_card, dict) else {}
+    issues: list[dict[str, Any]] = []
+    declarations = metadata.get("slotDeclarations")
+    for declaration in declarations if isinstance(declarations, list) else []:
+        if not isinstance(declaration, dict) or declaration.get("required") is not True:
+            continue
+        key = str(declaration.get("key") or "").strip()
+        definition = registry.get(key, {})
+        if _slot_value_is_present(card, definition):
+            continue
+        issues.append(
+            {
+                "level": "error",
+                "code": "missing_required_product_card_slot",
+                "blocking": True,
+                "template_id": template_id,
+                "slot_key": key,
+                "message": f"Product-card template requires slot {key!r}, but its value is empty.",
+            }
+        )
+    return issues
 
 
 def product_card_text_capacity_certification_issues(

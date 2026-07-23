@@ -16,6 +16,7 @@ from .master_snapshot_sync import (
 from .md_parser import H3_RE, H4_RE, SCRIPT_ID_RE, SECTION_RE, ParsedMarkdown, parse_markdown_file, parse_product_heading
 from .product_copy_lint import lint_parsed_product_copy
 from .repositories import Repository
+from .resource_lifecycle import record_resource_state_event_in_connection
 from .settings import DEFAULT_IMAGE_ROOT, DEFAULT_VIDEO_ROOT, DEFAULT_VOICE_ROOT
 from .utils import file_metadata, now_iso, safe_text, text_hash
 
@@ -241,6 +242,13 @@ class SyncService:
         upserted = 0
         ts = now_iso()
         with self.db.connect() as conn:
+            before_scripts = {
+                int(row["id"]): dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM script_blocks WHERE project_id=?",
+                    (project_id,),
+                ).fetchall()
+            }
             conn.execute("UPDATE script_blocks SET active=0, updated_at=? WHERE project_id=?", (ts, project_id))
             for index, block in enumerate(parsed.intro_scripts, start=1):
                 script_id = block.script_id or f"intro:V{index:03d}"
@@ -294,6 +302,62 @@ class SyncService:
                         source_anchor=f"价格过渡文案/{price.label}/{block.label}",
                         ts=ts,
                     )
+            after_scripts = {
+                int(row["id"]): dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM script_blocks WHERE project_id=? AND active=1",
+                    (project_id,),
+                ).fetchall()
+            }
+            for script_id, before in before_scripts.items():
+                if not int(before.get("active") or 0) or script_id in after_scripts:
+                    continue
+                record_resource_state_event_in_connection(
+                    conn,
+                    project_id=project_id,
+                    resource_kind="script",
+                    resource_key=f"script_block:{script_id}",
+                    previous_state="active",
+                    new_state="superseded",
+                    reason="removed_from_markdown",
+                    source="markdown_sync",
+                    details={"text_hash": safe_text(before.get("text_hash"))},
+                    created_at=ts,
+                )
+            for script_id, after in after_scripts.items():
+                before = before_scripts.get(script_id)
+                if before is None:
+                    previous_state = ""
+                    new_state = "created"
+                    reason = "added_by_markdown_sync"
+                elif not int(before.get("active") or 0):
+                    previous_state = "superseded"
+                    new_state = "reactivated"
+                    reason = "restored_by_markdown_sync"
+                elif safe_text(before.get("text_hash")) != safe_text(after.get("text_hash")):
+                    previous_state = "active"
+                    new_state = "updated"
+                    reason = "markdown_body_changed"
+                else:
+                    continue
+                record_resource_state_event_in_connection(
+                    conn,
+                    project_id=project_id,
+                    resource_kind="script",
+                    resource_key=f"script_block:{script_id}",
+                    previous_state=previous_state,
+                    new_state=new_state,
+                    reason=reason,
+                    source="markdown_sync",
+                    details={
+                        "script_id": safe_text(after.get("script_id")),
+                        "script_type": safe_text(after.get("script_type")),
+                        "owner_uid": safe_text(after.get("owner_uid")),
+                        "previous_text_hash": safe_text((before or {}).get("text_hash")),
+                        "text_hash": safe_text(after.get("text_hash")),
+                    },
+                    created_at=ts,
+                )
         items = [
             {"item_kind": "product", "uid": item.uid, "title": item.title, "status": "extra_md", "message": "MD 里有，但不在当前 Master 方案内"}
             for item in extra_md
@@ -426,6 +490,7 @@ class SyncService:
         matched_keys: set[tuple[str, str, int, str, str, str]] = set()
         matched_uids_by_type: dict[str, set[str]] = {"image": set(), "video": set(), "voice": set()}
         matched_voice_targets: set[tuple[str, str]] = set()
+        recorded_state_binding_ids: set[int] = set()
         scanned_roots: dict[str, str] = {}
         items: list[dict[str, Any]] = []
         ts = now_iso()
@@ -440,11 +505,35 @@ class SyncService:
         stale_uids = sorted(uid for uid in all_uids if uid and uid not in active_uids)
         if stale_uids:
             placeholders = ", ".join("?" for _ in stale_uids)
+            stale_bindings = [
+                item
+                for item in before_assets
+                if safe_text(item.get("uid")) in stale_uids
+            ]
             with self.db.connect() as conn:
                 conn.execute(
                     f"UPDATE asset_bindings SET status='stale', updated_at=? WHERE project_id=? AND uid IN ({placeholders})",
                     (ts, project_id, *stale_uids),
                 )
+                for item in stale_bindings:
+                    binding_id = int(item.get("id") or 0)
+                    if not binding_id:
+                        continue
+                    recorded_state_binding_ids.add(binding_id)
+                    record_resource_state_event_in_connection(
+                        conn,
+                        project_id=project_id,
+                        resource_kind=safe_text(item.get("asset_type")),
+                        resource_key=f"asset_binding:{binding_id}",
+                        path=safe_text(item.get("path")),
+                        previous_state="ready",
+                        new_state="stale",
+                        reason="product_removed_from_current_scheme",
+                        source="asset_sync",
+                        account_label=safe_text(item.get("account_label")),
+                        details={"uid": safe_text(item.get("uid"))},
+                        created_at=ts,
+                    )
         image_root = Path(safe_text(project.get("image_root")) or DEFAULT_IMAGE_ROOT)
         video_root = Path(safe_text(project.get("video_root")) or DEFAULT_VIDEO_ROOT)
         voice_root = Path(safe_text(project.get("voice_root")) or DEFAULT_VOICE_ROOT)
@@ -596,6 +685,25 @@ class SyncService:
                         f"UPDATE asset_bindings SET status='stale', updated_at=? WHERE project_id=? AND id IN ({placeholders})",
                         (ts, project_id, *removed_ids),
                     )
+                    for item in removed_bindings:
+                        binding_id = int(item.get("id") or 0)
+                        if not binding_id or binding_id in recorded_state_binding_ids:
+                            continue
+                        recorded_state_binding_ids.add(binding_id)
+                        record_resource_state_event_in_connection(
+                            conn,
+                            project_id=project_id,
+                            resource_kind=safe_text(item.get("asset_type")),
+                            resource_key=f"asset_binding:{binding_id}",
+                            path=safe_text(item.get("path")),
+                            previous_state="ready",
+                            new_state="stale",
+                            reason="asset_no_longer_discovered_in_managed_scope",
+                            source="asset_sync",
+                            account_label=safe_text(item.get("account_label")),
+                            details={"uid": safe_text(item.get("uid"))},
+                            created_at=ts,
+                        )
         current_assets = [
             self._asset_item_from_binding(item)
             for item in self.repo.asset_bindings(project_id)
@@ -653,6 +761,34 @@ class SyncService:
         meta = file_metadata(audio_path)
         ts = now_iso()
         with self.db.connect() as conn:
+            expiring = conn.execute(
+                """
+                SELECT * FROM asset_bindings
+                WHERE project_id=? AND script_block_id=? AND asset_type='voice'
+                  AND account_label=? AND text_hash<>? AND status<>'expired'
+                """,
+                (
+                    project_id,
+                    block_dict["id"],
+                    safe_text(account_dict.get("label")),
+                    safe_text(block_dict.get("text_hash")),
+                ),
+            ).fetchall()
+            existing = conn.execute(
+                """
+                SELECT * FROM asset_bindings
+                WHERE project_id=? AND uid=? AND script_block_id=?
+                  AND asset_type='voice' AND account_label=? AND block_label=? AND path=?
+                """,
+                (
+                    project_id,
+                    uid,
+                    block_dict["id"],
+                    safe_text(account_dict.get("label")),
+                    block_label,
+                    str(audio_path),
+                ),
+            ).fetchone()
             conn.execute(
                 """
                 UPDATE asset_bindings
@@ -697,6 +833,56 @@ class SyncService:
                     ts,
                     ts,
                 ),
+            )
+            for expired in expiring:
+                record_resource_state_event_in_connection(
+                    conn,
+                    project_id=project_id,
+                    resource_kind="voice",
+                    resource_key=f"asset_binding:{int(expired['id'])}",
+                    path=safe_text(expired["path"]),
+                    previous_state=safe_text(expired["status"]),
+                    new_state="expired",
+                    reason="script_text_hash_changed",
+                    source="manual_voice_binding",
+                    account_label=safe_text(account_dict.get("label")),
+                    details={
+                        "previous_text_hash": safe_text(expired["text_hash"]),
+                        "text_hash": safe_text(block_dict.get("text_hash")),
+                    },
+                    created_at=ts,
+                )
+            current = conn.execute(
+                """
+                SELECT * FROM asset_bindings
+                WHERE project_id=? AND uid=? AND script_block_id=?
+                  AND asset_type='voice' AND account_label=? AND block_label=? AND path=?
+                """,
+                (
+                    project_id,
+                    uid,
+                    block_dict["id"],
+                    safe_text(account_dict.get("label")),
+                    block_label,
+                    str(audio_path),
+                ),
+            ).fetchone()
+            record_resource_state_event_in_connection(
+                conn,
+                project_id=project_id,
+                resource_kind="voice",
+                resource_key=f"asset_binding:{int(current['id'])}",
+                path=audio_path,
+                previous_state=safe_text(existing["status"]) if existing else "",
+                new_state="created" if existing is None else "updated",
+                reason="manual_voice_bound",
+                source="manual_voice_binding",
+                account_label=safe_text(account_dict.get("label")),
+                details={
+                    "script_block_id": int(block_dict["id"]),
+                    "text_hash": safe_text(block_dict.get("text_hash")),
+                },
+                created_at=ts,
             )
         result = {
             "asset_type": "voice",
@@ -955,6 +1141,14 @@ class SyncService:
         account_id = safe_text(account.get("account_id"))
         path_text = str(path)
         with self.db.connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT * FROM asset_bindings
+                WHERE project_id=? AND uid=? AND script_block_id IS NULL
+                  AND asset_type=? AND account_label=? AND block_label='' AND path=?
+                """,
+                (project_id, uid, asset_type, account_label, path_text),
+            ).fetchone()
             cursor = conn.execute(
                 """
                 UPDATE asset_bindings
@@ -980,28 +1174,60 @@ class SyncService:
                     path_text,
                 ),
             )
-            if cursor.rowcount:
-                return
-            conn.execute(
+            if not cursor.rowcount:
+                conn.execute(
+                    """
+                    INSERT INTO asset_bindings
+                        (project_id, uid, asset_type, account_label, account_id, path, status, source_kind, file_size, file_mtime, confirmed, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'scan', ?, ?, 0, ?, ?)
+                    """,
+                    (
+                        project_id,
+                        uid,
+                        asset_type,
+                        account_label,
+                        account_id,
+                        path_text,
+                        "ready" if meta["exists"] else "path_invalid",
+                        meta["file_size"],
+                        meta["file_mtime"],
+                        ts,
+                        ts,
+                    ),
+                )
+            current = conn.execute(
                 """
-                INSERT INTO asset_bindings
-                    (project_id, uid, asset_type, account_label, account_id, path, status, source_kind, file_size, file_mtime, confirmed, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'scan', ?, ?, 0, ?, ?)
+                SELECT * FROM asset_bindings
+                WHERE project_id=? AND uid=? AND script_block_id IS NULL
+                  AND asset_type=? AND account_label=? AND block_label='' AND path=?
                 """,
-                (
-                    project_id,
-                    uid,
-                    asset_type,
-                    account_label,
-                    account_id,
-                    path_text,
-                    "ready" if meta["exists"] else "path_invalid",
-                    meta["file_size"],
-                    meta["file_mtime"],
-                    ts,
-                    ts,
-                ),
+                (project_id, uid, asset_type, account_label, path_text),
+            ).fetchone()
+            changed = existing is None or any(
+                existing[field] != current[field]
+                for field in ("status", "file_size", "file_mtime")
             )
+            if changed:
+                record_resource_state_event_in_connection(
+                    conn,
+                    project_id=project_id,
+                    resource_kind=asset_type,
+                    resource_key=f"asset_binding:{int(current['id'])}",
+                    path=path_text,
+                    previous_state=safe_text(existing["status"]) if existing else "",
+                    new_state="created" if existing is None else "updated",
+                    reason="file_discovered" if existing is None else "same_path_file_changed",
+                    source="asset_sync",
+                    account_label=account_label,
+                    details={
+                        "uid": uid,
+                        "previous_file_size": int(existing["file_size"] or 0) if existing else 0,
+                        "file_size": int(current["file_size"] or 0),
+                        "previous_file_mtime": safe_text(existing["file_mtime"]) if existing else "",
+                        "file_mtime": safe_text(current["file_mtime"]),
+                    },
+                    created_at=ts,
+                )
 
     def _upsert_voice_block_asset(self, project_id: int, *, uid: str, block: dict[str, Any], path: Path, account: dict[str, Any]) -> None:
         meta = file_metadata(path)
@@ -1010,6 +1236,14 @@ class SyncService:
         account_id = safe_text(account.get("account_id"))
         block_label = safe_text(block.get("price_range_label")) if block["script_type"] == "price_transition" else safe_text(block.get("block_label"))
         with self.db.connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT * FROM asset_bindings
+                WHERE project_id=? AND uid=? AND script_block_id=?
+                  AND asset_type='voice' AND account_label=? AND block_label=? AND path=?
+                """,
+                (project_id, uid, block["id"], account_label, block_label, str(path)),
+            ).fetchone()
             conn.execute(
                 """
                 INSERT INTO asset_bindings
@@ -1041,3 +1275,36 @@ class SyncService:
                     ts,
                 ),
             )
+            current = conn.execute(
+                """
+                SELECT * FROM asset_bindings
+                WHERE project_id=? AND uid=? AND script_block_id=?
+                  AND asset_type='voice' AND account_label=? AND block_label=? AND path=?
+                """,
+                (project_id, uid, block["id"], account_label, block_label, str(path)),
+            ).fetchone()
+            changed = existing is None or any(
+                existing[field] != current[field]
+                for field in ("status", "file_size", "file_mtime", "text_hash")
+            )
+            if changed:
+                record_resource_state_event_in_connection(
+                    conn,
+                    project_id=project_id,
+                    resource_kind="voice",
+                    resource_key=f"asset_binding:{int(current['id'])}",
+                    path=path,
+                    previous_state=safe_text(existing["status"]) if existing else "",
+                    new_state="created" if existing is None else "updated",
+                    reason="voice_file_discovered" if existing is None else "voice_binding_changed",
+                    source="asset_sync",
+                    account_label=account_label,
+                    details={
+                        "script_block_id": int(block["id"]),
+                        "previous_text_hash": safe_text(existing["text_hash"]) if existing else "",
+                        "text_hash": safe_text(current["text_hash"]),
+                        "previous_file_mtime": safe_text(existing["file_mtime"]) if existing else "",
+                        "file_mtime": safe_text(current["file_mtime"]),
+                    },
+                    created_at=ts,
+                )

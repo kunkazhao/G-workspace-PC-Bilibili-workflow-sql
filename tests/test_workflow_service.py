@@ -218,28 +218,8 @@ def test_workflow_commands_use_internal_tasks(tmp_path: Path):
     assert "generate_spoken_script.py" not in " ".join(assembly)
     assert "audio_segment_registry.json" not in " ".join(assembly)
     assert str(tmp_path / "口播稿.md") in assembly
-    internal_manifest = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "manifests" / "口播稿.manifest.json"
     assert "--markdown-path" not in assembly
     assert "--out-dir" not in assembly
-
-    intro_video = tmp_path / "intro.mp4"
-    intro_video.write_bytes(b"video")
-    jianying = service.build_jianying_command(
-        project_id,
-        draft_name="数码/有线耳机",
-        intro_video_path=intro_video,
-    )
-    assert jianying[0] == "internal:jianying"
-    assert "--manifest" in jianying
-    assert str(internal_manifest) in jianying
-    assert "--intro-video" in jianying
-    assert str(intro_video) in jianying
-    assert "--draft-name" in jianying
-    assert "数码_有线耳机" in jianying
-    assert "--draft-root" in jianying
-    assert r"E:\剪辑-剪映\草稿\JianyingPro Drafts" in jianying
-    assert "--output-dir" not in jianying
-    assert "generate_jianying_draft_with_display_videos.py" not in " ".join(jianying)
 
 
 def test_voice_jobs_treat_mixed_uids_and_script_ids_as_union(tmp_path: Path):
@@ -398,6 +378,34 @@ def test_workflow_doctor_blocks_on_script_before_voice_or_template(tmp_path: Pat
     assert result["issues"] == [{"source": "script-doctor", "code": "markdown_not_synced"}]
     assert result["next"]["action"] == "sync_markdown"
     assert calls == ["script:寮曡█1"]
+
+
+def test_workflow_doctor_exposes_featured_products_for_phase7_confirmation(tmp_path: Path, monkeypatch):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE products SET product_card_json=? WHERE project_id=? AND uid='YXEJ002'",
+            (json.dumps({"featured": True}, ensure_ascii=False), project_id),
+        )
+
+    monkeypatch.setattr(
+        service,
+        "script_doctor",
+        lambda project_id_arg, *, intro_label="": {
+            "ok": False,
+            "status": "needs_sync",
+            "issues": [],
+            "next": {"action": "sync_markdown"},
+        },
+    )
+
+    result = service.workflow_doctor(project_id, account_label="灏忕噧")
+
+    assert result["checks"]["phase7_selection"] == {
+        "featured_count": 1,
+        "featured_products": [{"uid": "YXEJ002", "title": "竹林鸟夜莺Z1"}],
+    }
 
 
 def test_workflow_doctor_blocks_on_missing_voice_after_script_ready(tmp_path: Path, monkeypatch):
@@ -833,7 +841,7 @@ def test_expired_voice_generation_overwrites_original_filename(tmp_path: Path):
     assert not old_path.with_name(f"{old_path.stem}-1{old_path.suffix}").exists()
 
 
-def test_upserting_new_voice_deletes_stale_generated_voice_file(tmp_path: Path):
+def test_upserting_new_voice_registers_stale_file_without_deleting_it(tmp_path: Path):
     db, project_id = seed_project(tmp_path)
     service = WorkflowService(db)
     repo = Repository(db)
@@ -891,8 +899,19 @@ def test_upserting_new_voice_deletes_stale_generated_voice_file(tmp_path: Path):
         "SELECT status FROM asset_bindings WHERE project_id=? AND path=?",
         (project_id, str(stale_path)),
     )
+    candidate = db.fetchone(
+        """
+        SELECT status, resource_kind, reason
+        FROM resource_cleanup_candidates
+        WHERE project_id=? AND path=?
+        """,
+        (project_id, str(stale_path)),
+    )
     assert stale_asset["status"] == "expired"
-    assert not stale_path.exists()
+    assert stale_path.exists()
+    assert candidate["status"] == "pending"
+    assert candidate["resource_kind"] == "asset_voice"
+    assert candidate["reason"] == "voice_generation_identity_changed"
     assert new_path.exists()
 
 

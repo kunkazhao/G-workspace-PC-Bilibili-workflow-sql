@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 from bworkflow_sql import master_contracts as contracts
+from bworkflow_sql import settings as settings_module
 from bworkflow_sql.db import Database
 from bworkflow_sql.md_parser import parse_markdown_text
 from bworkflow_sql.repositories import Repository
@@ -275,6 +276,13 @@ def test_project_name_exists_matches_names_case_insensitively():
 
 def test_spoken_markdown_default_root_is_spoken_copy_folder():
     assert str(DEFAULT_SPOKEN_MD_ROOT) == r"G:\WriteSpace\B站-文案脚本\10_b站文案\1.口播文案"
+
+
+def test_spoken_markdown_root_can_be_isolated_with_environment(monkeypatch, tmp_path):
+    isolated_root = tmp_path / "spoken"
+    monkeypatch.setenv("BWORKFLOW_SPOKEN_MD_ROOT", str(isolated_root))
+
+    assert settings_module._default_spoken_md_root() == isolated_root
 
 
 def test_default_spoken_markdown_path_uses_current_month_prefix():

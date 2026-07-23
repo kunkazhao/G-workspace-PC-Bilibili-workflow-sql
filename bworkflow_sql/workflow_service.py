@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.request
 import wave
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -28,7 +29,13 @@ from .cutme_intro import (
     run_cutme_render,
 )
 from .db import Database
+from .master_contracts import MasterContractAdapter
 from .repositories import Repository
+from .resource_lifecycle import (
+    DERIVED_ASSET_RETENTION_DAYS,
+    record_resource_state_event_in_connection,
+    register_cleanup_candidate_in_connection,
+)
 from .settings import (
     CUTME_ROOT,
     DEFAULT_INDEXTTS_DIR,
@@ -138,7 +145,6 @@ from .render_package_builder import (
     _has_matching_price_groups,
     product_card_payload_for_product,
 )
-from .product_image_generation import regenerate_product_card_images
 from .template_doctor import diagnose_template_flow
 from .script_doctor import diagnose_script_flow
 from .episode_materializer import materialize_episode_markdown
@@ -218,10 +224,21 @@ class RollBRenameItem:
 
 
 class WorkflowService:
-    def __init__(self, db: Database):
+    def __init__(
+        self,
+        db: Database,
+        *,
+        master_contracts: MasterContractAdapter | None = None,
+    ):
         self.db = db
         self.repo = Repository(db)
+        self.master_contracts = master_contracts
         self._tts_log_handles: list[Any] = []
+
+    def _resolved_master_contracts(self) -> MasterContractAdapter:
+        if self.master_contracts is None:
+            self.master_contracts = MasterContractAdapter()
+        return self.master_contracts
 
     def export_project_markdown(self, project_id: int, target_path: str | Path | None = None) -> Path:
         project = self.repo.project(project_id)
@@ -335,35 +352,6 @@ class WorkflowService:
             cmd += ["--display-template", display_template]
         return cmd
 
-    def build_jianying_command(
-        self,
-        project_id: int,
-        *,
-        draft_name: str = "",
-        spoken_markdown_path: str | Path | None = None,
-        intro_video_path: str | Path | None = None,
-    ) -> list[str]:
-        project = self.repo.project(project_id)
-        if not project:
-            raise ValueError("请先选择品类项目。")
-        output_markdown = self._spoken_markdown_path(project, spoken_markdown_path)
-        manifest = self.spoken_manifest_path(project_id, output_markdown)
-        cmd = [
-            f"{INTERNAL_PREFIX}jianying",
-            "--project-id",
-            str(project_id),
-            "--manifest",
-            str(manifest),
-            "--draft-name",
-            safe_path_component(draft_name or safe_text(project.get("name")) or "B-Workflow-SQL"),
-            "--draft-root",
-            str(DEFAULT_JIANYING_DRAFT_ROOT),
-        ]
-        intro_video = safe_text(intro_video_path)
-        if intro_video:
-            cmd += ["--intro-video", intro_video]
-        return cmd
-
     def prepare_product_recommendation_output(
         self,
         project_id: int,
@@ -372,7 +360,6 @@ class WorkflowService:
         output_mode: str,
         product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
         product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
-        stale_product_image_policy: str = "block",
         mode: str = "standard",
         top_uids: str | list[str] | None = None,
         product_uids: str | list[str] | None = None,
@@ -383,22 +370,23 @@ class WorkflowService:
         intro_video_text: str = "",
         include_outro: bool = False,
         closing_text: str = "",
+        dynamic_product_contexts: list[dict[str, Any]] | None = None,
+        master_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
-        output_mode_value = safe_text(output_mode) or "jianying_draft"
+        output_mode_value = safe_text(output_mode) or "final_mp4"
         if output_mode_value not in SUPPORTED_OUTPUT_MODES:
             raise ValueError(f"unsupported output_mode: {output_mode_value}")
         media_mode = safe_text(product_media_mode) or DEFAULT_PRODUCT_MEDIA_MODE
         if media_mode not in SUPPORTED_PRODUCT_MEDIA_MODES:
             raise ValueError(f"unsupported product_media_mode: {media_mode}")
+        if output_mode_value == "final_mp4":
+            media_mode = "video_preferred"
         order_strategy = safe_text(product_order_strategy) or DEFAULT_PRODUCT_ORDER_STRATEGY
         if order_strategy not in SUPPORTED_PRODUCT_ORDER_STRATEGIES:
             raise ValueError(f"unsupported product_order_strategy: {order_strategy}")
         subtitle_mode = safe_text(subtitle_alignment) or "proportional"
         if subtitle_mode not in SUPPORTED_SUBTITLE_ALIGNMENTS:
             raise ValueError(f"unsupported subtitle_alignment: {subtitle_mode}")
-        stale_policy = safe_text(stale_product_image_policy) or "block"
-        if stale_policy not in {"block", "reuse"}:
-            raise ValueError(f"unsupported stale_product_image_policy: {stale_policy}")
         sequence_mode = safe_text(mode) or "standard"
         top_uid_list = split_csv(top_uids) if isinstance(top_uids, str) else list(top_uids or [])
         product_uid_list = (
@@ -428,6 +416,9 @@ class WorkflowService:
         if include_outro:
             build_kwargs["include_outro"] = True
             build_kwargs["closing_text"] = closing_text
+        if output_mode_value == "final_mp4":
+            build_kwargs["dynamic_product_contexts"] = dynamic_product_contexts
+            build_kwargs["master_snapshot_id"] = master_snapshot_id
 
         result = build_product_recommendation_package(
             self.db,
@@ -464,36 +455,15 @@ class WorkflowService:
             "product_uids": product_uid_list,
             "package_path": str(output_path),
             "missing": result.missing,
-            "stale_product_images": getattr(result, "stale_product_images", []),
         }
         if result.missing:
             return {"ok": False, **base_payload, "next": None}
-        if base_payload["stale_product_images"] and stale_policy == "block":
-            return {
-                "ok": False,
-                **base_payload,
-                "next": render_package_stale_product_image_next_step(
-                    base_payload["stale_product_images"],
-                    project_id=project_id,
-                    account_label=account_label,
-                    product_card_template_id=product_card_template_id,
-                ),
-            }
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
             json.dumps(result.package, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
-        jianying_manifest_path: Path | None = None
-        if output_mode_value == "jianying_draft":
-            jianying_manifest_path = output_path.with_suffix(".jianying.manifest.json")
-            render_package_to_jianying_manifest(
-                result.package,
-                jianying_manifest_path,
-                project_id=project_id,
-                account_label=account_label,
-            )
         return {
             "ok": True,
             **base_payload,
@@ -503,7 +473,7 @@ class WorkflowService:
                 account_label=account_label,
                 output_mode=output_mode_value,
                 package_path=output_path,
-                jianying_manifest_path=jianying_manifest_path,
+                jianying_manifest_path=None,
             ),
         }
 
@@ -515,6 +485,7 @@ class WorkflowService:
         mode: str = "stale",
         product_uid: str = "",
         product_card_template_id: str = "",
+        max_workers: int = 3,
     ) -> dict[str, Any]:
         certification_issues = _product_card_text_capacity_issues(
             account_label=account_label,
@@ -537,6 +508,7 @@ class WorkflowService:
             mode=mode,
             product_uid=product_uid,
             product_card_template_id=product_card_template_id,
+            max_workers=max_workers,
         )
 
     def template_doctor(
@@ -573,6 +545,27 @@ class WorkflowService:
             product_card_template_id=product_card_template_id,
             product_uid=product_uid,
             expect_cover=expect_cover,
+            master_contracts=self._resolved_master_contracts(),
+        )
+
+    def dynamic_product_card_preflight(
+        self,
+        project_id: int,
+        *,
+        account_label: str,
+        product_card_template_id: str,
+    ) -> dict[str, Any]:
+        # Historical low-level helper only. No public CLI or UI route calls it.
+        from .product_image_generation import regenerate_product_card_images
+
+        from .product_card_preflight import dynamic_product_card_preflight
+
+        return dynamic_product_card_preflight(
+            self.db,
+            project_id=project_id,
+            account_label=account_label,
+            product_card_template_id=product_card_template_id,
+            master_contracts=self._resolved_master_contracts(),
         )
 
     def script_doctor(
@@ -606,6 +599,9 @@ class WorkflowService:
         account = safe_text(account_label)
         top_uid_list = split_csv(top_uids) if isinstance(top_uids, str) else list(top_uids or [])
         checks: dict[str, Any] = {
+            "phase7_selection": _phase7_selection_context(
+                self.repo.products(project_id, include_removed=False)
+            ),
             "script": None,
             "voice_and_assembly": None,
             "intro_preflight": None,
@@ -1059,7 +1055,7 @@ class WorkflowService:
                     provider_adapter.capabilities.output_suffix
                 ).name
                 # Generate beside the previous artifact first. The database update decides
-                # which file is current; only after that commit may stale files be removed.
+                # which file is current; older files remain until a confirmed cleanup batch.
                 final_path = unique_path(out_dir / filename)
                 synthesis = provider_adapter.synthesize(
                     TtsSynthesisRequest(
@@ -1757,14 +1753,6 @@ class WorkflowService:
                 product_uids=split_csv(args.get("uids", "")),
                 output_markdown_path=args.get("output-markdown", ""),
                 display_template=args.get("display-template", ""),
-            )
-        if cmd[0] == f"{INTERNAL_PREFIX}jianying":
-            return self.generate_jianying_draft(
-                project_id,
-                manifest_path=args.get("manifest", ""),
-                draft_name=args.get("draft-name", ""),
-                draft_root=args.get("draft-root", DEFAULT_JIANYING_DRAFT_ROOT),
-                intro_video_path=args.get("intro-video", ""),
             )
         raise ValueError(f"未知内部任务：{cmd[0]}")
 
@@ -2505,6 +2493,37 @@ class WorkflowService:
             text_hash=safe_text(job.block.get("text_hash")),
         )
         with self.db.connect() as conn:
+            expiring = conn.execute(
+                """
+                SELECT * FROM asset_bindings
+                WHERE project_id=? AND script_block_id=? AND asset_type='voice'
+                  AND account_label=?
+                  AND (COALESCE(text_hash, '')<>? OR COALESCE(generation_fingerprint, '')<>?)
+                  AND source_kind<>'manual' AND status<>'expired'
+                """,
+                (
+                    project_id,
+                    job.block["id"],
+                    account_label,
+                    job.block["text_hash"],
+                    generation_fingerprint,
+                ),
+            ).fetchall()
+            existing = conn.execute(
+                """
+                SELECT * FROM asset_bindings
+                WHERE project_id=? AND uid=? AND script_block_id=? AND asset_type='voice'
+                  AND account_label=? AND block_label=? AND path=?
+                """,
+                (
+                    project_id,
+                    job.uid,
+                    job.block["id"],
+                    account_label,
+                    safe_text(job.block.get("price_range_label")) if job.kind == "price_transition" else safe_text(job.block.get("block_label")),
+                    str(path),
+                ),
+            ).fetchone()
             conn.execute(
                 """
                 UPDATE asset_bindings
@@ -2563,56 +2582,78 @@ class WorkflowService:
                     ts,
                 ),
             )
-        self._delete_stale_voice_files(
-            project_id,
-            job=job,
-            account_label=account_label,
-            current_path=path,
-            generation_fingerprint=generation_fingerprint,
-        )
-
-    def _delete_stale_voice_files(
-        self,
-        project_id: int,
-        *,
-        job: VoiceJob,
-        account_label: str,
-        current_path: Path,
-        generation_fingerprint: str,
-    ) -> None:
-        rows = self.db.fetchall(
-            """
-            SELECT path FROM asset_bindings
-            WHERE project_id=?
-              AND script_block_id=?
-              AND asset_type='voice'
-              AND account_label=?
-              AND (COALESCE(text_hash, '')<>? OR COALESCE(generation_fingerprint, '')<>?)
-              AND source_kind<>'manual'
-            """,
-            (
-                project_id,
-                job.block["id"],
-                account_label,
-                safe_text(job.block.get("text_hash")),
-                generation_fingerprint,
-            ),
-        )
-        current = current_path.resolve()
-        for row in rows:
-            stale_path = Path(safe_text(row["path"]))
-            if not stale_path:
-                continue
-            try:
-                if stale_path.resolve() == current:
+            current = conn.execute(
+                """
+                SELECT * FROM asset_bindings
+                WHERE project_id=? AND uid=? AND script_block_id=? AND asset_type='voice'
+                  AND account_label=? AND block_label=? AND path=?
+                """,
+                (
+                    project_id,
+                    job.uid,
+                    job.block["id"],
+                    account_label,
+                    safe_text(job.block.get("price_range_label")) if job.kind == "price_transition" else safe_text(job.block.get("block_label")),
+                    str(path),
+                ),
+            ).fetchone()
+            current_id = int(current["id"])
+            for expired in expiring:
+                if int(expired["id"]) == current_id or safe_text(expired["path"]) == str(path):
                     continue
-            except OSError:
-                pass
-            try:
-                if stale_path.is_file():
-                    stale_path.unlink()
-            except OSError:
-                continue
+                record_resource_state_event_in_connection(
+                    conn,
+                    project_id=project_id,
+                    resource_kind="voice",
+                    resource_key=f"asset_binding:{int(expired['id'])}",
+                    path=safe_text(expired["path"]),
+                    previous_state=safe_text(expired["status"]),
+                    new_state="expired",
+                    reason="voice_generation_identity_changed",
+                    source="voice_generation",
+                    account_label=account_label,
+                    details={
+                        "previous_text_hash": safe_text(expired["text_hash"]),
+                        "text_hash": safe_text(job.block.get("text_hash")),
+                        "generation_fingerprint": generation_fingerprint,
+                    },
+                    created_at=ts,
+                )
+                stale_path = safe_text(expired["path"])
+                if stale_path:
+                    register_cleanup_candidate_in_connection(
+                        conn,
+                        project_id=project_id,
+                        resource_kind="asset_voice",
+                        path=stale_path,
+                        reason="voice_generation_identity_changed",
+                        eligible_at=datetime.now(timezone.utc)
+                        + timedelta(days=DERIVED_ASSET_RETENTION_DAYS),
+                        details={
+                            "asset_binding_id": int(expired["id"]),
+                            "account_label": account_label,
+                            "discovered_by": "voice_generation",
+                        },
+                    )
+            record_resource_state_event_in_connection(
+                conn,
+                project_id=project_id,
+                resource_kind="voice",
+                resource_key=f"asset_binding:{current_id}",
+                path=path,
+                previous_state=safe_text(existing["status"]) if existing else "",
+                new_state="created" if existing is None else "updated",
+                reason="voice_generated",
+                source="voice_generation",
+                account_label=account_label,
+                details={
+                    "script_block_id": int(job.block["id"]),
+                    "text_hash": safe_text(job.block.get("text_hash")),
+                    "generation_fingerprint": generation_fingerprint,
+                    "provider": identity.provider,
+                },
+                created_at=ts,
+            )
 
     def _ensure_tts_api_ready(
         self,
@@ -3254,6 +3295,25 @@ def _workflow_doctor_issues(source: str, issues: list[dict[str, Any]]) -> list[d
         item["source"] = source
         result.append(item)
     return result
+
+
+def _phase7_selection_context(products: list[dict[str, Any]]) -> dict[str, Any]:
+    featured_products: list[dict[str, str]] = []
+    for product in products:
+        try:
+            product_card = json.loads(safe_text(product.get("product_card_json")) or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            product_card = {}
+        if not isinstance(product_card, dict) or product_card.get("featured") is not True:
+            continue
+        uid = safe_text(product.get("uid"))
+        title = safe_text(product.get("title"))
+        if uid and title:
+            featured_products.append({"uid": uid, "title": title})
+    return {
+        "featured_count": len(featured_products),
+        "featured_products": featured_products,
+    }
 
 
 def _workflow_doctor_payload(

@@ -6,13 +6,8 @@
   python -m bworkflow_sql sync 3
   python -m bworkflow_sql voice 3 --account 小博
   python -m bworkflow_sql assemble 3 --account 小博 --intro-index 1
-  python -m bworkflow_sql jianying 3 --manifest manifest.json --draft-name 充电宝
   python -m bworkflow_sql assets-check 3
   python -m bworkflow_sql voice-counts 3 --account 小博
-  python -m bworkflow_sql product-images 3 --account 小博 --mode stale
-  python -m bworkflow_sql product-images 3 --account 小博 --mode stale --product-uid P001
-  python -m bworkflow_sql product-images 3 --account 小博 --mode missing
-  python -m bworkflow_sql template-calibrate 3 --account 小燃 --product-uid R001
   python -m bworkflow_sql copy-lint 3
   python -m bworkflow_sql copy-audit 3 --voice-profile zhaoer
   python -m bworkflow_sql render-final-video 3 --account 小燃 --product-media-mode video_preferred
@@ -64,14 +59,16 @@ def _json_err(message: str, code: int = 1) -> None:
 
 def _init() -> tuple:
     from .db import Database
+    from .master_contracts import MasterContractAdapter
     from .repositories import Repository
     from .sync_service import SyncService
     from .workflow_service import WorkflowService
 
     db = Database()
     repo = Repository(db)
-    sync = SyncService(db)
-    wf = WorkflowService(db)
+    master_contracts = MasterContractAdapter()
+    sync = SyncService(db, master_contracts=master_contracts)
+    wf = WorkflowService(db, master_contracts=master_contracts)
     return db, repo, sync, wf
 
 
@@ -851,7 +848,6 @@ def cmd_render_package(args: argparse.Namespace) -> None:
         output_mode=args.output_mode,
         product_media_mode=args.product_media_mode,
         product_order_strategy=args.product_order_strategy,
-        stale_product_image_policy=getattr(args, "stale_product_image_policy", "block"),
         mode=args.mode,
         top_uids=args.top_uids,
         product_card_template_id=args.product_card_template_id,
@@ -869,6 +865,7 @@ def cmd_product_images(args: argparse.Namespace) -> None:
         mode=args.mode,
         product_uid=args.product_uid or "",
         product_card_template_id=args.product_card_template_id or "",
+        max_workers=args.workers,
     )
     _json_out(result)
 
@@ -937,6 +934,92 @@ def cmd_script_doctor(args: argparse.Namespace) -> None:
         intro_label=args.intro_label or "",
     )
     _json_out(result)
+
+
+def cmd_resource_audit(args: argparse.Namespace) -> None:
+    from .resource_lifecycle import audit_project_resources
+
+    db, _, _, _ = _init()
+    _json_out(
+        audit_project_resources(
+            db,
+            project_id=args.project_id,
+            pipeline_path=args.pipeline or None,
+        )
+    )
+
+
+def cmd_resource_reconcile(args: argparse.Namespace) -> None:
+    from .resource_lifecycle import reconcile_project_resources
+
+    db, _, _, _ = _init()
+    _json_out(
+        reconcile_project_resources(
+            db,
+            project_id=args.project_id,
+            pipeline_path=args.pipeline or None,
+        )
+    )
+
+
+def cmd_resource_cleanup_list(args: argparse.Namespace) -> None:
+    from .resource_lifecycle import assess_cleanup_candidates
+
+    db, _, _, _ = _init()
+    _json_out(
+        assess_cleanup_candidates(
+            db,
+            project_id=args.project_id,
+            pipeline_path=args.pipeline or None,
+            account_label=args.account or "",
+            resource_kind=args.kind or "",
+        )
+    )
+
+
+def cmd_resource_cleanup_plan(args: argparse.Namespace) -> None:
+    from .resource_lifecycle import prepare_cleanup_batch
+
+    db, _, _, _ = _init()
+    _json_out(
+        prepare_cleanup_batch(
+            db,
+            project_id=args.project_id,
+            pipeline_path=args.pipeline or None,
+            account_label=args.account or "",
+            resource_kind=args.kind or "",
+        )
+    )
+
+
+def cmd_resource_cleanup_delete(args: argparse.Namespace) -> None:
+    from .resource_lifecycle import delete_cleanup_batch
+
+    db, _, _, _ = _init()
+    _json_out(
+        delete_cleanup_batch(
+            db,
+            batch_id=args.batch_id,
+            confirmation_token=args.confirm,
+            confirmed_by=args.confirmed_by or "user",
+        )
+    )
+
+
+def cmd_resource_history(args: argparse.Namespace) -> None:
+    from .resource_lifecycle import list_resource_state_events
+
+    db, _, _, _ = _init()
+    _json_out(
+        list_resource_state_events(
+            db,
+            project_id=args.project_id,
+            resource_kind=args.kind or "",
+            account_label=args.account or "",
+            new_state=args.state or "",
+            limit=args.limit,
+        )
+    )
 
 
 def cmd_copy_lint(args: argparse.Namespace) -> None:
@@ -1028,8 +1111,6 @@ def cmd_render_final_video(args: argparse.Namespace) -> None:
         account_label=args.account,
         product_media_mode=args.product_media_mode,
         product_order_strategy=args.product_order_strategy,
-        product_image_mode=args.product_image_mode,
-        stale_product_image_policy=args.stale_product_image_policy,
         mode=args.mode,
         top_uids=args.top_uids,
         product_card_template_id=args.product_card_template_id or "",
@@ -1140,16 +1221,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--product-uids", default="", help="comma-separated complete product order; disables reshuffling")
     p.add_argument("--product-order-strategy", choices=["price_segment_shuffle", "stable"], default="price_segment_shuffle")
 
-    # jianying
-    p = sub.add_parser("jianying", help="生成剪映草稿")
-    p.add_argument("project_id", type=int)
-    p.add_argument("--manifest", required=True, help="口播稿 manifest 路径")
-    p.add_argument("--draft-name", required=True, help="草稿名称")
-    p.add_argument("--draft-root", help="剪映草稿根目录")
-    p.add_argument("--intro-video", help="引言视频 MP4 路径")
-    p.add_argument("--with-subtitles", action="store_true", help="生成剪映草稿时同步生成文本字幕轨")
-    p.add_argument("--subtitle-no-vad", action="store_true", help="字幕 ASR 不启用 VAD，兼容 onnxruntime 不可用的环境")
-
     # outline
     p = sub.add_parser("outline", help="创建/更新文案 MD 骨架（价格段自动从 Master scheme 派生）")
     p.add_argument("project_id", type=int)
@@ -1237,10 +1308,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("confirm-phase7-selection", help="记录用户明确确认的阶段 7 输出、媒体、排序和模板选择")
     p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json")
-    p.add_argument("--output-branch", choices=["jianying_draft", "final_mp4", "both"], required=True)
+    p.add_argument("--output-branch", choices=["final_mp4"], required=True)
     p.add_argument("--account", required=True)
     p.add_argument("--product-card-template-id", required=True)
-    p.add_argument("--product-media-mode", choices=["cover_only", "video_preferred"], required=True)
+    p.add_argument("--product-media-mode", choices=["video_preferred"], required=True)
     p.add_argument(
         "--product-order-strategy",
         choices=["price_segment_shuffle", "stable"],
@@ -1261,12 +1332,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json；已发布状态不会被降级")
     p.add_argument("--delivery-dir", default="", help="覆盖 pipeline 中的正式交付目录")
 
-    p = sub.add_parser("complete-publishing", help="记录发布完成并移动或重绑已发布成片")
+    p = sub.add_parser("complete-publishing", help="记录发布完成并整体归档或重绑已发布项目目录")
     p.add_argument("production_run_id", type=int)
     p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json")
     destination = p.add_mutually_exclusive_group()
-    destination.add_argument("--archive-dir", default="", help="覆盖默认归档目录；默认优先使用已发布视频下的当前月份目录，不存在则使用根目录")
-    destination.add_argument("--current-path", default="", help="成片已手工移动时传入当前完整路径")
+    destination.add_argument("--archive-dir", default="", help="覆盖项目目录的最终归档路径；默认使用当前月份目录/原项目目录名")
+    destination.add_argument("--current-path", default="", help="项目目录已整体手工移动时，传入其中正式成片的当前完整路径")
 
     p = sub.add_parser("publishing-context", help="读取正式成片绑定的 Master 账号 ID、B站 MID 和方案 ID")
     p.add_argument("production_run_id", type=int)
@@ -1345,28 +1416,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("project_id", type=int)
     p.add_argument("--account", required=True)
     p.add_argument("--pipeline", required=True, help="包含用户阶段 7 选择确认的 .pipeline.json")
-    p.add_argument(
-        "--output-mode",
-        choices=["jianying_draft", "final_mp4"],
-        default="jianying_draft",
-    )
+    p.add_argument("--output-mode", choices=["final_mp4"], default="final_mp4")
     p.add_argument(
         "--product-media-mode",
-        choices=["cover_only", "video_preferred"],
+        choices=["video_preferred"],
         required=True,
-        help="product display media: cover_only uses only the cover image; video_preferred uses product video when available",
+        help="use product video when ready, otherwise use the current cover",
     )
     p.add_argument(
         "--product-order-strategy",
         choices=["price_segment_shuffle", "stable"],
         default="price_segment_shuffle",
         help="product order strategy: price_segment_shuffle shuffles products within each price segment; stable keeps the synced order",
-    )
-    p.add_argument(
-        "--stale-product-image-policy",
-        choices=["block", "reuse"],
-        default="block",
-        help="block when product-card image fingerprints are stale, or explicitly reuse old images",
     )
     p.add_argument(
         "--mode",
@@ -1393,27 +1454,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--account", required=True)
     p.add_argument(
         "--product-media-mode",
-        choices=["cover_only", "video_preferred"],
+        choices=["video_preferred"],
         required=True,
-        help="cover_only uses only the cover image; video_preferred uses product video when available",
+        help="use product video when ready, otherwise use the current cover",
     )
     p.add_argument(
         "--product-order-strategy",
         choices=["price_segment_shuffle", "stable"],
         default="price_segment_shuffle",
         help="price_segment_shuffle shuffles products within each price segment; stable keeps the synced order",
-    )
-    p.add_argument(
-        "--product-image-mode",
-        choices=["skip", "missing", "stale", "all"],
-        default="missing",
-        help="missing creates absent product-card images before rendering; stale/all regenerate changed images; skip only checks package inputs",
-    )
-    p.add_argument(
-        "--stale-product-image-policy",
-        choices=["block", "reuse"],
-        default="block",
-        help="block when product-card image fingerprints are stale, or explicitly reuse old images",
     )
     p.add_argument(
         "--mode",
@@ -1453,23 +1502,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="none/quick are fast checks; visual extracts frames; full also runs loudnorm",
     )
 
-    p = sub.add_parser("product-images", help="Regenerate Remotion product-card images")
+    p = sub.add_parser("resource-audit", help="Read-only resource lifecycle and orphan audit")
     p.add_argument("project_id", type=int)
-    p.add_argument("--account", required=True)
-    p.add_argument(
-        "--mode",
-        choices=["stale", "missing", "all"],
-        default="stale",
-        help="stale regenerates changed product cards; missing creates absent account images; all regenerates both ready and missing images",
-    )
-    p.add_argument("--product-uid", default="", help="只重生成指定商品 UID 的商品图")
-    p.add_argument(
-        "--product-card-template-id",
-        required=True,
-        help="Remotion-first product-card template id or display name; required for still/product-image generation",
-    )
+    p.add_argument("--pipeline", default="", help="optional current .pipeline.json path")
 
-    p = sub.add_parser("product-card-preflight", help="Preflight product-card data and image freshness before product-images or phase-7 output")
+    p = sub.add_parser("resource-reconcile", help="Register safe cleanup candidates without deleting files")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--pipeline", default="", help="optional current .pipeline.json path")
+
+    p = sub.add_parser("resource-cleanup-list", help="List candidates that pass or fail permanent-delete gates")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--pipeline", default="", help="optional current .pipeline.json path")
+    p.add_argument("--account", default="", help="optional exact account label")
+    p.add_argument("--kind", default="", help="optional exact resource kind")
+
+    p = sub.add_parser("resource-cleanup-plan", help="Prepare a fingerprinted permanent-delete batch")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--pipeline", default="", help="optional current .pipeline.json path")
+    p.add_argument("--account", default="", help="optional exact account label")
+    p.add_argument("--kind", default="", help="optional exact resource kind")
+
+    p = sub.add_parser("resource-cleanup-delete", help="Permanently delete one explicitly confirmed batch")
+    p.add_argument("--batch-id", required=True)
+    p.add_argument("--confirm", required=True, help="one-time token returned by resource-cleanup-plan")
+    p.add_argument("--confirmed-by", default="user", help="audit label for the confirming operator")
+
+    p = sub.add_parser("resource-history", help="Query append-only resource creation, change, invalidation, and deletion events")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--account", default="", help="optional exact account label")
+    p.add_argument("--kind", default="", help="optional exact resource kind")
+    p.add_argument("--state", default="", help="optional exact new state")
+    p.add_argument("--limit", type=int, default=200)
+
+    p = sub.add_parser(
+        "product-card-preflight",
+        help="Preflight current Master data and ready voice/media before dynamic product-card rendering",
+    )
     p.add_argument("project_id", type=int)
     p.add_argument("--account", required=True)
     p.add_argument(
@@ -1478,57 +1546,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="explicit Remotion-first product-card template id or display name",
     )
     p.add_argument("--product-uid", default="", help="optional single product UID to check")
-    p.add_argument("--expect-cover", default="", help="optional filename/substring expected in coverAsset or dataMap.cover")
-
-    p = sub.add_parser("template-calibrate", help="生成单商品剪映模板位置校准草稿")
-    p.add_argument("project_id", type=int)
-    p.add_argument("--account", required=True, help="账号/用户标签，如 小燃")
-    p.add_argument("--product-uid", required=True, help="用于校准的商品 UID")
-    p.add_argument("--draft-name", default="", help="校准草稿名称")
-    p.add_argument("--draft-root", default="", help="剪映草稿根目录")
     p.add_argument(
-        "--product-card-template-id",
-        required=True,
-        help="Remotion-first product-card template id or display name to calibrate",
-    )
-    p.add_argument(
-        "--product-media-mode",
-        choices=["video_preferred"],
-        default="video_preferred",
-        help="模板校准必须使用商品视频模式",
-    )
-
-    p = sub.add_parser("template-calibrate-runner", help="Run standard checklist-based template calibration")
-    p.add_argument(
-        "--target",
+        "--expect-cover",
         default="",
-        help="Target id from config/template-calibration-targets.json; omit to run all active targets",
-    )
-    p.add_argument("--config", default="", help="Override calibration target config path")
-    p.add_argument("--draft-suffix", default="", help="Append suffix to generated draft names, for example v3")
-    p.add_argument("--dry-run", action="store_true", help="Run doctor checks without generating Jianying drafts")
-    p.add_argument("--include-inactive", action="store_true", help="Allow inactive targets from the checklist")
-    p.add_argument(
-        "--no-regenerate-images",
-        dest="regenerate_images",
-        action="store_false",
-        help="Do not run product-images automatically when doctor reports image issues",
-    )
-    p.set_defaults(regenerate_images=True)
-
-    p = sub.add_parser("template-doctor", help="Diagnose product-card template/image/video-slot issues")
-    p.add_argument("project_id", type=int)
-    p.add_argument("--account", required=True)
-    p.add_argument(
-        "--product-card-template-id",
-        default="",
-        help="explicit Remotion-first product-card template id or display name to diagnose",
-    )
-    p.add_argument(
-        "--product-media-mode",
-        choices=["cover_only", "video_preferred"],
-        default="video_preferred",
-        help="media mode to diagnose; video_preferred checks video-slot readiness",
+        help="deprecated compatibility argument; current Master snapshot cover is authoritative",
     )
 
     p = sub.add_parser("copy-lint", help="Check product narration for internal labels and research-process wording")
@@ -1579,7 +1600,6 @@ DISPATCH = {
     "voice-counts": cmd_voice_counts,
     "assemble": cmd_assemble,
     "assemble-plan": cmd_assemble_plan,
-    "jianying": cmd_jianying,
     "outline": cmd_outline,
     "research-pack": cmd_research_pack,
     "intro-plan": cmd_intro_plan,
@@ -1611,11 +1631,13 @@ DISPATCH = {
     "assets-check": cmd_assets_check,
     "render-package": cmd_render_package,
     "render-final-video": cmd_render_final_video,
-    "product-images": cmd_product_images,
+    "resource-audit": cmd_resource_audit,
+    "resource-reconcile": cmd_resource_reconcile,
+    "resource-cleanup-list": cmd_resource_cleanup_list,
+    "resource-cleanup-plan": cmd_resource_cleanup_plan,
+    "resource-cleanup-delete": cmd_resource_cleanup_delete,
+    "resource-history": cmd_resource_history,
     "product-card-preflight": cmd_product_card_preflight,
-    "template-calibrate": cmd_template_calibrate,
-    "template-calibrate-runner": cmd_template_calibrate_runner,
-    "template-doctor": cmd_template_doctor,
     "copy-lint": cmd_copy_lint,
     "copy-audit": cmd_copy_audit,
     "script-doctor": cmd_script_doctor,

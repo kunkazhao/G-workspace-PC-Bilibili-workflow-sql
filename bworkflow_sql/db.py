@@ -207,13 +207,91 @@ CREATE TABLE IF NOT EXISTS production_runs (
     blue_link_master_pending_count INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS resource_cleanup_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+    resource_kind TEXT NOT NULL,
+    path TEXT NOT NULL UNIQUE,
+    reason TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    eligible_at TEXT NOT NULL,
+    quarantine_path TEXT NOT NULL DEFAULT '',
+    details_json TEXT NOT NULL DEFAULT '{}',
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_resource_cleanup_candidates_project_status
+ON resource_cleanup_candidates(project_id, status, eligible_at);
+
+CREATE TABLE IF NOT EXISTS resource_state_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    resource_kind TEXT NOT NULL,
+    resource_key TEXT NOT NULL,
+    path TEXT NOT NULL DEFAULT '',
+    previous_state TEXT NOT NULL DEFAULT '',
+    new_state TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    account_label TEXT NOT NULL DEFAULT '',
+    details_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_resource_state_events_project_resource
+ON resource_state_events(project_id, resource_kind, resource_key, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_resource_state_events_path
+ON resource_state_events(path, created_at);
+
+CREATE TABLE IF NOT EXISTS resource_cleanup_batches (
+    id TEXT PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'prepared',
+    filters_json TEXT NOT NULL DEFAULT '{}',
+    snapshot_hash TEXT NOT NULL,
+    confirmation_token_hash TEXT NOT NULL,
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    total_size_bytes INTEGER NOT NULL DEFAULT 0,
+    confirmed_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    confirmed_at TEXT,
+    executed_at TEXT,
+    result_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_resource_cleanup_batches_project_status
+ON resource_cleanup_batches(project_id, status, created_at);
+
+CREATE TABLE IF NOT EXISTS resource_cleanup_batch_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id TEXT NOT NULL REFERENCES resource_cleanup_batches(id) ON DELETE CASCADE,
+    candidate_id INTEGER REFERENCES resource_cleanup_candidates(id) ON DELETE SET NULL,
+    resource_kind TEXT NOT NULL,
+    path TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    expected_entry_kind TEXT NOT NULL,
+    expected_size_bytes INTEGER NOT NULL DEFAULT 0,
+    expected_mtime_ns INTEGER NOT NULL DEFAULT 0,
+    expected_fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'prepared',
+    result_message TEXT NOT NULL DEFAULT '',
+    deleted_at TEXT,
+    UNIQUE(batch_id, candidate_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_resource_cleanup_batch_items_batch_status
+ON resource_cleanup_batch_items(batch_id, status, id);
+
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL,
     applied_at TEXT NOT NULL
 );
 """
 
-CURRENT_SCHEMA_VERSION = 12
+CURRENT_SCHEMA_VERSION = 15
 
 CONFIRMED_MASTER_ACCOUNT_BINDINGS = {
     "小燃": ("c025960c-5560-4630-8344-509a5c6d92a5", "3546911325817533"),
@@ -313,6 +391,9 @@ class Database:
             (10, self._migrate_v10),
             (11, self._migrate_v11),
             (12, self._migrate_v12),
+            (13, self._migrate_v13),
+            (14, self._migrate_v14),
+            (15, self._migrate_v15),
         ]
         for version, func in migrations:
             if current < version:
@@ -441,6 +522,120 @@ class Database:
                 "ALTER TABLE production_runs ADD COLUMN "
                 "blue_link_title_candidate_count INTEGER NOT NULL DEFAULT 0"
             )
+
+    def _migrate_v13(self, conn: sqlite3.Connection) -> None:
+        """Track delayed, auditable cleanup candidates without deleting files."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS resource_cleanup_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                resource_kind TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                reason TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                eligible_at TEXT NOT NULL,
+                quarantine_path TEXT NOT NULL DEFAULT '',
+                details_json TEXT NOT NULL DEFAULT '{}',
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                resolved_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_resource_cleanup_candidates_project_status
+            ON resource_cleanup_candidates(project_id, status, eligible_at);
+            """
+        )
+
+    def _migrate_v14(self, conn: sqlite3.Connection) -> None:
+        """Record resource state changes and user-confirmed deletion batches."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS resource_state_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                resource_kind TEXT NOT NULL,
+                resource_key TEXT NOT NULL,
+                path TEXT NOT NULL DEFAULT '',
+                previous_state TEXT NOT NULL DEFAULT '',
+                new_state TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                account_label TEXT NOT NULL DEFAULT '',
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_resource_state_events_project_resource
+            ON resource_state_events(project_id, resource_kind, resource_key, created_at);
+            CREATE INDEX IF NOT EXISTS idx_resource_state_events_path
+            ON resource_state_events(path, created_at);
+
+            CREATE TABLE IF NOT EXISTS resource_cleanup_batches (
+                id TEXT PRIMARY KEY,
+                project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                status TEXT NOT NULL DEFAULT 'prepared',
+                filters_json TEXT NOT NULL DEFAULT '{}',
+                snapshot_hash TEXT NOT NULL,
+                confirmation_token_hash TEXT NOT NULL,
+                candidate_count INTEGER NOT NULL DEFAULT 0,
+                total_size_bytes INTEGER NOT NULL DEFAULT 0,
+                confirmed_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                confirmed_at TEXT,
+                executed_at TEXT,
+                result_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_resource_cleanup_batches_project_status
+            ON resource_cleanup_batches(project_id, status, created_at);
+
+            CREATE TABLE IF NOT EXISTS resource_cleanup_batch_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL REFERENCES resource_cleanup_batches(id) ON DELETE CASCADE,
+                candidate_id INTEGER REFERENCES resource_cleanup_candidates(id) ON DELETE SET NULL,
+                resource_kind TEXT NOT NULL,
+                path TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                expected_entry_kind TEXT NOT NULL,
+                expected_size_bytes INTEGER NOT NULL DEFAULT 0,
+                expected_mtime_ns INTEGER NOT NULL DEFAULT 0,
+                expected_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'prepared',
+                result_message TEXT NOT NULL DEFAULT '',
+                deleted_at TEXT,
+                UNIQUE(batch_id, candidate_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_resource_cleanup_batch_items_batch_status
+            ON resource_cleanup_batch_items(batch_id, status, id);
+            """
+        )
+
+    def _migrate_v15(self, conn: sqlite3.Connection) -> None:
+        """Backfill pre-existing cleanup candidates into the append-only event ledger."""
+        conn.execute(
+            """
+            INSERT INTO resource_state_events
+                (project_id, resource_kind, resource_key, path, previous_state,
+                 new_state, reason, source, account_label, details_json, created_at)
+            SELECT c.project_id,
+                   c.resource_kind,
+                   'cleanup_candidate:' || c.id,
+                   c.path,
+                   '',
+                   c.status,
+                   c.reason,
+                   'resource_lifecycle_v15_backfill',
+                   '',
+                   c.details_json,
+                   c.first_seen_at
+            FROM resource_cleanup_candidates c
+            WHERE c.project_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM resource_state_events e
+                  WHERE e.project_id=c.project_id
+                    AND e.resource_key='cleanup_candidate:' || c.id
+              )
+            """
+        )
 
     def _migrate_script_hashes(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute("SELECT id, body, text_hash FROM script_blocks").fetchall()

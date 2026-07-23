@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 import hashlib
+import os
+import tempfile
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+
+from PIL import Image
 
 from .db import Database
 from .repositories import Repository
@@ -25,10 +31,8 @@ from .subtitle_helpers import (
     probe_media_duration_seconds,
 )
 from .template_config import (
-    display_template_from_image_path,
     get_remotion_template_metadata,
     get_template_slot,
-    image_set_for_template,
     remotion_template_id_for_user,
     resolve_product_card_template,
 )
@@ -43,7 +47,7 @@ from .price_transition_plan import (
 )
 
 
-SUPPORTED_OUTPUT_MODES = {"jianying_draft", "final_mp4"}
+SUPPORTED_OUTPUT_MODES = {"final_mp4"}
 SUPPORTED_PRODUCT_MEDIA_MODES = {"cover_only", "video_preferred"}
 DEFAULT_PRODUCT_MEDIA_MODE = "video_preferred"
 SUPPORTED_PRODUCT_ORDER_STRATEGIES = {"price_segment_shuffle", "stable"}
@@ -128,6 +132,391 @@ class ProductRenderPackageResult:
     package: dict[str, Any]
     missing: list[dict[str, Any]]
     stale_product_images: list[dict[str, Any]]
+
+
+class ProductCoverMaterializationError(ValueError):
+    pass
+
+
+def _dynamic_context_issue(uid: str, field: str, message: str) -> dict[str, str]:
+    return {
+        "kind": "dynamic_product_context",
+        "uid": uid,
+        "field": field,
+        "message": message,
+    }
+
+
+def _validated_dynamic_context_map(
+    products: list[dict[str, Any]],
+    contexts: list[dict[str, Any]] | None,
+    *,
+    master_snapshot_id: str | None,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    expected_uids = [safe_text(product.get("uid")).strip() for product in products]
+    expected = set(expected_uids)
+    issues: list[dict[str, Any]] = []
+    if not isinstance(master_snapshot_id, str) or not master_snapshot_id.strip():
+        issues.append(
+            _dynamic_context_issue(
+                "",
+                "master_snapshot_id",
+                "final_mp4 requires the frozen Master snapshot id as a non-empty string",
+            )
+        )
+    if not isinstance(contexts, list):
+        contexts = []
+        issues.append(
+            _dynamic_context_issue(
+                "",
+                "contexts",
+                "final_mp4 requires frozen dynamic product contexts as a list",
+            )
+        )
+
+    result: dict[str, dict[str, Any]] = {}
+    duplicates: set[str] = set()
+    seen_uids: set[str] = set()
+    for context_index, context in enumerate(contexts):
+        if not isinstance(context, dict):
+            issues.append(
+                _dynamic_context_issue(
+                    "",
+                    f"contexts[{context_index}]",
+                    "dynamic product context must be an object",
+                )
+            )
+            continue
+
+        raw_uid = context.get("product_uid")
+        uid = raw_uid.strip() if isinstance(raw_uid, str) else ""
+        if not isinstance(raw_uid, str) or not uid:
+            issues.append(
+                _dynamic_context_issue(
+                    "",
+                    "product_uid",
+                    "dynamic product context product_uid must be a non-empty string",
+                )
+            )
+        elif uid in seen_uids:
+            duplicates.add(uid)
+        else:
+            seen_uids.add(uid)
+
+        normalized_data: dict[str, str] = {}
+        raw_data = context.get("data_map")
+        if not isinstance(raw_data, dict):
+            issues.append(
+                _dynamic_context_issue(uid, "data_map", "data_map must be an object")
+            )
+        else:
+            for field in (
+                "title",
+                "displayPrice",
+                "review",
+                "priceBandLabel",
+                "categoryLabel",
+            ):
+                value = raw_data.get(field)
+                if not isinstance(value, str):
+                    issues.append(
+                        _dynamic_context_issue(
+                            uid,
+                            f"data_map.{field}",
+                            f"data_map.{field} must be a string",
+                        )
+                    )
+                    continue
+                normalized_value = value.strip()
+                if field in {"title", "displayPrice", "priceBandLabel"} and not normalized_value:
+                    issues.append(
+                        _dynamic_context_issue(
+                            uid,
+                            f"data_map.{field}",
+                            f"data_map.{field} must be non-empty",
+                        )
+                    )
+                    continue
+                normalized_data[field] = normalized_value
+
+        normalized_specs: list[dict[str, str]] = []
+        raw_specs = context.get("specs")
+        if not isinstance(raw_specs, list):
+            issues.append(
+                _dynamic_context_issue(uid, "specs", "specs must be a list")
+            )
+        else:
+            for spec_index, raw_spec in enumerate(raw_specs):
+                if not isinstance(raw_spec, dict):
+                    issues.append(
+                        _dynamic_context_issue(
+                            uid,
+                            f"specs[{spec_index}]",
+                            f"specs[{spec_index}] must be an object",
+                        )
+                    )
+                    continue
+                normalized_spec: dict[str, str] = {}
+                for field in ("label", "value"):
+                    value = raw_spec.get(field)
+                    if not isinstance(value, str) or not value.strip():
+                        issues.append(
+                            _dynamic_context_issue(
+                                uid,
+                                f"specs[{spec_index}].{field}",
+                                f"specs[{spec_index}].{field} must be a non-empty string",
+                            )
+                        )
+                        continue
+                    normalized_spec[field] = value.strip()
+                if set(normalized_spec) == {"label", "value"}:
+                    normalized_specs.append(normalized_spec)
+
+        raw_media_kind = context.get("media_kind")
+        media_kind = raw_media_kind.strip() if isinstance(raw_media_kind, str) else ""
+        if not isinstance(raw_media_kind, str) or media_kind not in {"cover", "video"}:
+            issues.append(
+                _dynamic_context_issue(
+                    uid,
+                    "media_kind",
+                    "media_kind must be either cover or video",
+                )
+            )
+
+        raw_media_asset = context.get("media_asset")
+        media_asset = raw_media_asset.strip() if isinstance(raw_media_asset, str) else ""
+        normalized_media_asset = media_asset
+        if not isinstance(raw_media_asset, str) or not media_asset:
+            issues.append(
+                _dynamic_context_issue(
+                    uid,
+                    "media_asset",
+                    "media_asset must be a non-empty string",
+                )
+            )
+        elif _is_remote_url(media_asset):
+            if media_kind == "video":
+                issues.append(
+                    _dynamic_context_issue(
+                        uid,
+                        "media_asset",
+                        "video media_asset must be an existing local file",
+                    )
+                )
+        else:
+            try:
+                media_path = Path(media_asset).resolve()
+                normalized_media_asset = str(media_path)
+                media_exists = media_path.is_file()
+            except (OSError, RuntimeError, ValueError) as exc:
+                media_exists = False
+                normalized_media_asset = media_asset
+                media_error = str(exc)
+            else:
+                media_error = ""
+            if not media_exists:
+                issues.append(
+                    _dynamic_context_issue(
+                        uid,
+                        "media_asset",
+                        f"media_asset does not exist: {media_asset}"
+                        + (f": {media_error}" if media_error else ""),
+                    )
+                )
+
+        raw_voice_asset = context.get("voice_asset")
+        voice_asset = raw_voice_asset.strip() if isinstance(raw_voice_asset, str) else ""
+        normalized_voice_asset = voice_asset
+        voice_duration: float | None = None
+        if not isinstance(raw_voice_asset, str) or not voice_asset:
+            issues.append(
+                _dynamic_context_issue(
+                    uid,
+                    "voice_asset",
+                    "voice_asset must be a non-empty string",
+                )
+            )
+        elif _is_remote_url(voice_asset):
+            issues.append(
+                _dynamic_context_issue(
+                    uid,
+                    "voice_asset",
+                    "voice_asset must be an existing local file",
+                )
+                )
+        else:
+            try:
+                voice_path = Path(voice_asset).resolve()
+                normalized_voice_asset = str(voice_path)
+                voice_exists = voice_path.is_file()
+            except (OSError, RuntimeError, ValueError) as exc:
+                voice_exists = False
+                normalized_voice_asset = voice_asset
+                voice_error = str(exc)
+            else:
+                voice_error = ""
+            if not voice_exists:
+                issues.append(
+                    _dynamic_context_issue(
+                        uid,
+                        "voice_asset",
+                        f"voice_asset does not exist: {voice_asset}"
+                        + (f": {voice_error}" if voice_error else ""),
+                    )
+                )
+            else:
+                try:
+                    voice_duration = float(get_audio_duration_seconds(voice_path))
+                    if not math.isfinite(voice_duration) or voice_duration <= 0:
+                        raise ValueError("duration must be positive")
+                except Exception as exc:
+                    voice_duration = None
+                    issues.append(
+                        _dynamic_context_issue(
+                            uid,
+                            "voice_asset",
+                            f"voice_asset duration could not be read: {exc}",
+                        )
+                    )
+
+        raw_spoken_text = context.get("spoken_text")
+        spoken_text = raw_spoken_text.strip() if isinstance(raw_spoken_text, str) else ""
+        if not isinstance(raw_spoken_text, str) or not spoken_text:
+            issues.append(
+                _dynamic_context_issue(
+                    uid,
+                    "spoken_text",
+                    "spoken_text must be a non-empty string",
+                )
+            )
+
+        source_script_block_id = context.get("source_script_block_id")
+        if type(source_script_block_id) is not int or source_script_block_id <= 0:
+            issues.append(
+                _dynamic_context_issue(
+                    uid,
+                    "source_script_block_id",
+                    "source_script_block_id must be a positive integer",
+                )
+            )
+
+        if uid and uid not in result:
+            result[uid] = {
+                "product_uid": uid,
+                "data_map": normalized_data,
+                "specs": normalized_specs,
+                "media_kind": media_kind,
+                "media_asset": normalized_media_asset,
+                "voice_asset": normalized_voice_asset,
+                "spoken_text": spoken_text,
+                "source_script_block_id": source_script_block_id,
+                "_voice_duration": voice_duration,
+            }
+    for uid in sorted(duplicates):
+        issues.append(
+            _dynamic_context_issue(
+                uid,
+                "product_uid",
+                "duplicate dynamic product context",
+            )
+        )
+        result.pop(uid, None)
+    for uid in sorted(set(result) - expected):
+        issues.append(
+            _dynamic_context_issue(
+                uid,
+                "product_uid",
+                "dynamic product context does not match a selected product",
+            )
+        )
+        result.pop(uid, None)
+    for uid in expected_uids:
+        if uid not in seen_uids:
+            issues.append(
+                _dynamic_context_issue(
+                    uid,
+                    "product_uid",
+                    "missing dynamic product context for selected product",
+                )
+            )
+    if issues:
+        return {}, issues
+    return result, []
+
+
+def _dynamic_product_segment(
+    context: dict[str, Any],
+    *,
+    project: dict[str, Any],
+    selected_template: dict[str, Any],
+    subtitle_alignment: str,
+) -> dict[str, Any]:
+    uid = context["product_uid"]
+    semantic_data = context["data_map"]
+    specs = context["specs"]
+    media_kind = context["media_kind"]
+    media_value = context["media_asset"]
+    if media_kind == "cover" and _is_remote_url(media_value):
+        media_path = _ensure_remote_cover_cached(
+            media_value,
+            category=safe_text(project.get("category_name") or project.get("name")),
+            uid=uid,
+        )
+    else:
+        media_path = Path(media_value)
+
+    voice_path = Path(context["voice_asset"])
+    spoken_text = context["spoken_text"]
+    source_script_block_id = context["source_script_block_id"]
+
+    template_id = safe_text(selected_template.get("templateId"))
+    template_version = safe_text(selected_template.get("templateVersion"))
+    if not template_id or not template_version:
+        raise ValueError("selected product-card template metadata is incomplete")
+    product_card: dict[str, Any] = {
+        "templateId": template_id,
+        "templateVersion": template_version,
+        "dataMap": semantic_data,
+        "slots": specs,
+    }
+    if media_kind == "cover":
+        product_card["coverAsset"] = str(media_path)
+    for metadata_key in (
+        "cardPlacement",
+        "outputCanvas",
+        "coverMediaSlot",
+        "videoOverlaySlot",
+    ):
+        metadata_value = selected_template.get(metadata_key)
+        if isinstance(metadata_value, dict):
+            product_card[metadata_key] = dict(metadata_value)
+
+    duration = context["_voice_duration"]
+    segment: dict[str, Any] = {
+        "type": "product_recommendation",
+        "id": f"product-{uid}",
+        "productUid": uid,
+        "productTitle": semantic_data["title"],
+        "priceRangeLabel": semantic_data["priceBandLabel"],
+        "spokenText": spoken_text,
+        "voiceAsset": str(voice_path),
+        "productMediaMode": "video_preferred",
+        "duration": duration,
+        "sourceScriptBlockId": source_script_block_id,
+        "productCard": product_card,
+        "subtitles": (
+            []
+            if subtitle_alignment == "asr"
+            else _segment_subtitles(
+                spoken_text,
+                duration,
+                subtitle_alignment=subtitle_alignment,
+            )
+        ),
+    }
+    if media_kind == "video":
+        segment["videoAsset"] = str(media_path)
+    return segment
 
 
 def _trim_transition_text(text: str) -> str:
@@ -267,7 +656,7 @@ def build_product_recommendation_package(
     *,
     project_id: int,
     account_label: str,
-    output_mode: str = "jianying_draft",
+    output_mode: str = "final_mp4",
     product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
     product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
     product_card_template_id: str = "",
@@ -279,12 +668,16 @@ def build_product_recommendation_package(
     intro_video_text: str = "",
     include_outro: bool = False,
     closing_text: str = "",
+    dynamic_product_contexts: list[dict[str, Any]] | None = None,
+    master_snapshot_id: str | None = None,
 ) -> ProductRenderPackageResult:
     if output_mode not in SUPPORTED_OUTPUT_MODES:
         raise ValueError(f"unsupported output_mode: {output_mode}")
     media_mode = safe_text(product_media_mode) or DEFAULT_PRODUCT_MEDIA_MODE
     if media_mode not in SUPPORTED_PRODUCT_MEDIA_MODES:
         raise ValueError(f"unsupported product_media_mode: {media_mode}")
+    if output_mode == "final_mp4":
+        media_mode = "video_preferred"
     order_strategy = safe_text(product_order_strategy) or DEFAULT_PRODUCT_ORDER_STRATEGY
     if order_strategy not in SUPPORTED_PRODUCT_ORDER_STRATEGIES:
         raise ValueError(f"unsupported product_order_strategy: {order_strategy}")
@@ -296,10 +689,6 @@ def build_product_recommendation_package(
         account_label,
         product_card_template_id,
     )
-    selected_image_set = image_set_for_template(
-        safe_text(selected_template.get("displayName"))
-    )
-
     repo = Repository(db)
     project = repo.project(project_id)
     if not project:
@@ -314,11 +703,6 @@ def build_product_recommendation_package(
     )
     blocks = repo.script_blocks(project_id)
     assets = repo.asset_bindings(project_id)
-    product_blocks = {
-        safe_text(block.get("owner_uid")): block
-        for block in blocks
-        if safe_text(block.get("script_type")) == "product"
-    }
     price_blocks = [
         block
         for block in blocks
@@ -329,6 +713,14 @@ def build_product_recommendation_package(
     stale_product_images: list[dict[str, Any]] = []
     price_segments: dict[str, dict[str, Any]] = {}
     product_segments: dict[str, dict[str, Any]] = {}
+    dynamic_context_by_uid: dict[str, dict[str, Any]] = {}
+    if output_mode == "final_mp4":
+        dynamic_context_by_uid, context_issues = _validated_dynamic_context_map(
+            products,
+            dynamic_product_contexts,
+            master_snapshot_id=master_snapshot_id,
+        )
+        missing.extend(context_issues)
     price_plan_error = ""
     try:
         strict_price_plan = load_price_transition_plan_set(project_id) is not None
@@ -409,146 +801,54 @@ def build_product_recommendation_package(
     for product in products:
         uid = safe_text(product.get("uid"))
         title = safe_text(product.get("title"))
-        block = product_blocks.get(uid)
-        if not block:
-            missing.append(
-                {
-                    "kind": "product_script",
-                    "uid": uid,
-                    "title": title,
-                    "message": "missing product script",
-                }
-            )
-            continue
-
-        image = _ready_asset(
-            assets,
-            asset_type="image",
-            uid=uid,
-            account_label=account,
-            allow_unscoped_account=True,
-            preferred_image_set=selected_image_set,
-        )
-        voice = _ready_asset(
-            assets,
-            asset_type="voice",
-            uid=uid,
-            account_label=account,
-            script_block_id=int(block.get("id") or 0),
-            text_hash=safe_text(block.get("text_hash")),
-        )
-        video = _ready_asset(assets, asset_type="video", uid=uid)
-        product_missing = False
-        if not voice:
-            product_missing = True
-            missing.append(
-                {
-                    "kind": "product_voice",
-                    "uid": uid,
-                    "title": title,
-                    "script_block_id": int(block.get("id") or 0),
-                    "message": "missing ready voice for product script",
-                }
-            )
-
-        image_path = _absolute_file_path(image.get("path")) if image else None
-        video_path = (
-            _absolute_file_path(video.get("path"))
-            if media_mode == "video_preferred" and video
-            else None
-        )
-        try:
-            product_card = _product_card_payload(
-                product,
-                project=project,
-                fallback_image_path=image_path,
-                account_label=account,
-                product_card_template_id=safe_text(selected_template.get("templateId")),
-            )
-        except ValueError as exc:
-            missing.append(
-                {
-                    "kind": "product_cover",
-                    "uid": uid,
-                    "title": title,
-                    "message": str(exc),
-                }
-            )
-            continue
-        if not image and (output_mode == "jianying_draft" or not product_card):
-            product_missing = True
-            missing.append(
-                {
-                    "kind": "product_image",
-                    "uid": uid,
-                    "title": title,
-                    "message": "missing ready image for product",
-                }
-            )
-        if product_missing:
-            continue
-
-        voice_path = _absolute_file_path(voice.get("path"))
-        duration = get_audio_duration_seconds(voice_path)
-        product_segment = {
-            "type": "product_recommendation",
-            "id": f"product-{uid}",
-            "productUid": uid,
-            "motionSeed": _product_motion_seed(project_id, account, uid),
-            "productTitle": title,
-            "priceRangeLabel": safe_text(product.get("price_label")),
-            "spokenText": safe_text(block.get("body")),
-            "voiceAsset": str(voice_path),
-            "imageCardAsset": str(image_path) if image_path else None,
-            "videoAsset": str(video_path) if video_path else None,
-            "productMediaMode": media_mode,
-            "duration": duration,
-            "sourceScriptBlockId": int(block.get("id") or 0),
-            "assetBindingIds": {
-                "image": int(image.get("id") or 0) if image else None,
-                "voice": int(voice.get("id") or 0),
-                "video": int(video.get("id") or 0) if video else None,
-            },
-            "subtitles": (
-                []
-                if subtitle_mode == "asr"
-                else _segment_subtitles(
-                    safe_text(block.get("body")),
-                    duration,
+        if output_mode == "final_mp4":
+            context = dynamic_context_by_uid.get(uid)
+            if context is None:
+                continue
+            try:
+                product_segments[uid] = _dynamic_product_segment(
+                    context,
+                    project=project,
+                    selected_template=selected_template,
                     subtitle_alignment=subtitle_mode,
                 )
-            )
-            if output_mode == "final_mp4"
-            else [],
-        }
-        if product_card:
-            product_segment["productCard"] = product_card
-            card_fingerprint = product_card_content_fingerprint(product, product_card)
-            if card_fingerprint:
-                product_segment["productCardFingerprint"] = card_fingerprint
-                stored_image_fingerprint = safe_text(image.get("text_hash")) if image else ""
-                if stored_image_fingerprint and stored_image_fingerprint != card_fingerprint:
-                    stale_product_images.append(
-                        {
-                            "kind": "stale_product_image",
-                            "uid": uid,
-                            "title": title,
-                            "asset_binding_id": int(image.get("id") or 0) if image else None,
-                            "path": str(image_path) if image_path else "",
-                            "stored_fingerprint": stored_image_fingerprint,
-                            "expected_fingerprint": card_fingerprint,
-                            "message": "product card image content fingerprint changed",
-                        }
-                    )
-        elif video_path and image_path:
-            display_template = display_template_from_image_path(str(image_path), account_label=account)
-            if display_template:
-                product_segment["displayTemplate"] = display_template
-                product_segment["displayVideoSlot"] = _display_video_slot_for_template(display_template)
-        product_segments[uid] = product_segment
-
+            except ValueError as exc:
+                missing.append(
+                    {
+                        "kind": (
+                            "product_cover"
+                            if isinstance(exc, ProductCoverMaterializationError)
+                            else "dynamic_product_context"
+                        ),
+                        "uid": uid,
+                        "message": str(exc),
+                    }
+                )
+            continue
     segments = _arrange_segments(
-        products,
+        [
+            {
+                **product,
+                "_dynamic_price_band_label": safe_text(
+                    (
+                        dynamic_context_by_uid.get(safe_text(product.get("uid")), {}).get(
+                            "data_map", {}
+                        )
+                        if isinstance(
+                            dynamic_context_by_uid.get(safe_text(product.get("uid")), {}).get(
+                                "data_map"
+                            ),
+                            dict,
+                        )
+                        else {}
+                    ).get("priceBandLabel")
+                )
+                or product.get("price_label"),
+            }
+            for product in products
+        ]
+        if output_mode == "final_mp4"
+        else products,
         price_blocks=price_blocks,
         price_segments=price_segments,
         product_segments=product_segments,
@@ -652,6 +952,11 @@ def build_product_recommendation_package(
             "account": account,
             "bworkflowProjectId": int(project_id),
             "masterSchemeId": safe_text(project.get("scheme_id")),
+            **(
+                {"masterSnapshotId": safe_text(master_snapshot_id)}
+                if output_mode == "final_mp4" and safe_text(master_snapshot_id)
+                else {}
+            ),
         },
         "output": {
             "mode": output_mode,
@@ -1134,6 +1439,9 @@ def _has_matching_price_groups(products: list[dict[str, Any]], price_blocks: lis
 
 
 def _matching_price_label(product: dict[str, Any], price_blocks: list[dict[str, Any]]) -> str:
+    dynamic_label = safe_text(product.get("_dynamic_price_band_label"))
+    if dynamic_label:
+        return dynamic_label
     price = _first_number(safe_text(product.get("price_label")))
     if price is None:
         return ""
@@ -1271,25 +1579,137 @@ def _is_remote_url(value: str) -> bool:
 
 def _ensure_remote_cover_cached(url: str, *, category: str, uid: str) -> Path:
     target = _cover_cache_path(category=category, uid=uid, url=url)
-    if target.is_file():
-        data = target.read_bytes()
-        detected_suffix = _image_suffix_from_bytes(data)
-        if detected_suffix and detected_suffix != target.suffix.lower():
-            corrected_target = target.with_suffix(detected_suffix)
-            if not corrected_target.is_file() or corrected_target.read_bytes() != data:
-                corrected_target.write_bytes(data)
-            return corrected_target
-        return target
-    target.parent.mkdir(parents=True, exist_ok=True)
+    png_target = target.with_suffix(".png")
+    webp_target = target.with_suffix(".webp")
+    cache_candidates = tuple(
+        dict.fromkeys(
+            (
+                png_target,
+                target,
+                target.with_suffix(".jpg"),
+                target.with_suffix(".jpeg"),
+                webp_target,
+            )
+        )
+    )
+    for cached_path in cache_candidates:
+        if not cached_path.is_file():
+            continue
+        try:
+            cached_stat = cached_path.stat()
+            cached_data = cached_path.read_bytes()
+        except OSError as exc:
+            raise ProductCoverMaterializationError(
+                f"failed to read cached product cover for {uid}: {url}: {exc}"
+            ) from exc
+        try:
+            suffix, materialized = _validated_cover_payload(cached_data)
+        except Exception:
+            try:
+                _unlink_corrupt_cover_if_unchanged(
+                    cached_path,
+                    expected_data=cached_data,
+                    expected_stat=cached_stat,
+                )
+            except OSError as exc:
+                raise ProductCoverMaterializationError(
+                    f"failed to remove corrupt product cover for {uid}: {url}: {exc}"
+                ) from exc
+            continue
+        try:
+            return _materialize_validated_cover(
+                suffix,
+                materialized,
+                target=cached_path,
+            )
+        except Exception as exc:
+            raise ProductCoverMaterializationError(
+                f"failed to cache product cover for {uid}: {url}: {exc}"
+            ) from exc
+
     try:
         data = _download_url_bytes(url)
-    except Exception as exc:  # pragma: no cover - exercised through caller behavior.
-        raise ValueError(f"failed to download product cover for {uid}: {url}: {exc}") from exc
-    detected_suffix = _image_suffix_from_bytes(data)
-    if detected_suffix and detected_suffix != target.suffix.lower():
-        target = target.with_suffix(detected_suffix)
-    target.write_bytes(data)
-    return target
+        return _materialize_cover_bytes(data, target=target)
+    except Exception as exc:
+        raise ProductCoverMaterializationError(
+            f"failed to cache product cover for {uid}: {url}: {exc}"
+        ) from exc
+
+
+def _materialize_cover_bytes(data: bytes, *, target: Path) -> Path:
+    suffix, materialized = _validated_cover_payload(data)
+    return _materialize_validated_cover(suffix, materialized, target=target)
+
+
+def _materialize_validated_cover(suffix: str, data: bytes, *, target: Path) -> Path:
+    resolved_target = target.with_suffix(suffix)
+    if resolved_target.is_file() and resolved_target.read_bytes() == data:
+        return resolved_target
+    _atomic_write_bytes(resolved_target, data)
+    return resolved_target
+
+
+def _unlink_corrupt_cover_if_unchanged(
+    path: Path,
+    *,
+    expected_data: bytes,
+    expected_stat: os.stat_result,
+) -> None:
+    try:
+        current_stat = path.stat()
+        current_data = path.read_bytes()
+    except FileNotFoundError:
+        return
+    identity = (
+        current_stat.st_dev,
+        current_stat.st_ino,
+        current_stat.st_size,
+        current_stat.st_mtime_ns,
+    )
+    expected_identity = (
+        expected_stat.st_dev,
+        expected_stat.st_ino,
+        expected_stat.st_size,
+        expected_stat.st_mtime_ns,
+    )
+    if identity == expected_identity and current_data == expected_data:
+        path.unlink()
+
+
+def _validated_cover_payload(data: bytes) -> tuple[str, bytes]:
+    with Image.open(BytesIO(data), formats=["JPEG", "PNG", "WEBP"]) as image:
+        image_format = safe_text(image.format).upper()
+        if image_format not in {"JPEG", "PNG", "WEBP"}:
+            raise ValueError(f"unsupported product cover image format: {image_format or 'unknown'}")
+        image.load()
+        if image_format == "WEBP":
+            output = BytesIO()
+            decoded = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+            decoded.save(output, format="PNG")
+            return ".png", output.getvalue()
+        return (".jpg" if image_format == "JPEG" else ".png"), data
+
+
+def _atomic_write_bytes(target: Path, data: bytes) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(target)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _cover_cache_path(*, category: str, uid: str, url: str) -> Path:
@@ -1308,16 +1728,6 @@ def _cover_cache_path(*, category: str, uid: str, url: str) -> Path:
 def _download_url_bytes(url: str) -> bytes:
     with urllib.request.urlopen(url, timeout=30) as response:
         return response.read()
-
-
-def _image_suffix_from_bytes(data: bytes) -> str:
-    if data.startswith(b"\xff\xd8\xff"):
-        return ".jpg"
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return ".png"
-    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return ".webp"
-    return ""
 
 
 def _safe_path_component(value: str) -> str:
