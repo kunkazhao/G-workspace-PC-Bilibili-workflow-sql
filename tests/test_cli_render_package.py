@@ -29,11 +29,9 @@ def test_render_package_parser_registers_command():
             "--output-mode",
             "final_mp4",
             "--product-media-mode",
-            "cover_only",
+            "video_preferred",
             "--product-order-strategy",
             "stable",
-            "--stale-product-image-policy",
-            "reuse",
             "--mode",
             "top",
             "--top-uids",
@@ -49,38 +47,12 @@ def test_render_package_parser_registers_command():
     assert args.project_id == 3
     assert args.account == "xiaobo"
     assert args.output_mode == "final_mp4"
-    assert args.product_media_mode == "cover_only"
+    assert args.product_media_mode == "video_preferred"
     assert args.product_order_strategy == "stable"
-    assert args.stale_product_image_policy == "reuse"
     assert args.mode == "top"
     assert args.top_uids == "P003,P001"
     assert args.product_card_template_id == "muban-xiaobo-1"
     assert args.output == "out.json"
-
-
-def test_product_images_parser_registers_command():
-    args = cli.build_parser().parse_args(
-        [
-            "product-images",
-            "3",
-            "--account",
-            "xiaobo",
-            "--mode",
-            "missing",
-            "--product-uid",
-            "P001",
-            "--product-card-template-id",
-            "muban-xiaobo-1",
-        ]
-    )
-
-    assert args.command == "product-images"
-    assert args.project_id == 3
-    assert args.account == "xiaobo"
-    assert args.mode == "missing"
-    assert args.product_uid == "P001"
-    assert args.product_card_template_id == "muban-xiaobo-1"
-    assert args.workers == 3
 
 
 def test_product_card_preflight_parser_registers_command():
@@ -180,57 +152,6 @@ def test_render_intro_video_parser_uses_production_defaults():
 
     assert args.intro_label == "引言1"
     assert Path(args.asset_root) == Path(r"G:\2026项目-b站\素材-自动剪辑")
-
-
-def test_template_calibrate_parser_registers_command():
-    args = cli.build_parser().parse_args(
-        [
-            "template-calibrate",
-            "3",
-            "--account",
-            "小燃",
-            "--product-uid",
-            "P001",
-            "--draft-name",
-            "校准-P001",
-            "--draft-root",
-            "drafts",
-            "--product-card-template-id",
-            "muban-xiaoran-2",
-            "--product-media-mode",
-            "video_preferred",
-        ]
-    )
-
-    assert args.command == "template-calibrate"
-    assert args.project_id == 3
-    assert args.account == "小燃"
-    assert args.product_uid == "P001"
-    assert args.draft_name == "校准-P001"
-    assert args.draft_root == "drafts"
-    assert args.product_card_template_id == "muban-xiaoran-2"
-    assert args.product_media_mode == "video_preferred"
-
-
-def test_template_doctor_parser_registers_command():
-    args = cli.build_parser().parse_args(
-        [
-            "template-doctor",
-            "3",
-            "--account",
-            "灏忓崥",
-            "--product-card-template-id",
-            "muban-xiaobo-1",
-            "--product-media-mode",
-            "video_preferred",
-        ]
-    )
-
-    assert args.command == "template-doctor"
-    assert args.project_id == 3
-    assert args.account == "灏忓崥"
-    assert args.product_card_template_id == "muban-xiaobo-1"
-    assert args.product_media_mode == "video_preferred"
 
 
 def test_script_doctor_parser_registers_command():
@@ -398,31 +319,6 @@ def test_assemble_parser_registers_ordering_options():
     assert args.output == "spoken.md"
 
 
-def test_template_calibrate_runner_parser_registers_command():
-    args = cli.build_parser().parse_args(
-        [
-            "template-calibrate-runner",
-            "--target",
-            "xiaobo-template2",
-            "--config",
-            "targets.json",
-            "--draft-suffix",
-            "v3",
-            "--dry-run",
-            "--include-inactive",
-            "--no-regenerate-images",
-        ]
-    )
-
-    assert args.command == "template-calibrate-runner"
-    assert args.target == "xiaobo-template2"
-    assert args.config == "targets.json"
-    assert args.draft_suffix == "v3"
-    assert args.dry_run is True
-    assert args.include_inactive is True
-    assert args.regenerate_images is False
-
-
 def test_render_final_video_parser_registers_command():
     args = cli.build_parser().parse_args(
         [
@@ -431,13 +327,9 @@ def test_render_final_video_parser_registers_command():
             "--account",
             "小燃",
             "--product-media-mode",
-            "cover_only",
+            "video_preferred",
             "--product-order-strategy",
             "stable",
-            "--product-image-mode",
-            "missing",
-            "--stale-product-image-policy",
-            "reuse",
             "--mode",
             "top",
             "--top-uids",
@@ -468,10 +360,8 @@ def test_render_final_video_parser_registers_command():
     assert args.command == "render-final-video"
     assert args.project_id == 3
     assert args.account == "小燃"
-    assert args.product_media_mode == "cover_only"
+    assert args.product_media_mode == "video_preferred"
     assert args.product_order_strategy == "stable"
-    assert args.product_image_mode == "missing"
-    assert args.stale_product_image_policy == "reuse"
     assert args.mode == "top"
     assert args.top_uids == "P003,P001"
     assert args.product_card_template_id == "muban-xiaobo-1"
@@ -507,184 +397,6 @@ def test_render_final_video_parser_accepts_visual_acceptance_mode():
     )
 
     assert args.acceptance_mode == "visual"
-
-
-def test_cmd_product_images_writes_regeneration_json(capsys, monkeypatch):
-    calls: list[dict[str, object]] = []
-
-    class FakeWorkflow:
-        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id, max_workers):
-            calls.append(
-                {
-                    "project_id": project_id,
-                    "account_label": account_label,
-                    "mode": mode,
-                    "product_uid": product_uid,
-                    "product_card_template_id": product_card_template_id,
-                    "max_workers": max_workers,
-                }
-            )
-            return {
-                "ok": True,
-                "project_id": project_id,
-                "account": account_label,
-                "mode": mode,
-                "regenerated": [{"uid": "P001"}],
-                "skipped": [],
-            }
-
-    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
-
-    cli.cmd_product_images(
-        Namespace(
-            project_id=3,
-            account="xiaobo",
-            mode="stale",
-            product_uid="P001",
-            product_card_template_id="muban-xiaobo-1",
-            workers=3,
-        )
-    )
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True
-    assert payload["regenerated"] == [{"uid": "P001"}]
-    assert calls == [
-        {
-            "project_id": 3,
-            "account_label": "xiaobo",
-            "mode": "stale",
-            "product_uid": "P001",
-            "product_card_template_id": "muban-xiaobo-1",
-            "max_workers": 3,
-        }
-    ]
-
-
-def test_product_images_help_requires_explicit_product_card_template() -> None:
-    parser = cli.build_parser()
-    product_images = parser._subparsers._group_actions[0].choices["product-images"]
-    action = next(
-        action
-        for action in product_images._actions
-        if "--product-card-template-id" in action.option_strings
-    )
-
-    assert "required for still/product-image generation" in action.help
-    assert "defaults to the account template" not in action.help
-
-
-def test_cmd_template_calibrate_writes_probe_json(capsys, monkeypatch):
-    calls: list[dict[str, object]] = []
-
-    class FakeWorkflow:
-        def template_calibration_probe(
-            self,
-            project_id,
-            *,
-            account_label,
-            product_uid,
-            draft_name,
-            draft_root,
-            product_media_mode,
-            product_card_template_id,
-        ):
-            calls.append(
-                {
-                    "project_id": project_id,
-                    "account_label": account_label,
-                    "product_uid": product_uid,
-                    "draft_name": draft_name,
-                    "draft_root": draft_root,
-                    "product_media_mode": product_media_mode,
-                    "product_card_template_id": product_card_template_id,
-                }
-            )
-            return {
-                "ok": True,
-                "probe_manifest_path": "probe.json",
-                "draft": {"returncode": 0},
-            }
-
-    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
-
-    cli.cmd_template_calibrate(
-        Namespace(
-            project_id=3,
-            account="小燃",
-            product_uid="P001",
-            draft_name="校准-P001",
-            draft_root="drafts",
-            product_media_mode="video_preferred",
-            product_card_template_id="muban-xiaoran-2",
-        )
-    )
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True
-    assert payload["probe_manifest_path"] == "probe.json"
-    assert calls == [
-        {
-            "project_id": 3,
-            "account_label": "小燃",
-            "product_uid": "P001",
-            "draft_name": "校准-P001",
-            "draft_root": "drafts",
-            "product_media_mode": "video_preferred",
-            "product_card_template_id": "muban-xiaoran-2",
-        }
-    ]
-
-
-def test_cmd_template_doctor_writes_diagnostic_json(capsys, monkeypatch):
-    calls: list[dict[str, object]] = []
-
-    class FakeWorkflow:
-        def template_doctor(
-            self,
-            project_id,
-            *,
-            account_label,
-            product_card_template_id,
-            product_media_mode,
-        ):
-            calls.append(
-                {
-                    "project_id": project_id,
-                    "account_label": account_label,
-                    "product_card_template_id": product_card_template_id,
-                    "product_media_mode": product_media_mode,
-                }
-            )
-            return {
-                "ok": False,
-                "status": "issues_found",
-                "issues": [{"code": "wrong_template_binding"}],
-                "next": {"command": "python -m bworkflow_sql product-images 3"},
-            }
-
-    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
-
-    cli.cmd_template_doctor(
-        Namespace(
-            project_id=3,
-            account="灏忓崥",
-            product_card_template_id="muban-xiaobo-1",
-            product_media_mode="video_preferred",
-        )
-    )
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is False
-    assert payload["issues"] == [{"code": "wrong_template_binding"}]
-    assert calls == [
-        {
-            "project_id": 3,
-            "account_label": "灏忓崥",
-            "product_card_template_id": "muban-xiaobo-1",
-            "product_media_mode": "video_preferred",
-        }
-    ]
 
 
 def test_cmd_script_doctor_writes_diagnostic_json(capsys, monkeypatch):
@@ -988,112 +700,6 @@ def test_cmd_assemble_plan_writes_preview_json(capsys, monkeypatch):
     assert calls == [{"project_id": 3, "account_label": "小博", "intro_index": 2}]
 
 
-def test_cmd_template_calibrate_runner_writes_report_json(capsys, monkeypatch):
-    calls: list[dict[str, object]] = []
-
-    class FakeWorkflow:
-        pass
-
-    def fake_load(config_path, *, target_id, include_inactive):
-        calls.append(
-            {
-                "step": "load",
-                "config_path": config_path,
-                "target_id": target_id,
-                "include_inactive": include_inactive,
-            }
-        )
-        return [{"id": "xiaobo-template2"}]
-
-    def fake_run(workflow, *, targets, regenerate_images, dry_run, draft_suffix):
-        calls.append(
-            {
-                "step": "run",
-                "workflow": workflow,
-                "targets": targets,
-                "regenerate_images": regenerate_images,
-                "dry_run": dry_run,
-                "draft_suffix": draft_suffix,
-            }
-        )
-        return {"ok": True, "summary": {"total": 1, "succeeded": 1, "failed": 0}}
-
-    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
-    monkeypatch.setattr(cli, "load_template_calibration_targets", fake_load)
-    monkeypatch.setattr(cli, "run_template_calibration_targets", fake_run)
-
-    cli.cmd_template_calibrate_runner(
-        Namespace(
-            target="xiaobo-template2",
-            config="targets.json",
-            include_inactive=True,
-            regenerate_images=False,
-            dry_run=True,
-            draft_suffix="v3",
-        )
-    )
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True
-    assert calls[0] == {
-        "step": "load",
-        "config_path": "targets.json",
-        "target_id": "xiaobo-template2",
-        "include_inactive": True,
-    }
-    assert calls[1]["targets"] == [{"id": "xiaobo-template2"}]
-    assert calls[1]["regenerate_images"] is False
-    assert calls[1]["dry_run"] is True
-    assert calls[1]["draft_suffix"] == "v3"
-
-
-def test_cmd_template_calibrate_runner_uses_default_config_when_omitted(capsys, monkeypatch):
-    calls: list[dict[str, object]] = []
-
-    class FakeWorkflow:
-        pass
-
-    def fake_load(config_path="DEFAULT", *, target_id, include_inactive):
-        calls.append(
-            {
-                "step": "load",
-                "config_path": config_path,
-                "target_id": target_id,
-                "include_inactive": include_inactive,
-            }
-        )
-        return [{"id": "xiaobo-template2"}]
-
-    def fake_run(workflow, *, targets, regenerate_images, dry_run, draft_suffix):
-        return {"ok": True, "summary": {"total": 1, "succeeded": 1, "failed": 0}}
-
-    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
-    monkeypatch.setattr(cli, "load_template_calibration_targets", fake_load)
-    monkeypatch.setattr(cli, "run_template_calibration_targets", fake_run)
-
-    cli.cmd_template_calibrate_runner(
-        Namespace(
-            target="xiaobo-template2",
-            config="",
-            include_inactive=False,
-            regenerate_images=True,
-            dry_run=True,
-            draft_suffix="",
-        )
-    )
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True
-    assert calls == [
-        {
-            "step": "load",
-            "config_path": "DEFAULT",
-            "target_id": "xiaobo-template2",
-            "include_inactive": False,
-        }
-    ]
-
-
 def test_cmd_render_package_writes_success_json_and_package(
     tmp_path,
     capsys,
@@ -1110,7 +716,6 @@ def test_cmd_render_package_writes_success_json_and_package(
             output_mode,
             product_media_mode,
             product_order_strategy,
-            stale_product_image_policy,
             mode,
             top_uids,
             product_card_template_id,
@@ -1124,7 +729,6 @@ def test_cmd_render_package_writes_success_json_and_package(
                     "output_mode": output_mode,
                     "product_media_mode": product_media_mode,
                     "product_order_strategy": product_order_strategy,
-                    "stale_product_image_policy": stale_product_image_policy,
                     "mode": mode,
                     "top_uids": top_uids,
                     "product_card_template_id": product_card_template_id,
@@ -1154,10 +758,9 @@ def test_cmd_render_package_writes_success_json_and_package(
         Namespace(
             project_id=3,
             account="xiaobo",
-            output_mode="jianying_draft",
+            output_mode="final_mp4",
             product_media_mode="video_preferred",
             product_order_strategy="price_segment_shuffle",
-            stale_product_image_policy="block",
             mode="standard",
             top_uids="",
             product_card_template_id="muban-xiaobo-1",
@@ -1170,22 +773,21 @@ def test_cmd_render_package_writes_success_json_and_package(
     assert payload["ok"] is True
     assert payload["project_id"] == 3
     assert payload["account"] == "xiaobo"
-    assert payload["output_mode"] == "jianying_draft"
+    assert payload["output_mode"] == "final_mp4"
     assert payload["package_path"] == str(output)
     assert payload["missing"] == []
     assert payload["segment_counts"] == {
         "price_transition": 1,
         "product_recommendation": 2,
     }
-    assert payload["next"] == {"mode": "jianying_draft"}
+    assert payload["next"] == {"mode": "final_mp4"}
     assert calls == [
         {
             "project_id": 3,
             "account_label": "xiaobo",
-            "output_mode": "jianying_draft",
+            "output_mode": "final_mp4",
             "product_media_mode": "video_preferred",
             "product_order_strategy": "price_segment_shuffle",
-            "stale_product_image_policy": "block",
             "mode": "standard",
             "top_uids": "",
             "product_card_template_id": "muban-xiaobo-1",
@@ -1211,7 +813,6 @@ def test_cmd_render_package_reports_missing_without_writing_package(
             output_mode,
             product_media_mode,
             product_order_strategy,
-            stale_product_image_policy,
             mode,
             top_uids,
             product_card_template_id,
@@ -1236,10 +837,9 @@ def test_cmd_render_package_reports_missing_without_writing_package(
         Namespace(
             project_id=3,
             account="xiaobo",
-            output_mode="jianying_draft",
+            output_mode="final_mp4",
             product_media_mode="video_preferred",
             product_order_strategy="price_segment_shuffle",
-            stale_product_image_policy="block",
             mode="standard",
             top_uids="",
             product_card_template_id="muban-xiaobo-1",
@@ -1277,7 +877,6 @@ def test_cmd_render_package_keeps_final_mp4_next_step_structured(tmp_path, capsy
             output_mode="final_mp4",
             product_media_mode="video_preferred",
             product_order_strategy="price_segment_shuffle",
-            stale_product_image_policy="block",
             mode="standard",
             top_uids="",
             product_card_template_id="muban-xiaobo-1",

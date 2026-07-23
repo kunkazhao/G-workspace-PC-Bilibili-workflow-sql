@@ -12,7 +12,6 @@ from bworkflow_sql.render_package_builder import (
     _product_motion_seed,
     _price_transition_sound_effects,
     build_product_recommendation_package as _build_product_recommendation_package,
-    product_card_content_fingerprint,
 )
 from bworkflow_sql.repositories import Repository
 from bworkflow_sql.subtitle_rules import split_subtitle_text
@@ -457,7 +456,6 @@ def test_final_mp4_uses_only_frozen_dynamic_contexts_and_no_product_png(
     )
 
     assert result.missing == []
-    assert result.stale_product_images == []
     assert result.package["project"]["masterSnapshotId"] == "snapshot-frozen-1"
     products = [
         item for item in result.package["segments"]
@@ -584,60 +582,6 @@ def test_final_context_validation_aggregates_before_any_remote_cover_mutation(
         item["type"] == "product_recommendation"
         for item in result.package["segments"]
     )
-
-
-def test_build_product_recommendation_package_from_ready_assets(
-    tmp_path: Path,
-    monkeypatch,
-):
-    import bworkflow_sql.render_package_builder as builder
-
-    db, project_id = _seed_ready_package_data(tmp_path)
-    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
-
-    result = build_product_recommendation_package(
-        db,
-        project_id=project_id,
-        account_label="小博",
-        output_mode="jianying_draft",
-        product_order_strategy="stable",
-    )
-
-    assert result.missing == []
-    assert result.package["schemaVersion"] == "1.0.0"
-    assert result.package["output"]["mode"] == "jianying_draft"
-    assert result.package["approval"]["productRecommendationBatch"]["status"] == "pending"
-    assert [segment["type"] for segment in result.package["segments"]] == [
-        "price_transition",
-        "product_recommendation",
-        "product_recommendation",
-    ]
-    price_transition = result.package["segments"][0]
-    assert price_transition["priceTransitionCard"]["rangeLabel"] == "200-300"
-    assert price_transition["priceTransitionCard"]["keyPoints"]
-    products = [
-        segment
-        for segment in result.package["segments"]
-        if segment["type"] == "product_recommendation"
-    ]
-    assert [segment["productUid"] for segment in products] == ["P001", "P002"]
-    assert products[0]["videoAsset"]
-    assert products[1]["videoAsset"] is None
-    product_card = products[0]["productCard"]
-    assert product_card["templateId"] == "muban-xiaobo-1"
-    assert product_card["templateVersion"] == "1.1.0"
-    assert product_card["dataMap"]["title"] == "Alpha Keyboard"
-    assert product_card["dataMap"]["price"] == "200-300"
-    assert product_card["dataMap"]["remark"] == "A compact keyboard with stable wireless connection."
-    assert product_card["coverAsset"].endswith("P001.png")
-    assert "fallbackImageAsset" not in product_card
-    assert product_card["slots"] == [
-        {"label": "switch", "value": "silver"},
-        {"label": "battery", "value": "4000mAh"},
-    ]
-    assert "productCard" not in products[1]
-    assert all(Path(segment["voiceAsset"]).is_absolute() for segment in result.package["segments"])
-    assert all(Path(segment["imageCardAsset"]).is_absolute() for segment in products)
 
 
 def test_final_mp4_builds_one_batch_with_deterministic_whole_video_outro(
@@ -1108,152 +1052,6 @@ def test_structured_price_transition_timings_are_rebased_to_asr_subtitles():
     assert starts == sorted(starts)
 
 
-def test_build_product_recommendation_package_reports_stale_product_image(
-    tmp_path: Path,
-    monkeypatch,
-):
-    import bworkflow_sql.render_package_builder as builder
-
-    db, project_id = _seed_ready_package_data(tmp_path)
-    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
-    with db.connect() as conn:
-        conn.execute(
-            "UPDATE asset_bindings SET text_hash='old-card-fingerprint' WHERE asset_type='image' AND uid='P001'"
-        )
-
-    result = build_product_recommendation_package(
-        db,
-        project_id=project_id,
-        account_label="小博",
-        output_mode="jianying_draft",
-    )
-
-    stale = result.stale_product_images
-    product = next(
-        segment
-        for segment in result.package["segments"]
-        if segment.get("productUid") == "P001"
-    )
-
-    assert result.missing == []
-    assert len(stale) == 1
-    assert stale[0]["kind"] == "stale_product_image"
-    assert stale[0]["uid"] == "P001"
-    assert stale[0]["stored_fingerprint"] == "old-card-fingerprint"
-    assert stale[0]["expected_fingerprint"] == product_card_content_fingerprint(
-        {"uid": "P001", "title": "Alpha Keyboard", "price_label": "200-300"},
-        product["productCard"],
-    )
-    assert product["productCardFingerprint"] == stale[0]["expected_fingerprint"]
-
-
-def test_build_product_recommendation_package_prefers_selected_template_image_binding(
-    tmp_path: Path,
-    monkeypatch,
-):
-    import bworkflow_sql.render_package_builder as builder
-
-    db, project_id = _seed_ready_package_data(tmp_path)
-    account_label = get_remotion_template_metadata("muban-xiaobo-2")["account"]
-    selected_image = tmp_path / "assets" / account_label / "模板2" / "P001.png"
-    _insert_asset(
-        db,
-        project_id,
-        uid="P001",
-        asset_type="image",
-        path=selected_image,
-        account_label=account_label,
-    )
-    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
-
-    result = build_product_recommendation_package(
-        db,
-        project_id=project_id,
-        account_label=account_label,
-        output_mode="jianying_draft",
-        product_card_template_id="muban-xiaobo-2",
-    )
-
-    product = next(
-        segment
-        for segment in result.package["segments"]
-        if segment.get("productUid") == "P001"
-    )
-
-    assert product["imageCardAsset"] == str(selected_image)
-    assert product["productCard"]["templateId"] == "muban-xiaobo-2"
-
-
-def test_build_product_recommendation_package_normalizes_formal_media_mode(
-    tmp_path: Path,
-    monkeypatch,
-):
-    import bworkflow_sql.render_package_builder as builder
-
-    db, project_id = _seed_ready_package_data(tmp_path)
-    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
-
-    result = build_product_recommendation_package(
-        db,
-        project_id=project_id,
-        account_label="小博",
-        output_mode="final_mp4",
-        product_media_mode="cover_only",
-    )
-
-    products = [
-        segment
-        for segment in result.package["segments"]
-        if segment["type"] == "product_recommendation"
-    ]
-    assert result.package["output"]["productMediaMode"] == "video_preferred"
-    assert all(item["productMediaMode"] == "video_preferred" for item in products)
-    assert any(item.get("videoAsset") for item in products)
-    video_product = next(item for item in products if item.get("videoAsset"))
-    cover_product = next(
-        item
-        for item in products
-        if item["productCard"].get("coverAsset")
-    )
-    assert "coverAsset" not in video_product["productCard"]
-    assert "videoAsset" not in cover_product
-
-
-def test_build_package_ignores_legacy_image_layout_for_formal_product_card(
-    tmp_path: Path,
-    monkeypatch,
-):
-    import bworkflow_sql.render_package_builder as builder
-
-    db, project_id = _seed_ready_package_data(tmp_path)
-    image_path = tmp_path / "素材-商品ppt图片" / "keyboard" / "小博" / "模板2" / "P001.png"
-    image_path.parent.mkdir(parents=True, exist_ok=True)
-    image_path.write_bytes(b"image")
-    with db.connect() as conn:
-        conn.execute("UPDATE products SET product_card_json='' WHERE project_id=? AND uid='P001'", (project_id,))
-        conn.execute(
-            "UPDATE asset_bindings SET path=? WHERE project_id=? AND asset_type='image' AND uid='P001'",
-            (str(image_path), project_id),
-        )
-    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
-
-    result = build_product_recommendation_package(
-        db,
-        project_id=project_id,
-        account_label="小博",
-        output_mode="final_mp4",
-        product_media_mode="video_preferred",
-    )
-
-    product = next(segment for segment in result.package["segments"] if segment.get("productUid") == "P001")
-
-    assert product["productCard"]["templateId"] == "muban-xiaobo-1"
-    assert product["videoAsset"]
-    assert "displayTemplate" not in product
-    assert "displayVideoSlot" not in product
-    assert "imageCardAsset" not in product
-
-
 def test_build_product_recommendation_package_orders_price_groups_after_top_products(
     tmp_path: Path,
     monkeypatch,
@@ -1413,45 +1211,7 @@ def test_build_product_recommendation_package_does_not_shuffle_when_no_price_gro
     ]
 
 
-def test_build_final_mp4_package_uses_product_card_without_legacy_image(
-    tmp_path: Path,
-    monkeypatch,
-):
-    import bworkflow_sql.render_package_builder as builder
-
-    db, project_id = _seed_ready_package_data(tmp_path)
-    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
-    with db.connect() as conn:
-        conn.execute("UPDATE asset_bindings SET status='missing' WHERE asset_type='image' AND uid='P001'")
-        account_label = conn.execute(
-            "SELECT account_label FROM asset_bindings WHERE asset_type='voice' AND uid='P001'"
-        ).fetchone()[0]
-
-    result = build_product_recommendation_package(
-        db,
-        project_id=project_id,
-        account_label=account_label,
-        output_mode="final_mp4",
-    )
-
-    product = next(
-        segment
-        for segment in result.package["segments"]
-        if segment.get("productUid") == "P001"
-    )
-
-    assert not any(
-        item["kind"] == "product_image" and item["uid"] == "P001"
-        for item in result.missing
-    )
-    assert "imageCardAsset" not in product
-    assert "image" not in product.get("assetBindingIds", {})
-    assert product["videoAsset"].endswith("P001.mp4")
-    assert "coverAsset" not in product["productCard"]
-    assert "fallbackImageAsset" not in product["productCard"]
-
-
-def test_build_package_overrides_legacy_product_card_template_with_account_remotion_template(
+def test_build_package_uses_account_remotion_product_card_template(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -1936,7 +1696,7 @@ def test_remote_cover_cache_decodes_webp_as_png_when_url_ends_with_jpg(
         assert decoded.size == (3, 2)
 
 
-def test_build_product_recommendation_package_reports_missing_required_assets(
+def test_build_product_recommendation_package_reports_missing_price_voice(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -1945,24 +1705,16 @@ def test_build_product_recommendation_package_reports_missing_required_assets(
     db, project_id = _seed_ready_package_data(tmp_path)
     monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
     with db.connect() as conn:
-        conn.execute("UPDATE asset_bindings SET status='missing' WHERE asset_type='image' AND uid='P001'")
-        conn.execute("UPDATE asset_bindings SET status='missing' WHERE asset_type='voice' AND uid='P002'")
         conn.execute("UPDATE asset_bindings SET status='missing' WHERE asset_type='voice' AND uid='PRICE_TRANSITION'")
 
     result = build_product_recommendation_package(
         db,
         project_id=project_id,
         account_label="小博",
-        output_mode="jianying_draft",
+        output_mode="final_mp4",
     )
 
-    assert {item["kind"] for item in result.missing} == {
-        "product_image",
-        "product_voice",
-        "price_voice",
-    }
-    assert any(item["uid"] == "P001" for item in result.missing)
-    assert any(item["uid"] == "P002" for item in result.missing)
+    assert {item["kind"] for item in result.missing} == {"price_voice"}
 
 
 def test_build_product_recommendation_package_skips_missing_price_script(
@@ -1980,7 +1732,7 @@ def test_build_product_recommendation_package_skips_missing_price_script(
         db,
         project_id=project_id,
         account_label="小博",
-        output_mode="jianying_draft",
+        output_mode="final_mp4",
     )
 
     assert result.missing == []

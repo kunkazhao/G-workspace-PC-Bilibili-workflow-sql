@@ -212,7 +212,6 @@ def test_dynamic_preflight_success_enters_existing_package_flow(
         project_id=25,
         account_label="xiaobo",
         product_card_template_id="muban-test-1",
-        product_image_mode="skip",
         acceptance_mode="none",
     )
 
@@ -588,10 +587,6 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
     package_path.write_text(json.dumps(package), encoding="utf-8")
 
     class FakeWorkflow:
-        def regenerate_product_card_images(self, project_id, *, account_label, mode, product_uid, product_card_template_id):
-            calls.append(("images", project_id, account_label, mode, product_uid, product_card_template_id))
-            return {"ok": True, "regenerated": [{"uid": "P001"}], "skipped": []}
-
         def prepare_product_recommendation_output(
             self,
             project_id,
@@ -600,7 +595,6 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             output_mode,
             product_media_mode,
             product_order_strategy,
-            stale_product_image_policy,
             mode,
             top_uids,
             product_card_template_id,
@@ -621,7 +615,6 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
                     output_mode,
                     product_media_mode,
                     product_order_strategy,
-                    stale_product_image_policy,
                     mode,
                     top_uids,
                     product_card_template_id,
@@ -659,8 +652,6 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
         account_label="小燃",
         product_media_mode="video_preferred",
         product_order_strategy="stable",
-        product_image_mode="missing",
-        stale_product_image_policy="block",
         mode="standard",
         top_uids="",
         product_card_template_id="muban-xiaobo-1",
@@ -690,7 +681,6 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             "final_mp4",
             "video_preferred",
             "stable",
-            "block",
             "standard",
             "",
             "muban-xiaobo-1",
@@ -1383,8 +1373,8 @@ def test_run_final_video_pipeline_records_latest_run_in_pipeline(tmp_path: Path,
         pipeline_path,
         output_branch="final_mp4",
         account="小博",
-        product_card_template_id="muban-xiaobo-3",
-        product_media_mode="cover_only",
+        product_card_template_id="muban-xiaobo-1",
+        product_media_mode="video_preferred",
         product_order_strategy="price_segment_shuffle",
         mode="top",
         top_uids="P001",
@@ -1412,9 +1402,9 @@ def test_run_final_video_pipeline_records_latest_run_in_pipeline(tmp_path: Path,
         FakeWorkflow(),
         project_id=23,
         account_label="小博",
-        product_media_mode="cover_only",
+        product_media_mode="video_preferred",
         product_order_strategy="price_segment_shuffle",
-        product_card_template_id="muban-xiaobo-3",
+        product_card_template_id="muban-xiaobo-1",
         mode="top",
         top_uids="P001",
         package_output_path=package_path,
@@ -1436,7 +1426,7 @@ def test_run_final_video_pipeline_records_latest_run_in_pipeline(tmp_path: Path,
     assert saved["phases"]["assembly"]["run_manifest_path"] == result["run_manifest_path"]
     assert saved["phases"]["assembly"]["final_mp4_path"] == str(full_mp4)
     assert "product_only_mp4_path" not in saved["phases"]["assembly"]
-    assert saved["phases"]["assembly"]["product_card_template_id"] == "muban-xiaobo-3"
+    assert saved["phases"]["assembly"]["product_card_template_id"] == "muban-xiaobo-1"
     assert saved["phases"]["assembly"]["mode"] == "top"
     assert saved["phases"]["assembly"]["top_uids"] == ["P001"]
     assert saved["paths"]["manifest"] == result["run_manifest_path"]

@@ -45,9 +45,6 @@ def test_fake_final_video_run_does_not_write_real_project_workspace(tmp_path: Pa
     )
 
     class FakeWorkflow:
-        def regenerate_product_card_images(self, *args, **kwargs):
-            return {"ok": True, "regenerated": [], "skipped": []}
-
         def prepare_product_recommendation_output(self, *args, **kwargs):
             return {
                 "ok": True,
@@ -77,7 +74,6 @@ def test_fake_final_video_run_does_not_write_real_project_workspace(tmp_path: Pa
         FakeWorkflow(),
         project_id=23,
         account_label="test-account",
-        product_image_mode="missing",
         package_output_path=package_path,
         output_path=output_mp4,
         acceptance_mode="none",

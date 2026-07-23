@@ -218,28 +218,8 @@ def test_workflow_commands_use_internal_tasks(tmp_path: Path):
     assert "generate_spoken_script.py" not in " ".join(assembly)
     assert "audio_segment_registry.json" not in " ".join(assembly)
     assert str(tmp_path / "口播稿.md") in assembly
-    internal_manifest = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "manifests" / "口播稿.manifest.json"
     assert "--markdown-path" not in assembly
     assert "--out-dir" not in assembly
-
-    intro_video = tmp_path / "intro.mp4"
-    intro_video.write_bytes(b"video")
-    jianying = service.build_jianying_command(
-        project_id,
-        draft_name="数码/有线耳机",
-        intro_video_path=intro_video,
-    )
-    assert jianying[0] == "internal:jianying"
-    assert "--manifest" in jianying
-    assert str(internal_manifest) in jianying
-    assert "--intro-video" in jianying
-    assert str(intro_video) in jianying
-    assert "--draft-name" in jianying
-    assert "数码_有线耳机" in jianying
-    assert "--draft-root" in jianying
-    assert r"E:\剪辑-剪映\草稿\JianyingPro Drafts" in jianying
-    assert "--output-dir" not in jianying
-    assert "generate_jianying_draft_with_display_videos.py" not in " ".join(jianying)
 
 
 def test_voice_jobs_treat_mixed_uids_and_script_ids_as_union(tmp_path: Path):

@@ -34,7 +34,7 @@ def _manifest(tmp_path: Path, project_id: int, *, acceptance_mode: str = "quick"
     path.write_text(json.dumps({
         "kind": "bworkflow.final_video_run", "createdAt": "2026-07-12T12:00:00",
         "project": {"id": project_id, "account": "小博"},
-        "selection": {"product_card_template_id": "muban-xiaobo-3", "acceptance_mode": acceptance_mode},
+        "selection": {"product_card_template_id": "muban-xiaobo-1", "acceptance_mode": acceptance_mode},
         "outputs": {"full_mp4": str(mp4), "product_mp4": str(mp4)},
         "reports": {"verification": {"full_ffprobe": {"duration": 60}}},
     }, ensure_ascii=False), encoding="utf-8")
@@ -50,8 +50,8 @@ def test_confirm_is_idempotent_and_history_recommends_unused_template(tmp_path: 
 
     assert first["created"] is True
     assert second["created"] is False
-    assert history["used_template_ids"] == ["muban-xiaobo-3"]
-    assert history["recommended_template"]["id"] != "muban-xiaobo-3"
+    assert history["used_template_ids"] == ["muban-xiaobo-1"]
+    assert history["recommended_template"]["id"] != "muban-xiaobo-1"
     db.close()
 
 
