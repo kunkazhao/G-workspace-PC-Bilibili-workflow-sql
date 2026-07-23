@@ -429,10 +429,8 @@ def product_card_text_capacity_certification_issues(
 
 
 def _sha256_prefixed(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+    normalized = path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    digest = hashlib.sha256(normalized.encode("utf-8"))
     return f"sha256:{digest.hexdigest()}"
 
 

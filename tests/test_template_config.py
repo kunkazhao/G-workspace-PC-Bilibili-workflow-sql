@@ -84,7 +84,8 @@ def _write_template_contract(
 
 
 def _sha256(path: Path) -> str:
-    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    normalized = path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    return "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def test_text_capacity_certification_is_hash_bound(tmp_path, monkeypatch) -> None:
@@ -118,6 +119,10 @@ def test_text_capacity_certification_is_hash_bound(tmp_path, monkeypatch) -> Non
         },
     }
 
+    assert product_card_text_capacity_certification_issues(metadata) == []
+
+    source.write_bytes(b"export const Card = () => null;\r\n")
+    supporting_source.write_bytes(b"export const Fit = () => null;\r\n")
     assert product_card_text_capacity_certification_issues(metadata) == []
 
     source.write_text("export const Card = () => 'changed';\n", encoding="utf-8")

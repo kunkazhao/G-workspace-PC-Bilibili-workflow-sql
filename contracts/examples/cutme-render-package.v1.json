@@ -86,6 +86,7 @@
       "duration": 1.0,
       "productCard": {
         "templateId": "contract-fixture-v1",
+        "templateVersion": "1.0.0",
         "dataMap": {
           "title": "Boundary 2 contract fixture",
           "displayPrice": "199元",
