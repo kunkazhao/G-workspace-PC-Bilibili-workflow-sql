@@ -625,7 +625,7 @@ def test_build_product_recommendation_package_from_ready_assets(
     assert products[1]["videoAsset"] is None
     product_card = products[0]["productCard"]
     assert product_card["templateId"] == "muban-xiaobo-1"
-    assert product_card["templateVersion"] == "1.0.2"
+    assert product_card["templateVersion"] == "1.1.0"
     assert product_card["dataMap"]["title"] == "Alpha Keyboard"
     assert product_card["dataMap"]["price"] == "200-300"
     assert product_card["dataMap"]["remark"] == "A compact keyboard with stable wireless connection."
@@ -1474,7 +1474,7 @@ def test_build_package_overrides_legacy_product_card_template_with_account_remot
     )
 
     assert product["productCard"]["templateId"] == "muban-xiaobo-1"
-    assert product["productCard"]["templateVersion"] == "1.0.2"
+    assert product["productCard"]["templateVersion"] == "1.1.0"
     assert result.package["output"]["productCardTemplateId"] == "muban-xiaobo-1"
     assert product["productCard"]["coverMediaSlot"]["x"] == 442
     assert product["productCard"]["cardPlacement"] == {
@@ -1531,7 +1531,7 @@ def test_build_package_records_explicit_product_card_template_selection(
     assert result.package["output"]["productCardTemplate"] == {
         "id": "muban-xiaobo-1",
         "displayName": get_remotion_template_metadata("muban-xiaobo-1")["displayName"],
-        "version": "1.0.2",
+        "version": "1.1.0",
         "confirmed": True,
         "selectionSource": "explicit",
     }
@@ -1557,7 +1557,7 @@ def test_build_package_marks_account_default_template_as_compatibility_fallback(
     assert result.package["output"]["productCardTemplate"] == {
         "id": "muban-xiaobo-1",
         "displayName": get_remotion_template_metadata("muban-xiaobo-1")["displayName"],
-        "version": "1.0.2",
+        "version": "1.1.0",
         "confirmed": False,
         "selectionSource": "account_default_compat",
     }

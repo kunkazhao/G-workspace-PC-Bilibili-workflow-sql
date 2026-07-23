@@ -816,6 +816,60 @@ def test_run_final_video_pipeline_renders_intro_and_outro_in_one_mp4_with_quick_
     assert manifest["reports"]["price_transition_report"]["items"][0]["after_top_products"] == 1
 
 
+def test_run_final_video_pipeline_keeps_explicit_output_with_intro_and_delivery_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    package_path = tmp_path / "render-package.json"
+    explicit_output = tmp_path / "requested" / "custom-final.mp4"
+    delivery_dir = tmp_path / "delivery"
+    intro_mp4 = tmp_path / "intro.mp4"
+    intro_mp4.write_bytes(b"intro")
+    package_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "1.0.0",
+                "segments": [{"type": "product_recommendation", "productUid": "P001", "duration": 3.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeWorkflow:
+        def prepare_product_recommendation_output(self, project_id, **kwargs):
+            return {
+                "ok": True,
+                "package_path": str(package_path),
+                "next": {"target_mp4": str(tmp_path / "ignored-default.mp4")},
+            }
+
+    result = run_final_video_pipeline(
+        FakeWorkflow(),
+        project_id=23,
+        account_label="小博",
+        package_output_path=package_path,
+        output_path=explicit_output,
+        delivery_dir=delivery_dir,
+        intro_video_path=intro_mp4,
+        intro_video_text="引言口播文字",
+        acceptance_mode="quick",
+        cutme_root=tmp_path,
+        probe_video=lambda path: {"duration": 3.0, "path": str(path)},
+        measure_loudness=lambda path: {"output_i": "-11.0"},
+    )
+
+    assert explicit_output.is_file()
+    assert result["output_mp4"] == str(explicit_output)
+    assert result["full_output_mp4"] == str(explicit_output)
+    assert not list(delivery_dir.glob("*.mp4"))
+    manifest = json.loads(Path(result["run_manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["outputs"]["product_mp4"] == str(explicit_output)
+    assert manifest["outputs"]["full_mp4"] == str(explicit_output)
+
+
 def test_run_final_video_pipeline_keeps_only_final_mp4_in_delivery_dir(
     tmp_path: Path,
     monkeypatch,

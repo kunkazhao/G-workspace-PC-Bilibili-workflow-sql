@@ -172,9 +172,9 @@ def test_template_doctor_reports_wrong_binding_and_unknown_legacy_hash(tmp_path:
     assert result["template"]["selectionSource"] == "explicit"
     assert issues[("wrong_template_binding", "P001")]["level"] == "error"
     assert issues[("unknown_legacy_image_hash", "P002")]["level"] == "warning"
-    assert result["next"]["action"] == "run_product_card_text_capacity_gate"
-    assert "audit-product-card-text-capacity" in result["next"]["command"]
-    assert issues[("text_capacity_uncertified", None)]["level"] == "error"
+    assert result["next"]["action"] == "regenerate_product_images"
+    assert "product-images" in result["next"]["command"]
+    assert ("text_capacity_uncertified", None) not in issues
 
 
 def test_template_doctor_prefers_ready_binding_for_selected_template(tmp_path: Path):

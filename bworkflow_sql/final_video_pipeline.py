@@ -139,7 +139,9 @@ def run_final_video_pipeline(
     acceptance = safe_text(acceptance_mode) or "full"
     if acceptance not in {"none", "quick", "visual", "full"}:
         raise ValueError(f"unsupported acceptance_mode: {acceptance}")
-    explicit_media_output = bool(output_path or full_output_path)
+    explicit_output_path = bool(output_path)
+    explicit_full_output_path = bool(full_output_path)
+    explicit_media_output = explicit_output_path or explicit_full_output_path
     dynamic_preflight = _run_dynamic_product_preflight(
         workflow,
         project_id=project_id,
@@ -193,8 +195,10 @@ def run_final_video_pipeline(
     )
     if delivery_layout:
         package_output_path = package_output_path or delivery_layout["package_path"]
-        output_path = output_path or delivery_layout["candidate_mp4"]
-        full_output_path = full_output_path or delivery_layout["candidate_mp4"]
+        if not explicit_output_path:
+            output_path = delivery_layout["candidate_mp4"]
+        if not explicit_full_output_path and not explicit_output_path:
+            full_output_path = delivery_layout["candidate_mp4"]
     package_path = _absolute_path(package_output_path) if package_output_path else render_root / f"{stem}.json"
     target_mp4 = _absolute_path(output_path) if output_path else package_path.with_suffix(".mp4")
     intro_mp4 = _absolute_path(intro_video_path) if intro_video_path else None
@@ -219,7 +223,11 @@ def run_final_video_pipeline(
             raise ValueError(
                 "intro subtitle blocked: raw intro video requires transcript text or a source plan with full_script."
             )
-        if full_output_path:
+        if explicit_full_output_path:
+            target_mp4 = _absolute_path(full_output_path)
+        elif explicit_output_path:
+            target_mp4 = _absolute_path(output_path)
+        elif full_output_path:
             target_mp4 = _absolute_path(full_output_path)
         elif delivery_layout:
             target_mp4 = delivery_layout["full_mp4"]
