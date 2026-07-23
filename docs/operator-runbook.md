@@ -148,38 +148,6 @@ python -m bworkflow_sql resolve-blue-link-backfill <backfill_id> --workspace-id 
 同时返回非零退出码；调用方不要解析 stderr、traceback 或内部 `next/command`
 字段。Schema 与三种状态示例位于 `contracts/`。
 
-## 已退役：剪映模板校准记录
-
-以下内容仅保留为历史排障记录。相关公开命令已经删除，不得按此段启动新
-生产；当前模板验收使用 CutMe 静态压力预览和短 Remotion 动态样片。
-
-模板位置校准不要临时猜商品、账号或模板。标准目标清单在
-`config/template-calibration-targets.json`，每个目标固定 `project_id`、
-`account`、`template_id`、代表商品 `product_uid` 和草稿名。后续新增模板
-UI 被认可后，如果需要剪映校准，先把它加到这个清单，再跑标准 runner。
-
-常用命令：
-
-```powershell
-cd G:\workspace\PC-Bilibili-workflow-sql
-python -m bworkflow_sql template-calibrate-runner --target xiaobo-template2 --dry-run
-python -m bworkflow_sql template-calibrate-runner --target xiaobo-template2 --draft-suffix v3
-```
-
-runner 的固定顺序是：先跑只读 `template-doctor`；如果发现缺图、旧 hash、
-错误模板目录等图片绑定问题，自动跑
-`product-images --mode stale --product-card-template-id ...`；然后重跑
-`template-doctor`；通过后再跑单商品 `template-calibrate`；最后校验 probe
-manifest 里的三件事必须一致：顶层 `display_template`、商品 `image_path`
-所在模板目录、`display_video_slot.templateId`。如果只是想看是否已准备好，
-用 `--dry-run`，它不会生成新的剪映草稿。
-
-模板设计目录下的单商品 still（例如 `data\workspace\manual-tests\` 中的
-KX030 样图）只是视觉验收证据，不会写入 `asset_bindings`，也不代表当前项目
-切换了模板。只有用户另行明确指定项目、账号和替换范围后，才能运行
-`product-images`。引言预检缺少的3段品类产品展示视频属于 phase 6 素材阻塞，
-不能用商品图批量生成来替代。
-
 ## 常用操作速查
 
 | 操作 | 入口 | 关键规则 | 验证 |
@@ -189,9 +157,11 @@ KX030 样图）只是视觉验收证据，不会写入 `asset_bindings`，也不
 | IndexTTS 小歪音色 | `data\bworkflow.db.voice_profiles`、IndexTTS `voices.json` | 当前小歪参考音频是 `G:\Tools\自己用的音色\小歪10秒新.mp3`。更换时必须同步 DB 和 `voices.json` 指纹。 | `python scripts/_check_xiaowai.py`，路径应指向新参考音频。 |
 | 结尾配音 | `accounts.closing_audio_path` | 生成口播 manifest 时 `_closing_manifest_entry(...)` 读取当前用户 `closing_audio_path`；文件存在才写入结尾音频。当前小歪结尾配音是 `G:\2026项目-b站\素材-配音\公共-结尾\小歪\结尾-小歪.mp3`。 | 查询 `SELECT label, closing_audio_path FROM accounts WHERE label='小歪'`；运行 `python -m pytest -q tests/test_workflow_service.py -k closing`。 |
 | 弹窗居中 | `bworkflow_sql/ui.py::_center_dialog` | 所有 `CTkToplevel` 应调用 `_center_dialog(dialog)`；该函数优先按父窗口/主窗口居中，父窗口几何不可用时才按屏幕居中。不要在新弹窗里手写 `winfo_screenwidth()` 居中。 | `python -m py_compile bworkflow_sql\ui.py` 和 `python -m pytest -q tests/test_ui_helpers.py`。 |
-| 模板视频位置校准 | `python -m bworkflow_sql template-calibrate <project_id> --account <账号> --product-uid <UID> --draft-name 模板校准-<账号>-<UID>` | 商品视频位置、封面区域对齐、`display_video_slot`、剪映坐标/X/Y/缩放、新增或修改商品图模板时，先生成单商品校准草稿；不要跑整批商品草稿调一个位置。`coordinate_mode="clip_transform_pixels"` 是剪映位置面板坐标，负数 X/Y 可能正确。 | 打开生成的短草稿确认视觉位置；再跑 `python -m pytest -q tests/test_render_package_jianying.py tests/test_cli_render_package.py tests/test_jianying_engine_display_video.py`。 |
+| 动态商品卡模板检查 | `template-doctor` + `product-card-preflight` | 新槽位先进入中央注册表，模板只声明自己使用的槽位；当前 10 个模板不声明价格段和品类名称。布局先做静态压力预览，再做一条短动画样片。 | 修复报告的模板声明、冻结数据或媒体槽位后重跑；不得通过整卡 PNG 或剪映草稿恢复。 |
 
-Remotion-first 商品图模板从 CutMe 元数据进入账号模板列表，显示名使用 `{账号名}模板{序号}`，例如 `小博模板1`。旧的 `{账号名}-模板N` 仍是 legacy 兼容入口；新增模板不要再单独手调 SQL 坐标，应从 Remotion `coverMediaSlot` 和 `cardPlacement` 推导 `display_video_slot`。
+Remotion-first 商品卡模板从 CutMe 元数据进入账号模板列表，显示名使用
+`{账号名}模板{序号}`。新增模板不维护 SQL/剪映坐标；正式视频只消费
+`slotRegistry`、`slotDeclarations`、`coverMediaSlot` 和 `cardPlacement`。
 | 字幕语义断行 | `bworkflow_sql/workflow_service.py::split_subtitle_text` | 长分句二次切分时保留数字+单位、英文型号、小数和“的/地/得”结构，优先在“但是/而且/所以”等连词前断。 | `python -m pytest -q tests/test_workflow_service.py -k subtitle`。 |
 
 ## MiniMax 换音色流程
@@ -218,150 +188,18 @@ Remotion-first 商品图模板从 CutMe 元数据进入账号模板列表，显�
 `WorkflowService._voice_provider_registry(...)` 注册；不要在生成循环、账号页面
 或换音色脚本里复制 provider 分支。
 
-## 历史记录：非价格过渡剪映流程（已退役）
-
-本节只解释旧项目数据来源，不是当前操作步骤。剪映公开入口已经退役；如需
-支持非价格分组的正式 MP4，应在动态 RenderPackage 合同内单独设计，不得调用
-下列旧命令。
-
-软件的口播稿流程默认按价格段切分商品（`## 价格过渡文案`）。当品类需要按用途、功能或自定义标签分组时（如充电宝按"高性价比款/日常款/小巧精致款/磁吸便捷款/高性能款"），软件无法直接生成，需要手动走以下流程。
-
-### 前置条件
-
-| 条件 | 说明 |
-|---|---|
-| MD 文案 | 引言、商品、过渡文案都写好。过渡文案的二级标题可以不叫"价格过渡文案"（如 `## 品类过渡文案`），三级标题是分组名（如 `### 高性价比款`） |
-| Master 标签 | 在 Master 方案的商品上打好标签（tag），标签值 = 过渡文案里的分组名 |
-| 图片同步 | 商品图片已同步到对应用户 + 模板目录 |
-| 配音目录 | 确认配音输出路径 |
-
-### 步骤总览
-
-| 步骤 | 脚本 | 说明 |
-|---|---|---|
-| 1. 同步标签分组 | B-Workflow 同步中心 | 先预览并应用 Master v1 scheme snapshot；规范化标签会随商品卡数据写入本地 `product_card_json.tags`，禁止再逐商品拼 raw API 请求 |
-| 2. 批量 MiniMax 配音 | `scripts/batch_tts_chongdianbao.py` | 为商品正文 + 过渡文案调用 MiniMax T2A |
-| 3. 生成 manifest | `scripts/gen_manifest_chongdianbao.py` | 按标签分组组织 entry 顺序：引言 → [过渡 → 该分组商品] × N → 结尾 |
-| 4. 生成剪映草稿 | `scripts/jianying_engine/generate_jianying_draft.py` | 项目内剪映引擎优先；`BWORKFLOW_JIANYING_ENGINE_DIR` 可覆盖；旧 b-workflow skill 只作迁移兜底 |
-
-### 步骤详解
-
-#### 1. 同步标签分组
-
-在“同步中心”先预览 Master 变化。预览只读，并展示 snapshot id、商品新增/更新/
-恢复/移除以及 `product_card_json`、顺序等变化；确认后应用会重新抓取一次快照，
-只有 id 与预览一致才写库。标签来自快照的 canonical `products[].tags`，应用后
-位于本地 `products.product_card_json` 的 `tags` 数组。
-
-不要手工读取页面接口、拼 workspace header 或逐商品补查。
-`MasterContractAdapter` 是唯一读入口；只有 `master_unavailable` 可以启动本地 Master
-后重试。`invalid_master_contract`、`unsupported_contract_version`、
-`scheme_snapshot_incomplete` 必须先修数据或版本问题。
-
-#### 2. 批量 MiniMax 配音
-
-参考脚本 `scripts/batch_tts_chongdianbao.py`，核心逻辑：
-
-- 从 DB 读 `script_blocks` 获取商品文案正文
-- 过渡文案文本硬编码在脚本里（因为 MD parser 只识别 `## 价格过渡文案`，自定义标题不入库）
-- 调用 `WorkflowService._synthesize_minimax_to_path()` 生成音频
-- 文件命名：商品 `{price}-{uid}-{title}-正文.mp3`，过渡 `0-品类过渡-{分组名}.mp3`
-- 速度 1.2，voice_id 从 `accounts.minimax_voice_id` 取
-
-**复用要点**：新品类只需改脚本里的 `project_id`、`voice_id`、`output_dir`、`category_transitions` 列表。
-
-#### 3. 生成 manifest
-
-参考脚本 `scripts/gen_manifest_chongdianbao.py`，核心结构：
-
-```
-manifest.entries 顺序：
-  1. intro（section="intro", type="transition"）
-  2. 循环每个分组：
-     a. 品类过渡（section="price_transition", type="transition"）
-     b. 该分组下的商品（section="product", type="product"）
-  3. closing（section="closing", type="closing"）
-```
-
-**关键字段**：
-- `display_template`：模板名（如 `荣荣-模板2`）
-- `display_video_slot`：从 `template_config.py` 取坐标
-- 过渡 entry 的 `price_range_label` 填分组名，剪映草稿生成器会用它生成标题卡
-- `product_uid` 对于过渡用 `CATEGORY_TRANSITION`（不影响草稿生成，只是标识）
-- 音频和图片路径必须是绝对路径
-
-#### 4. 生成剪映草稿
-
-```bash
-python_exe="G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/.venv/Scripts/python.exe"
-script="G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/generate_jianying_draft.py"
-
-"$python_exe" "$script" \
-  --manifest "<manifest_path>" \
-  --draft-name "<草稿名>" \
-  --draft-root "E:/剪辑-剪映/草稿/JianyingPro Drafts" \
-  --allow-replace \
-  --skip-subtitles
-```
-
-默认草稿不生成文本字幕轨。需要自动带可编辑字幕时，用 B-Workflow CLI 的显式开关：
-
-```bash
-python -m bworkflow_sql jianying <project_id> \
-  --manifest "<manifest_path>" \
-  --draft-name "<草稿名>" \
-  --with-subtitles \
-  --subtitle-no-vad
-```
-
-剪映字幕默认也走 `bworkflow_sql.forced_alignment`，与最终 MP4 共用精确原文强制对齐、缓存和质量门。首次使用先运行 `scripts\setup_subtitle_forced_alignment.ps1`。`--subtitle-no-vad` 只对显式选择旧版 Whisper 调试引擎时有效，不属于正式生产路径。
-
-豆包 ASR provider 已接入同一个抽象层，启用方式：
-
-```powershell
-$env:BWORKFLOW_ASR_PROVIDER = "doubao"
-$env:BWORKFLOW_DOUBAO_ASR_API_KEY = "<火山新版控制台 X-Api-Key>"
-# 或旧版控制台：
-$env:BWORKFLOW_DOUBAO_ASR_APP_KEY = "<X-Api-App-Key>"
-$env:BWORKFLOW_DOUBAO_ASR_ACCESS_KEY = "<X-Api-Access-Key>"
-```
-
-默认资源 ID 是 `volc.seedasr.auc`，可用 `BWORKFLOW_DOUBAO_ASR_RESOURCE_ID`
-覆盖到 `volc.bigasr.auc`。官方“录音文件识别标准版 HTTP”接口提交的是音频
-URL，不是本地文件二进制；因此本地 `G:\...wav` 不能直接给豆包识别。要在现有
-字幕流程中使用豆包，必须满足其中一种条件：
-
-- 调用 `asr_service.transcribe_jobs(...)` 时在 job 里传 `audio_url`；
-- 或配置 `BWORKFLOW_DOUBAO_ASR_LOCAL_ROOT` 与
-  `BWORKFLOW_DOUBAO_ASR_URL_ROOT`，把本地音频路径映射成火山云端可访问的
-  HTTPS URL。
-
-如果只设置 `BWORKFLOW_ASR_PROVIDER=doubao`，但音频仍是普通本地路径，provider
-会明确报错，不会假装上传本地文件。以后新增其他 ASR 模型时，只新增
-`bworkflow_sql/asr/providers/<provider>.py` 并在 `bworkflow_sql.asr.service`
-注册 provider；需要云端 URL 的 provider 复用
-`bworkflow_sql.asr.audio_sources.resolve_cloud_audio_source(...)`。字幕、引言
-timing、剪映生成和 RenderPackage 层不要直接调用具体 ASR SDK。
-
-如果项目内 `.venv` 还没初始化，先执行：
-
-```bash
-python -m venv "G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/.venv"
-"G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/.venv/Scripts/python.exe" -m pip install -r "G:/workspace/PC-Bilibili-workflow-sql/scripts/jianying_engine/requirements-jianying.txt"
-```
-
-### RenderPackage 商品排序策略
+## RenderPackage 商品排序策略
 
 `render-package` 和 `render-final-video` 默认使用
 `--product-order-strategy price_segment_shuffle`。B-Workflow 仍然把价格过渡段放在
 对应价格段商品前面，但只随机该价格段内部的商品；生成后的 RenderPackage 会写入
-`output.productOrderStrategy`，所以同一个包生成 MP4 和剪映草稿时顺序一致、可复现。
+`output.productOrderStrategy`，使缓存、重渲染和正式成片顺序一致、可复现。
 
 只有用户明确要求旧顺序或稳定复现时，才加 `--product-order-strategy stable`。如果使用
 `--mode top --top-uids UID1,UID2`，置顶 UID 必须保持用户给定顺序排在最前面；只有剩余商品
 参与段内随机或稳定排序。没有可匹配价格段时保持正常稳定顺序，不打乱整批商品。
 
-### 统一完整 MP4、快速验收与片段缓存
+## 统一完整 MP4、快速验收与片段缓存
 
 正常流程只产生一个完整 MP4。B-Workflow 把无字幕引言原片、价格/商品推荐段、
 账号 `accounts.closing_audio_path` 固定结尾组成同一个 RenderPackage，再只调用一次 CutMe：
