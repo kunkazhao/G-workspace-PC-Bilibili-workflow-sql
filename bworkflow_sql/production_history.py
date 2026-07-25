@@ -22,6 +22,7 @@ from .utils import now_iso, safe_text
 from .production_recipe import sha256_file, validate_production_recipe
 from .cutme_adapter import CutMeAdapter
 from .settings import INTERNAL_WORKSPACE_ROOT
+from .render_gate import acquire_production_render_slot, build_render_owner
 from .final_spoken_script import validate_spoken_script_evidence
 from .artifact_approvals import atomic_update_pipeline
 
@@ -120,6 +121,7 @@ class ProductionHistoryService:
         *,
         run_manifest_path: str | Path,
         final_path: str | Path | None = None,
+        pipeline_path: str | Path | None = None,
     ) -> dict[str, Any]:
         project = self.repository.project(project_id)
         if not project:
@@ -130,6 +132,16 @@ class ProductionHistoryService:
         payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         if payload.get("kind") != "bworkflow.final_video_run":
             raise ValueError("运行清单不是完整 MP4 生成证据")
+        episode = payload.get("episode") if isinstance(payload.get("episode"), dict) else {}
+        episode_id = safe_text(episode.get("id"))
+        if not episode_id.startswith("episode:"):
+            raise ValueError("运行清单缺少新期次 episode_id；旧生成记录不再进入正式历史")
+        if pipeline_path:
+            pipeline = json.loads(
+                Path(pipeline_path).expanduser().resolve().read_text(encoding="utf-8-sig")
+            )
+            if safe_text(pipeline.get("episode_id")) != episode_id:
+                raise ValueError("运行清单 episode_id 与当前 pipeline 不一致")
         manifest_project = payload.get("project") if isinstance(payload.get("project"), dict) else {}
         if int(manifest_project.get("id") or 0) != project_id:
             raise ValueError("运行清单与项目不一致")
@@ -158,6 +170,7 @@ class ProductionHistoryService:
         display_name = safe_text(metadata.get("displayName")) or display_template_for_product_card_template_id(template_id)
         confirmed_at = now_iso()
         record = {
+            "episode_id": episode_id,
             "project_id": project_id,
             "account_id": int(local_account["id"]) if local_account else None,
             "category_name": safe_text(project.get("name")),
@@ -289,6 +302,8 @@ class ProductionHistoryService:
         recipe = json.loads(recipe_path.read_text(encoding="utf-8-sig"))
         pipeline = Path(pipeline_path).expanduser().resolve()
         pipeline_payload = json.loads(pipeline.read_text(encoding="utf-8-sig"))
+        if safe_text(pipeline_payload.get("episode_id")) != safe_text(record.get("episode_id")):
+            raise ValueError("重渲染记录 episode_id 与当前 pipeline 不一致")
         configured_delivery = safe_text(pipeline_payload.get("output_dir"))
         if not delivery_dir and not configured_delivery:
             raise ValueError("重渲染缺少正式交付目录")
@@ -299,7 +314,11 @@ class ProductionHistoryService:
         )
         target_root.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_root = INTERNAL_WORKSPACE_ROOT / f"project-{record['project_id']}" / "runs" / "artifacts" / timestamp
+        episode_key = safe_text(record.get("episode_id")).removeprefix("episode:")
+        runs_root = INTERNAL_WORKSPACE_ROOT / f"project-{record['project_id']}" / "runs"
+        if episode_key:
+            runs_root = runs_root / "episodes" / episode_key
+        run_root = runs_root / "artifacts" / timestamp
         process_dir = run_root / "process"
         process_dir.mkdir(parents=True, exist_ok=True)
         package_path = process_dir / "frozen-render-package.json"
@@ -315,11 +334,19 @@ class ProductionHistoryService:
             / "render"
             / "final-video-cache"
         )
-        result = (cutme_adapter or CutMeAdapter()).render_final(
-            package_path,
-            output_path=candidate_path,
-            cache_dir=cache_dir,
+        render_owner = build_render_owner(
+            phase="production_rerender",
+            pipeline_path=pipeline,
+            project_id=int(record["project_id"]),
+            category=safe_text(record.get("category_name")),
+            account=safe_text(record.get("account_label")),
         )
+        with acquire_production_render_slot(render_owner, lock_root=INTERNAL_WORKSPACE_ROOT):
+            result = (cutme_adapter or CutMeAdapter()).render_final(
+                package_path,
+                output_path=candidate_path,
+                cache_dir=cache_dir,
+            )
         rendered = Path(result["artifacts"]["output_path"]).resolve()
         verification = _probe_video(rendered)
         if verification["duration"] <= 0 or not verification["has_video"] or not verification["has_audio"]:
@@ -335,7 +362,7 @@ class ProductionHistoryService:
         final_hash = sha256_file(final_path)
 
         original_manifest = json.loads(Path(record["run_manifest_path"]).read_text(encoding="utf-8-sig"))
-        manifest_path = INTERNAL_WORKSPACE_ROOT / f"project-{record['project_id']}" / "runs" / f"final-video-{timestamp}.run-manifest.json"
+        manifest_path = runs_root / f"final-video-{timestamp}.run-manifest.json"
         manifest = {
             **original_manifest,
             "createdAt": now_iso(),

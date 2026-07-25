@@ -20,6 +20,7 @@ from .phase7_selection import validated_phase7_selection
 from .production_recipe import build_production_recipe, write_production_recipe
 from .artifact_approvals import resolve_approved_intro_video
 from .final_spoken_script import materialize_final_spoken_script
+from .render_gate import acquire_production_render_slot, build_render_owner
 
 Runner = Callable[..., Any]
 ProbeVideo = Callable[[Path], dict[str, Any]]
@@ -155,6 +156,7 @@ def run_final_video_pipeline(
             "preflight": dynamic_preflight,
         }
     phase7_selection = None
+    episode_id, episode_key = _episode_identity_from_pipeline(pipeline_path)
     if pipeline_path:
         phase7_selection = validated_phase7_selection(
             pipeline_path,
@@ -172,6 +174,8 @@ def run_final_video_pipeline(
     render_root.mkdir(parents=True, exist_ok=True)
     clip_cache_dir = render_root / "final-video-cache"
     clip_cache_manifest_path = clip_cache_dir / "clip-cache-manifest.json"
+    render_work_root = render_root / "episodes" / episode_key if episode_key else render_root
+    render_work_root.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     stem = f"render-package-{safe_path_component(account)}-final-video-{timestamp}"
     resolved_delivery_dir = delivery_dir or resolve_pipeline_output_dir(pipeline_path)
@@ -190,6 +194,7 @@ def run_final_video_pipeline(
         project_id=project_id,
         account=account,
         timestamp=timestamp,
+        episode_key=episode_key,
     )
     if delivery_layout:
         package_output_path = package_output_path or delivery_layout["package_path"]
@@ -197,7 +202,7 @@ def run_final_video_pipeline(
             output_path = delivery_layout["candidate_mp4"]
         if not explicit_full_output_path and not explicit_output_path:
             full_output_path = delivery_layout["candidate_mp4"]
-    package_path = _absolute_path(package_output_path) if package_output_path else render_root / f"{stem}.json"
+    package_path = _absolute_path(package_output_path) if package_output_path else render_work_root / f"{stem}.json"
     target_mp4 = _absolute_path(output_path) if output_path else package_path.with_suffix(".mp4")
     intro_mp4 = _absolute_path(intro_video_path) if intro_video_path else None
     intro_source_plan_path = _absolute_path(intro_video_source_plan_path) if intro_video_source_plan_path else None
@@ -267,12 +272,19 @@ def run_final_video_pipeline(
 
     command_runner = runner or _run_command
     adapter = cutme_adapter or CutMeAdapter(cutme_root=cutme_root)
-    with timings.measure("cutme_render_ms"):
-        cutme_result = adapter.render_final(
-            package_path,
-            output_path=target_mp4,
-            cache_dir=clip_cache_dir,
-        )
+    render_owner = build_render_owner(
+        phase="final_video",
+        pipeline_path=pipeline_path,
+        project_id=project_id,
+        account=account,
+    )
+    with acquire_production_render_slot(render_owner, lock_root=INTERNAL_WORKSPACE_ROOT):
+        with timings.measure("cutme_render_ms"):
+            cutme_result = adapter.render_final(
+                package_path,
+                output_path=target_mp4,
+                cache_dir=clip_cache_dir,
+            )
     cutme_artifacts = cutme_result["artifacts"]
     job_package_path = _absolute_path(cutme_artifacts["job_package_path"])
     target_mp4 = _absolute_path(cutme_artifacts["output_path"])
@@ -328,12 +340,10 @@ def run_final_video_pipeline(
     if not isinstance(cutme_cache, dict):
         cutme_cache = _read_clip_cache_summary(clip_cache_manifest) if clip_cache_manifest else None
 
-    recipe_path = (
-        INTERNAL_WORKSPACE_ROOT
-        / f"project-{project_id}"
-        / "runs"
-        / f"final-video-{timestamp}.production-recipe.json"
-    )
+    run_root = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "runs"
+    if episode_key:
+        run_root = run_root / "episodes" / episode_key
+    recipe_path = run_root / f"final-video-{timestamp}.production-recipe.json"
     recipe = build_production_recipe(
         job_package_path=job_package_path,
         source_package_path=package_path,
@@ -359,6 +369,7 @@ def run_final_video_pipeline(
     result = {
         "ok": True,
         "project_id": project_id,
+        "episode_id": episode_id,
         "account": account,
         "product_media_mode": product_media_mode,
         "product_order_strategy": product_order_strategy,
@@ -410,6 +421,7 @@ def run_final_video_pipeline(
             run_id=timestamp,
             snapshot_path=package_path.parent / "完整口播稿.md",
             generated_at=datetime.strptime(timestamp, "%Y%m%d_%H%M%S"),
+            episode_id=episode_id,
         )
     run_manifest_path = _write_final_video_run_manifest(
         project_id=project_id,
@@ -463,18 +475,38 @@ def _absolute_path(path_text: str | Path) -> Path:
     return Path(path_text).expanduser().resolve()
 
 
+def _episode_identity_from_pipeline(
+    pipeline_path: str | Path | None,
+) -> tuple[str, str]:
+    if not pipeline_path:
+        return "", ""
+    try:
+        payload = json.loads(Path(pipeline_path).expanduser().resolve().read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return "", ""
+    episode_id = safe_text(payload.get("episode_id"))
+    episode_key = safe_text(payload.get("episode_key"))
+    if not episode_id.startswith("episode:") or not episode_key:
+        return "", ""
+    return episode_id, episode_key
+
+
 def _delivery_layout(
     delivery_dir: str | Path | None,
     *,
     project_id: int,
     account: str,
     timestamp: str,
+    episode_key: str = "",
 ) -> dict[str, Path] | None:
     if not delivery_dir:
         return None
     root = _absolute_path(delivery_dir)
     root.mkdir(parents=True, exist_ok=True)
-    artifact_root = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "runs" / "artifacts" / timestamp
+    runs_root = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "runs"
+    if episode_key:
+        runs_root = runs_root / "episodes" / episode_key
+    artifact_root = runs_root / "artifacts" / timestamp
     evidence_dir = artifact_root / "acceptance"
     process_dir = artifact_root / "process"
     frames_dir = evidence_dir / "frames"
@@ -757,6 +789,9 @@ def _write_final_video_run_manifest(
     intro_video_source_plan_path: Path | None = None,
 ) -> Path:
     run_dir = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "runs"
+    episode_key = safe_text(result.get("episode_id")).removeprefix("episode:")
+    if episode_key:
+        run_dir = run_dir / "episodes" / episode_key
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = run_dir / f"final-video-{timestamp}.run-manifest.json"
     payload = _final_video_run_manifest_payload(
@@ -931,6 +966,9 @@ def _final_video_run_manifest_payload(
         "schemaVersion": "1.1.0" if result.get("spoken_script") else "1.0.0",
         "kind": "bworkflow.final_video_run",
         "createdAt": datetime.now().isoformat(timespec="seconds"),
+        "episode": {
+            "id": result.get("episode_id"),
+        },
         "asset_model": {
             "asset_library": "reusable_copy_and_parameter_assets",
             "pipeline": "this_run_selection",

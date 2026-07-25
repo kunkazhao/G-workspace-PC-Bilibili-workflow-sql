@@ -761,7 +761,19 @@ class WorkflowService:
             title=safe_text(project.get("name")) or "Bilibili Intro",
             asset_root=asset_root or DEFAULT_INTRO_ASSET_ROOT,
         )
-        rendered = run_cutme_render(prepared.config_path, target)
+        from .render_gate import build_render_owner
+
+        rendered = run_cutme_render(
+            prepared.config_path,
+            target,
+            render_owner=build_render_owner(
+                phase="intro_video",
+                pipeline_path=pipeline_path,
+                project_id=project_id,
+                category=safe_text(project.get("name")),
+                account=account,
+            ),
+        )
         config = json.loads(prepared.config_path.read_text(encoding="utf-8-sig"))
         subtitles = config.get("subtitles") if isinstance(config.get("subtitles"), list) else []
         output_config = config.get("output") if isinstance(config.get("output"), dict) else {}

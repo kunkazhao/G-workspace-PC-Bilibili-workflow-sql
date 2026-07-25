@@ -13,6 +13,7 @@ from typing import Any
 from .asset_paths import project_category_folder
 from .intro_timeline import align_intro_plan_scenes_with_asr
 from .settings import CUTME_ROOT, DEFAULT_INTRO_ASSET_ROOT, INTERNAL_WORKSPACE_ROOT
+from .render_gate import acquire_production_render_slot, build_render_owner
 from .subtitle_helpers import normalize_subtitle_alignment_text, distribute_subtitle_text
 from .tts_helpers import normalize_audio_loudness
 from .utils import now_iso, safe_text
@@ -290,6 +291,7 @@ def run_cutme_render(
     output_path: str | Path,
     *,
     renderer: str = "remotion",
+    render_owner: dict[str, Any] | None = None,
 ) -> Path:
     config = Path(config_path)
     output = Path(output_path).expanduser()
@@ -304,25 +306,27 @@ def run_cutme_render(
     )
     env["PYTHONIOENCODING"] = "utf-8"
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "cutme",
-            str(config),
-            "--renderer",
-            renderer,
-            "--output",
-            str(output),
-            "--clean",
-        ],
-        cwd=str(CUTME_ROOT),
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    owner = render_owner or build_render_owner(phase="intro_video")
+    with acquire_production_render_slot(owner, lock_root=INTERNAL_WORKSPACE_ROOT):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "cutme",
+                str(config),
+                "--renderer",
+                renderer,
+                "--output",
+                str(output),
+                "--clean",
+            ],
+            cwd=str(CUTME_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
     if result.returncode != 0:
         details = "\n".join(
             item for item in [result.stdout.strip(), result.stderr.strip()] if item

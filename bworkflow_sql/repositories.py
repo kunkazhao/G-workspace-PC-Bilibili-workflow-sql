@@ -162,7 +162,7 @@ class Repository:
         clause = " AND account_label=?" if account_label else ""
         params = (*identity_params, account_label) if account_label else identity_params
         return [dict(row) for row in self.db.fetchall(
-            f"SELECT * FROM production_runs WHERE {identity_clause}{clause} ORDER BY confirmed_at DESC, id DESC",
+            f"SELECT * FROM production_runs WHERE episode_id<>'' AND {identity_clause}{clause} ORDER BY confirmed_at DESC, id DESC",
             params,
         )]
 
@@ -188,7 +188,10 @@ class Repository:
         return dict(row), True
 
     def production_run(self, production_run_id: int) -> dict[str, Any] | None:
-        row = self.db.fetchone("SELECT * FROM production_runs WHERE id=?", (production_run_id,))
+        row = self.db.fetchone(
+            "SELECT * FROM production_runs WHERE id=? AND episode_id<>''",
+            (production_run_id,),
+        )
         return dict(row) if row else None
 
     def mark_production_published(

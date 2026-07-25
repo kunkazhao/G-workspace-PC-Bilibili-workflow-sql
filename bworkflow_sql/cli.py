@@ -27,6 +27,7 @@ from typing import Any
 
 from .cutme_intro import preflight_intro_plan_for_cutme
 from .cutme_adapter import CutMeAdapterError
+from .render_gate import RenderBusyError
 from .public_contracts import build_workflow_observation, build_workflow_observation_error
 from .phase7_selection import (
     Phase7SelectionError,
@@ -511,6 +512,7 @@ def cmd_confirm_production(args: argparse.Namespace) -> None:
         args.project_id,
         run_manifest_path=args.run_manifest,
         final_path=args.final_path or None,
+        pipeline_path=args.pipeline or None,
     )
     if args.pipeline:
         pipeline_path = Path(args.pipeline).expanduser().resolve()
@@ -1668,6 +1670,25 @@ def main() -> None:
                     "ok": False,
                     "status": "blocked",
                     "error": {"code": exc.code, "message": str(exc), "retryable": False},
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except RenderBusyError as exc:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "status": "blocked",
+                    "error": {
+                        "code": exc.code,
+                        "message": str(exc),
+                        "retryable": exc.retryable,
+                        "owner": exc.owner,
+                    },
+                    "next_action": "等待当前渲染完成后再次发送“继续”",
                 },
                 ensure_ascii=False,
             ),

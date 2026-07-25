@@ -79,13 +79,19 @@ def materialize_final_spoken_script(
     run_id: str,
     snapshot_path: str | Path,
     generated_at: datetime | None = None,
+    episode_id: str = "",
 ) -> dict[str, Any]:
     project = repository.project(project_id)
     if not project:
         raise ValueError(f"project does not exist: {project_id}")
     moment = generated_at or datetime.now()
     project_name = safe_text(project.get("name"))
-    current_path = DEFAULT_SPOKEN_MD_ROOT / project_name / f"{moment.month}月-{safe_text(account)}.md"
+    episode_key = safe_text(episode_id).removeprefix("episode:")
+    current_path = (
+        DEFAULT_SPOKEN_MD_ROOT / project_name / ".episodes" / episode_key / "完整口播稿.md"
+        if episode_key
+        else DEFAULT_SPOKEN_MD_ROOT / project_name / f"{moment.month}月-{safe_text(account)}.md"
+    )
     snapshot = Path(snapshot_path).expanduser().resolve()
     content = build_final_spoken_markdown(
         package,
@@ -171,6 +177,11 @@ def backfill_final_spoken_script(
         run_id=run_id,
         snapshot_path=package_path.parent / "完整口播稿.md",
         generated_at=created_at,
+        episode_id=safe_text(
+            (manifest.get("episode") or {}).get("id")
+            if isinstance(manifest.get("episode"), dict)
+            else ""
+        ),
     )
     manifest["schemaVersion"] = "1.1.0"
     manifest["spoken_script"] = evidence

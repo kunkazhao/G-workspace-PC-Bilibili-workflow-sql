@@ -33,6 +33,7 @@ def _manifest(tmp_path: Path, project_id: int, *, acceptance_mode: str = "quick"
     path = tmp_path / "run.json"
     path.write_text(json.dumps({
         "kind": "bworkflow.final_video_run", "createdAt": "2026-07-12T12:00:00",
+        "episode": {"id": "episode:test-production-history"},
         "project": {"id": project_id, "account": "小博"},
         "selection": {"product_card_template_id": "muban-xiaobo-1", "acceptance_mode": acceptance_mode},
         "outputs": {"full_mp4": str(mp4), "product_mp4": str(mp4)},
@@ -96,6 +97,24 @@ def test_unaccepted_render_cannot_enter_formal_history(tmp_path: Path):
     with pytest.raises(ValueError, match="未执行验收"):
         service.confirm(project_id, run_manifest_path=_manifest(tmp_path, project_id, acceptance_mode="none"))
     assert service.history(project_id, account_label="小博")["history"] == []
+    db.close()
+
+
+def test_confirm_rejects_manifest_from_another_episode(tmp_path: Path):
+    db, project_id, service = _service(tmp_path)
+    pipeline = tmp_path / ".pipeline.json"
+    pipeline.write_text(
+        json.dumps({"episode_id": "episode:another-task"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="episode_id 与当前 pipeline 不一致"):
+        service.confirm(
+            project_id,
+            run_manifest_path=_manifest(tmp_path, project_id),
+            pipeline_path=pipeline,
+        )
+
     db.close()
 
 
@@ -163,6 +182,7 @@ def test_frozen_rerender_creates_candidate_without_demoting_published_pipeline(
     pipeline.write_text(
         json.dumps(
             {
+                "episode_id": "episode:test-production-history",
                 "current_phase": "done",
                 "output_dir": str(delivery),
                 "project": {"id": project_id},

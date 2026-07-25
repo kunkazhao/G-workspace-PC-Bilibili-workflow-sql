@@ -11,8 +11,9 @@ The project treats SQLite as the local source of truth:
 - Old project files are only read by explicit migration/import helpers.
 - Project creation idempotently creates the complete external media workspace
   for every enabled account and its configured templates.
-- `production_runs` contains only user-confirmed complete MP4 productions;
-  run manifests alone are generation evidence and tests do not count.
+- New `production_runs` rows contain `episode_id` and only user-confirmed
+  complete MP4 productions; old rows remain untouched but are hidden from the
+  new workflow history.
 
 ## Bound Artifact Confirmation
 
@@ -21,9 +22,18 @@ python -m bworkflow_sql confirm-intro-video --pipeline <.pipeline.json> --intro-
 python -m bworkflow_sql confirm-production <project_id> --run-manifest <run-manifest.json> --pipeline <.pipeline.json>
 ```
 
-These commands keep legacy phase fields and also write hash-bound approval
-evidence plus a stable `episode_id`. Replacing an approved file invalidates the
-bound approval in TotalControl.
+These commands write hash-bound approval evidence for the explicit schema-v2
+episode pipeline. Replacing an approved file invalidates the bound approval in
+TotalControl.
+
+## Formal Render Occupancy
+
+Intro rendering, complete final rendering and production rerendering share one
+machine-local, non-waiting render slot. When occupied, the CLI returns
+`error.code=render_busy` plus the active episode/category/account. Wait for that
+render to finish and rerun the command; there is no automatic queue or
+concurrent formal rendering. Preflight, copy, voice and package preparation are
+not locked.
 
 ## Cover Workflow
 

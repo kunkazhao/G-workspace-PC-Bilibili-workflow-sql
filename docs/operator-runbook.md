@@ -1,5 +1,15 @@
 # B-Workflow SQL 运维手册
 
+## 多任务与正式渲染占用
+
+- 每个新任务使用自己的 schema-v2 `.pipeline.json` 和 `episode_id`；不得用
+  品类名猜选任务。
+- 文案、预检、配音和打包准备可以在多个对话中并行。
+- `render-intro-video`、`render-final-video`、`rerender-production` 共用一个
+  全局渲染占用门禁。若返回 `render_busy`，不得绕过门禁直接调用 CutMe，
+  也不得自动循环重试；向用户说明当前占用任务，等完成后再让当前对话“继续”。
+- 不提供自动排队，也不支持两个正式渲染同时运行。
+
 ## 动态商品卡正式生成
 
 正式商品段只走 `动态 ProductCard -> Remotion 短 MP4 -> 完整 MP4`，不读取、
@@ -499,8 +509,8 @@ python -m pytest -q tests/test_intro_plan_writer.py tests/test_cutme_intro.py te
 
 ## Final MP4 run manifest
 
-Every `render-final-video` run writes a run manifest under
-`data\workspace\project-{project_id}\runs\final-video-*.run-manifest.json` and
+Every schema-v2 `render-final-video` run writes a run manifest under
+`data\workspace\project-{project_id}\runs\episodes\{episode_key}\final-video-*.run-manifest.json` and
 returns it as `run_manifest_path`. This file is the evidence for one concrete
 generation run: selected account/template/order/media mode, RenderPackage path,
 intro video path, product/full MP4 paths, acceptance frames,
@@ -508,14 +518,14 @@ intro video path, product/full MP4 paths, acceptance frames,
 
 The run manifest is not a reusable copy asset and is not the workflow phase
 state. Reusable copy/parameter assets live in the WriteSpace asset library;
-`.pipeline.json` records the current production selection and phase; the run
+the episode `.pipeline.json` records that task's production selection and phase; the run
 manifest records what one output actually used. If a user-selected output
 directory is moved or deleted later, treat the missing MP4 as a missing
 historical artifact and rerun generation. Do not treat it as a broken asset
 library or stale `.pipeline.json`. For normal workflow production, pass
 `--pipeline <path-to-.pipeline.json>` to `render-final-video` so the latest
 manifest and MP4 paths are written back for TotalControl `workflow.ps1
-status/next`.
+status/next --episode-id <episode:...>`.
 
 ## Resource lifecycle audit and reconciliation
 

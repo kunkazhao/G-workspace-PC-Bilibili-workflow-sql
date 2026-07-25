@@ -3,6 +3,9 @@ __pycache__/
 .pytest_cache/
 .codex_tmp/
 /work/
+.env
+.env.*
+!.env.example
 .venv-asr/
 .venv-align/
 scripts/jianying_engine/.venv/

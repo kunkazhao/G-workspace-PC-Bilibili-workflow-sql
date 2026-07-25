@@ -168,6 +168,7 @@ CREATE TABLE IF NOT EXISTS account_voice_profiles (
 
 CREATE TABLE IF NOT EXISTS production_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    episode_id TEXT NOT NULL DEFAULT '',
     project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     account_id INTEGER,
     category_name TEXT NOT NULL,
@@ -291,7 +292,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 """
 
-CURRENT_SCHEMA_VERSION = 15
+CURRENT_SCHEMA_VERSION = 16
 
 CONFIRMED_MASTER_ACCOUNT_BINDINGS = {
     "小燃": ("c025960c-5560-4630-8344-509a5c6d92a5", "3546911325817533"),
@@ -394,6 +395,7 @@ class Database:
             (13, self._migrate_v13),
             (14, self._migrate_v14),
             (15, self._migrate_v15),
+            (16, self._migrate_v16),
         ]
         for version, func in migrations:
             if current < version:
@@ -635,6 +637,16 @@ class Database:
                     AND e.resource_key='cleanup_candidate:' || c.id
               )
             """
+        )
+
+    def _migrate_v16(self, conn: sqlite3.Connection) -> None:
+        """Identify new production records by episode; legacy rows remain ignored."""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(production_runs)").fetchall()}
+        if "episode_id" not in columns:
+            conn.execute("ALTER TABLE production_runs ADD COLUMN episode_id TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_production_runs_episode_id "
+            "ON production_runs(episode_id, confirmed_at)"
         )
 
     def _migrate_script_hashes(self, conn: sqlite3.Connection) -> None:
