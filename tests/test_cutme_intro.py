@@ -135,6 +135,89 @@ def test_prepare_intro_plan_selects_assets_without_reuse(tmp_path: Path):
     ]
 
 
+def test_prepare_contract_intro_realigns_even_when_preview_timings_are_complete(
+    tmp_path: Path,
+    monkeypatch,
+):
+    source_plan = tmp_path / "intro_plan.json"
+    output_plan = tmp_path / "prepared.json"
+    _write_plan(source_plan)
+    plan = json.loads(source_plan.read_text(encoding="utf-8"))
+    plan["visual_contract_version"] = "1.0.0"
+    plan["visual_event_specs"] = [
+        {
+            "id": "market-card-1",
+            "scene_type": "hook_open",
+            "target": "hook_open.title",
+            "trigger_text": "A",
+            "sfx_role": "title_hit",
+        }
+    ]
+    plan["visual_events"] = [
+        {
+            "id": "market-card-1",
+            "timing": {"start": 88.0, "duration": 8.0},
+        }
+    ]
+    source_plan.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
+    asset_root = tmp_path / "assets"
+    category_dir = asset_root / "数码-键盘"
+    common_dir = asset_root / "1-通用"
+    sfx_dir = asset_root / "1-音效"
+    category_dir.mkdir(parents=True)
+    common_dir.mkdir(parents=True)
+    sfx_dir.mkdir(parents=True)
+    for index in range(1, 5):
+        (category_dir / f"product-{index}.mp4").write_bytes(b"")
+    (common_dir / "引导三连1.mp4").write_bytes(b"")
+    for slot in plan["sfx_contract"]["sfx_slots"]:
+        (sfx_dir / slot["filename"]).write_bytes(b"")
+
+    calls = []
+
+    def fake_align(source, audio_path):
+        calls.append((source, audio_path))
+        aligned = dict(source)
+        aligned["timing_source"] = {
+            "type": "forced_transcript_scene_and_visual_event_alignment",
+            "alignment_run_id": "alignment-test-run",
+        }
+        aligned["visual_events"] = [{
+            **source["visual_event_specs"][0],
+            "timing": {
+                "start": 0.25,
+                "duration": 0.3,
+                "source": "forced_alignment_trigger_text",
+            },
+            "alignment": {
+                "source": "forced_alignment_trigger_text",
+                "trigger_text": "A",
+                "scene_type": "hook_open",
+                "alignment_run_id": "alignment-test-run",
+            },
+        }]
+        return aligned
+
+    monkeypatch.setattr(cutme_intro_module, "align_intro_plan_scenes_with_asr", fake_align)
+
+    prepared = cutme_intro_module.prepare_intro_plan_for_cutme(
+        source_plan_path=source_plan,
+        audio_path=tmp_path / "intro.wav",
+        project={"id": 1, "name": "数码-键盘"},
+        account_label="小博",
+        expected_intro_text="ABCD",
+        output_plan_path=output_plan,
+        asset_root=asset_root,
+        seed="fixed",
+    )
+
+    assert len(calls) == 1
+    assert prepared["pc_workflow"]["aligned_with_asr"] is True
+    assert prepared["timing_source"]["alignment_run_id"] == "alignment-test-run"
+    assert prepared["visual_events"][0]["timing"]["start"] == 0.25
+
+
 def test_intro_preflight_blocks_missing_product_demo_clips(tmp_path: Path):
     source_plan = tmp_path / "intro_plan.json"
     _write_plan(source_plan)

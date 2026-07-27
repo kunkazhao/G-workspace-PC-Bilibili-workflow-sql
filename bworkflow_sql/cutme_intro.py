@@ -122,7 +122,11 @@ def prepare_intro_plan_for_cutme(
     )
 
     aligned_with_asr = False
-    if not _has_complete_scene_timing(plan) or _needs_visual_event_alignment(plan):
+    if (
+        _is_contract_driven_intro(plan)
+        or not _has_complete_scene_timing(plan)
+        or _needs_visual_event_alignment(plan)
+    ):
         plan = align_intro_plan_scenes_with_asr(plan, audio_path)
         aligned_with_asr = True
 
@@ -622,6 +626,13 @@ def _needs_visual_event_alignment(plan: dict[str, Any]) -> bool:
         if start < 0 or duration <= 0:
             return True
     return False
+
+
+def _is_contract_driven_intro(plan: dict[str, Any]) -> bool:
+    return bool(
+        safe_text(plan.get("visual_contract_version"))
+        or safe_text(plan.get("visualContractVersion"))
+    )
 
 
 def _visual_cue_counts(plan: dict[str, Any]) -> dict[str, int]:

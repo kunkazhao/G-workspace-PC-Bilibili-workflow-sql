@@ -62,6 +62,7 @@ def test_align_intro_plan_scenes_with_asr_writes_scene_timing(tmp_path: Path, mo
     aligned = intro_timeline_module.align_intro_plan_scenes_with_asr(plan, audio_path)
 
     assert aligned["timing_source"]["type"] == "forced_transcript_scene_and_visual_event_alignment"
+    assert aligned["timing_source"]["alignment_run_id"]
     assert aligned["scenes"][0]["timing"] == {"start": 0.0, "duration": 0.5}
     assert aligned["scenes"][1]["timing"]["start"] == pytest.approx(0.7)
     assert aligned["scenes"][2]["timing"]["start"] == pytest.approx(1.4)
@@ -131,6 +132,60 @@ def test_align_visual_event_specs_with_units_uses_trigger_text():
     assert events[0]["timing"]["source"] == "forced_alignment_trigger_text"
     assert events[0]["timing"]["start"] == pytest.approx(1.0, abs=0.15)
     assert events[1]["timing"]["start"] == pytest.approx(2.3, abs=0.15)
+
+
+def test_align_intro_plan_records_event_alignment_provenance(tmp_path: Path, monkeypatch):
+    audio_path = tmp_path / "intro.wav"
+    write_test_wav(audio_path, [(1.0, 0.6)])
+    plan = {
+        "full_script": "入门款。",
+        "visual_contract_version": "1.0.0",
+        "scenes": [
+            {
+                "type": "market_diagnosis",
+                "text": "入门款。",
+                "timing": {"start": 99.0, "duration": 9.0},
+            }
+        ],
+        "visual_event_specs": [
+            {
+                "id": "market-card-1",
+                "scene_type": "market_diagnosis",
+                "target": "market_diagnosis.cards[0]",
+                "trigger_text": "入门款",
+                "sfx_role": "text_pop",
+            }
+        ],
+        "visual_events": [
+            {
+                "id": "market-card-1",
+                "timing": {"start": 99.0, "duration": 9.0},
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        intro_timeline_module,
+        "forced_alignment_results",
+        lambda *_args, **_kwargs: [{
+            "audio_duration_sec": 1.0,
+            "items": [{"start": 0.0, "end": 0.8, "text": "入门款。"}],
+        }],
+    )
+
+    aligned = intro_timeline_module.align_intro_plan_scenes_with_asr(plan, audio_path)
+
+    run_id = aligned["timing_source"]["alignment_run_id"]
+    assert run_id
+    assert aligned["scenes"][0]["timing"] != {"start": 99.0, "duration": 9.0}
+    event = aligned["visual_events"][0]
+    assert event["timing"]["source"] == "forced_alignment_trigger_text"
+    assert event["alignment"] == {
+        "source": "forced_alignment_trigger_text",
+        "trigger_text": "入门款",
+        "scene_type": "market_diagnosis",
+        "alignment_run_id": run_id,
+    }
 
 
 def test_align_visual_event_specs_rejects_missing_trigger_text():

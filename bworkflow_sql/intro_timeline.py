@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,7 @@ def align_intro_plan_scenes_with_asr(
         audio_duration_sec=float(forced_result.get("audio_duration_sec") or 0.0),
     )
 
+    alignment_run_id = uuid.uuid4().hex
     result = dict(intro_plan)
     result["scenes"] = list(intro_plan.get("scenes") or [])
     for scene, (start, end, _text) in zip(result["scenes"], aligned):
@@ -62,11 +64,13 @@ def align_intro_plan_scenes_with_asr(
         result,
         units,
         offset_sec=offset_sec,
+        alignment_run_id=alignment_run_id,
     )
     result["timing_source"] = {
         "type": "forced_transcript_scene_and_visual_event_alignment",
         "model": model_name,
         "language": language,
+        "alignment_run_id": alignment_run_id,
     }
     return result
 
@@ -121,6 +125,7 @@ def align_visual_event_specs_with_units(
     units: list[dict[str, Any]],
     *,
     offset_sec: float = 0.0,
+    alignment_run_id: str = "",
 ) -> list[dict[str, Any]]:
     specs = [
         spec
@@ -161,6 +166,8 @@ def align_visual_event_specs_with_units(
             "trigger_text": trigger_text,
             "scene_type": scene_type,
         }
+        if alignment_run_id:
+            event["alignment"]["alignment_run_id"] = alignment_run_id
         events.append(event)
     return events
 
