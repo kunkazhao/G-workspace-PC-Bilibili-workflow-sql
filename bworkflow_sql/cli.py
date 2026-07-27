@@ -479,6 +479,7 @@ def cmd_render_intro_video(args: argparse.Namespace) -> None:
         output_path=args.output or None,
         asset_root=args.asset_root,
         pipeline_path=getattr(args, "pipeline", "") or None,
+        acceptance_candidate=bool(getattr(args, "acceptance_candidate", False)),
     )
     _json_out(result)
 
@@ -1260,6 +1261,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", "-o", help="intro MP4 output path; defaults to the project intro workspace")
     p.add_argument("--asset-root", default=str(DEFAULT_INTRO_ASSET_ROOT), help="intro material root")
     p.add_argument("--pipeline", default="", help=".pipeline.json path; creates/reuses its project delivery directory")
+    p.add_argument(
+        "--acceptance-candidate",
+        action="store_true",
+        help="只渲染 motion_approved 独立引言候选；必须显式输出到 manual-tests，且禁止写 pipeline",
+    )
 
     p = sub.add_parser("materialize-final-script", help="从最终 RenderPackage 生成并绑定成片完整口播稿")
     p.add_argument("--run-manifest", required=True, help="final-video run manifest 路径")

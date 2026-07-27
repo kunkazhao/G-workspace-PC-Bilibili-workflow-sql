@@ -128,7 +128,7 @@ def _materialized_intro_scripts(
 
 
 def _source_intro_scripts(project_id: int) -> dict[str, ScriptVariant]:
-    from .cutme_intro import ALLOWED_INTRO_TEMPLATE_IDS, default_intro_plan_workspace
+    from .cutme_intro import allowed_intro_template_ids, default_intro_plan_workspace
 
     workspace = default_intro_plan_workspace(project_id)
     if not workspace.is_dir():
@@ -145,7 +145,7 @@ def _source_intro_scripts(project_id: int) -> dict[str, ScriptVariant]:
         if not isinstance(plan, dict):
             continue
         template_id = safe_text(plan.get("template_id") or plan.get("templateId"))
-        if template_id not in ALLOWED_INTRO_TEMPLATE_IDS:
+        if template_id not in allowed_intro_template_ids():
             continue
         full_script = safe_text(plan.get("full_script"))
         if not full_script:

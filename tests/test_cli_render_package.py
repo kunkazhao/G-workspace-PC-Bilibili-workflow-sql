@@ -974,6 +974,8 @@ def test_cmd_intro_preflight_writes_gate_json(capsys, monkeypatch):
     assert payload["ok"] is False
     assert payload["status"] == "blocked_missing_intro_demo"
     assert payload["message"] == "缺 3 段数码-桌面音响通用产品展示素材"
+
+
 def test_cmd_render_intro_video_writes_standard_json(capsys, monkeypatch):
     calls: list[dict[str, object]] = []
 
@@ -982,11 +984,12 @@ def test_cmd_render_intro_video_writes_standard_json(capsys, monkeypatch):
             self,
             project_id,
             *,
-                account_label,
-                intro_label,
-                output_path,
-                asset_root,
-                pipeline_path,
+            account_label,
+            intro_label,
+            output_path,
+            asset_root,
+            pipeline_path,
+            acceptance_candidate,
         ):
             calls.append(
                 {
@@ -994,8 +997,9 @@ def test_cmd_render_intro_video_writes_standard_json(capsys, monkeypatch):
                     "account_label": account_label,
                     "intro_label": intro_label,
                     "output_path": output_path,
-                        "asset_root": asset_root,
-                        "pipeline_path": pipeline_path,
+                    "asset_root": asset_root,
+                    "pipeline_path": pipeline_path,
+                    "acceptance_candidate": acceptance_candidate,
                 }
             )
             return {
@@ -1013,6 +1017,7 @@ def test_cmd_render_intro_video_writes_standard_json(capsys, monkeypatch):
             intro_label="intro-1",
             output="intro.mp4",
             asset_root="assets",
+            acceptance_candidate=False,
         )
     )
 
@@ -1024,8 +1029,9 @@ def test_cmd_render_intro_video_writes_standard_json(capsys, monkeypatch):
             "project_id": 23,
             "account_label": "xiaobo",
             "intro_label": "intro-1",
-                "output_path": "intro.mp4",
-                "asset_root": "assets",
-                "pipeline_path": None,
+            "output_path": "intro.mp4",
+            "asset_root": "assets",
+            "pipeline_path": None,
+            "acceptance_candidate": False,
         }
     ]

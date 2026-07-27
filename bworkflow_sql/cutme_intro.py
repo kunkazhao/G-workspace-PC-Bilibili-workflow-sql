@@ -19,10 +19,22 @@ from .tts_helpers import normalize_audio_loudness
 from .utils import now_iso, safe_text
 
 
-ALLOWED_INTRO_TEMPLATE_IDS = {"pain_avoidance_priority_v1"}
+LEGACY_INTRO_TEMPLATE_IDS = {"pain_avoidance_priority_v1"}
 BLOCKED_INTRO_TEMPLATE_IDS = {"recovered_markdown_intro_v1"}
 INTRO_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
 INTRO_MATERIAL_MANIFEST_NAME = "intro-materials.json"
+
+
+def allowed_intro_template_ids() -> set[str]:
+    _ensure_cutme_import_path()
+    from cutme.intro_templates.registry import list_intro_templates
+
+    registered = {
+        str(item["templateId"])
+        for item in list_intro_templates()
+        if item.get("status") != "retired"
+    }
+    return {*LEGACY_INTRO_TEMPLATE_IDS, *registered}
 
 
 @dataclass(frozen=True)
@@ -106,6 +118,7 @@ def prepare_intro_plan_for_cutme(
         raise ValueError("intro_plan 必须是 JSON 对象")
 
     _validate_plan_matches_intro_text(plan, expected_intro_text)
+    plan = _refresh_contract_runtime(plan, seed=seed or safe_text(plan.get("seed")))
     preflight = preflight_intro_plan_for_cutme(
         source_plan_path=plan_path,
         project=project,
@@ -296,6 +309,7 @@ def run_cutme_render(
     *,
     renderer: str = "remotion",
     render_owner: dict[str, Any] | None = None,
+    acceptance_candidate: bool = False,
 ) -> Path:
     config = Path(config_path)
     output = Path(output_path).expanduser()
@@ -312,8 +326,7 @@ def run_cutme_render(
 
     owner = render_owner or build_render_owner(phase="intro_video")
     with acquire_production_render_slot(owner, lock_root=INTERNAL_WORKSPACE_ROOT):
-        result = subprocess.run(
-            [
+        command = [
                 sys.executable,
                 "-m",
                 "cutme",
@@ -323,7 +336,11 @@ def run_cutme_render(
                 "--output",
                 str(output),
                 "--clean",
-            ],
+            ]
+        if acceptance_candidate:
+            command.append("--acceptance-candidate")
+        result = subprocess.run(
+            command,
             cwd=str(CUTME_ROOT),
             env=env,
             capture_output=True,
@@ -370,8 +387,9 @@ def preflight_intro_plan_for_cutme(
     triple_videos = _matching_triple_cta_files(common_dir, plan)
     template_id = safe_text(plan.get("template_id") or plan.get("templateId"))
 
+    allowed_template_ids = allowed_intro_template_ids()
     if template_id in BLOCKED_INTRO_TEMPLATE_IDS or (
-        template_id and template_id not in ALLOWED_INTRO_TEMPLATE_IDS
+        template_id and template_id not in allowed_template_ids
     ):
         return _record_intro_preflight_pipeline(
             pipeline_path,
@@ -381,12 +399,12 @@ def preflight_intro_plan_for_cutme(
             "message": f"引言源计划模板不正确：{template_id}。请重新用标准引言模板生成 source-intro-plan。",
             "source_intro_plan_path": str(plan_path),
             "template_id": template_id,
-            "expected_template_ids": sorted(ALLOWED_INTRO_TEMPLATE_IDS),
+            "expected_template_ids": sorted(allowed_template_ids),
             "issues": [
                 {
                     "type": "wrong_intro_template",
                     "template_id": template_id,
-                    "expected": sorted(ALLOWED_INTRO_TEMPLATE_IDS),
+                    "expected": sorted(allowed_template_ids),
                 }
             ],
             "next": {
@@ -636,7 +654,12 @@ def _is_contract_driven_intro(plan: dict[str, Any]) -> bool:
 
 
 def _visual_cue_counts(plan: dict[str, Any]) -> dict[str, int]:
-    counts: dict[str, int] = {}
+    requirements = plan.get("asset_requirements")
+    counts: dict[str, int] = {
+        str(role): int(count)
+        for role, count in (requirements.items() if isinstance(requirements, dict) else [])
+        if str(role).strip() and int(count) > 0
+    }
     for scene in plan.get("scenes") or []:
         if not isinstance(scene, dict):
             continue
@@ -647,6 +670,46 @@ def _visual_cue_counts(plan: dict[str, Any]) -> dict[str, int]:
             if role:
                 counts[role] = counts.get(role, 0) + 1
     return counts
+
+
+def _refresh_contract_runtime(plan: dict[str, Any], *, seed: str) -> dict[str, Any]:
+    template_id = safe_text(
+        plan.get("intro_template_id") or plan.get("introTemplateId")
+    )
+    if not template_id:
+        return plan
+    slots = plan.get("slots")
+    if not isinstance(slots, dict):
+        raise ValueError("合同引言计划缺少结构化 slots")
+    _ensure_cutme_import_path()
+    from cutme.intro_templates.visual_contract import compile_intro_template_runtime
+
+    version = int(
+        plan.get("intro_template_version")
+        or plan.get("introTemplateVersion")
+        or 1
+    )
+    runtime = compile_intro_template_runtime(
+        template_id, version, slots, seed=seed or "intro-candidate"
+    )
+    refreshed = dict(plan)
+    refreshed.update(
+        {
+            "intro_template_id": runtime["introTemplateId"],
+            "intro_template_version": runtime["introTemplateVersion"],
+            "intro_template_render_fingerprint": runtime[
+                "introTemplateRenderFingerprint"
+            ],
+            "visual_template_id": runtime["visualTemplateId"],
+            "visual_template_version": runtime["introTemplateVersion"],
+            "visual_contract_version": runtime["visualContractVersion"],
+            "visual_cards": runtime["visualCards"],
+            "visual_event_specs": runtime["visualEventSpecs"],
+            "visual_plan": runtime["visualPlan"],
+            "seed": seed or "intro-candidate",
+        }
+    )
+    return refreshed
 
 
 def _intro_common_folder_name(plan: dict[str, Any]) -> str:

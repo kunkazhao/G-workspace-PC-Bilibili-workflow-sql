@@ -713,11 +713,25 @@ class WorkflowService:
         output_path: str | Path | None = None,
         asset_root: str | Path = "",
         pipeline_path: str | Path | None = None,
+        acceptance_candidate: bool = False,
     ) -> dict[str, Any]:
         project = self._required_project(project_id)
         account = safe_text(account_label)
         if not account:
             raise ValueError("render-intro-video requires --account")
+        if acceptance_candidate:
+            if pipeline_path:
+                raise ValueError("acceptance candidate must not write a production pipeline")
+            if not output_path:
+                raise ValueError("acceptance candidate requires an explicit --output")
+            candidate_output = Path(output_path).expanduser().resolve()
+            manual_root = (INTERNAL_WORKSPACE_ROOT / "manual-tests").resolve()
+            try:
+                candidate_output.relative_to(manual_root)
+            except ValueError as exc:
+                raise ValueError(
+                    f"acceptance candidate output must be under {manual_root}"
+                ) from exc
         intro_block = self._intro_block_for_label(project_id, intro_label)
         voice = self._ready_asset(
             self.repo.asset_bindings(project_id),
@@ -773,6 +787,7 @@ class WorkflowService:
                 category=safe_text(project.get("name")),
                 account=account,
             ),
+            acceptance_candidate=acceptance_candidate,
         )
         config = json.loads(prepared.config_path.read_text(encoding="utf-8-sig"))
         subtitles = config.get("subtitles") if isinstance(config.get("subtitles"), list) else []
@@ -821,6 +836,7 @@ class WorkflowService:
             "selected_assets": prepared.selected_assets,
             "preflight": prepared.preflight,
             "aligned_with_asr": prepared.aligned_with_asr,
+            "acceptance_candidate": acceptance_candidate,
             "verification_hint": {
                 "ffprobe": f"ffprobe -v error -show_streams -show_format {rendered}",
                 "frames": f"ffmpeg -hide_banner -ss 3 -i {rendered} -frames:v 1 <frame-3s.png>",

@@ -3,11 +3,41 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from bworkflow_sql.db import Database
 from bworkflow_sql.intro_plan_writer import (
     render_intro_plan_from_slots,
     write_intro_plan_for_project,
 )
+
+
+def test_contract_template_keeps_structured_slots_for_cutme_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bworkflow_sql.settings import CUTME_ROOT
+
+    monkeypatch.syspath_prepend(str(CUTME_ROOT))
+    import cutme.intro_templates.copy_runtime as copy_runtime
+
+    captured: dict = {}
+
+    def fake_render(template_id: str, version: int, slots: dict, *, seed: str) -> dict:
+        captured.update(
+            {"template_id": template_id, "version": version, "slots": slots, "seed": seed}
+        )
+        return {"full_script": "测试文案", "scenes": []}
+
+    monkeypatch.setattr(copy_runtime, "render_intro_template_from_slots", fake_render)
+    slots = {"market_tiers": ["入门", "主流", "高端"]}
+
+    result = render_intro_plan_from_slots(
+        slots=slots, template_id="intro-template-test"
+    )
+
+    assert result["full_script"] == "测试文案"
+    assert captured["slots"] == slots
+    assert captured["slots"]["market_tiers"] == ["入门", "主流", "高端"]
 from bworkflow_sql.repositories import Repository
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import sys
 from dataclasses import dataclass
@@ -34,6 +35,17 @@ def render_intro_plan_from_slots(
     template_id: str = DEFAULT_INTRO_TEMPLATE_ID,
 ) -> dict[str, Any]:
     _ensure_cutme_import_path()
+    if template_id.startswith("intro-template-"):
+        from cutme.intro_templates.copy_runtime import render_intro_template_from_slots
+
+        seed = "authoring-" + hashlib.sha256(
+            json.dumps(
+                slots, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        return render_intro_template_from_slots(
+            template_id, 1, slots, seed=seed
+        )
     from cutme.intro_script import (
         load_intro_template,
         render_intro_script,

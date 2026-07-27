@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from multiprocessing import get_context
+from types import SimpleNamespace
 
 import pytest
 
@@ -120,3 +121,64 @@ def test_intro_render_does_not_start_cutme_while_gate_is_busy(
             )
 
     assert calls == []
+
+
+def test_acceptance_candidate_keeps_render_gate_and_passes_explicit_cutme_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bworkflow_sql.cutme_intro as intro
+
+    monkeypatch.setattr(intro, "INTERNAL_WORKSPACE_ROOT", tmp_path)
+    config = tmp_path / "config.json"
+    output = tmp_path / "candidate.mp4"
+    config.write_text("{}", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        commands.append(command)
+        output.write_bytes(b"mp4")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(intro.subprocess, "run", fake_run)
+
+    assert intro.run_cutme_render(
+        config, output, acceptance_candidate=True
+    ) == output.resolve()
+    assert "--acceptance-candidate" in commands[0]
+    assert not (tmp_path / ".locks" / "production-render-owner.json").exists()
+
+
+def test_acceptance_candidate_rejects_pipeline_before_production_work() -> None:
+    from bworkflow_sql.workflow_service import WorkflowService
+
+    service = object.__new__(WorkflowService)
+    service._required_project = lambda _project_id: {"name": "数码-耳机"}  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="must not write a production pipeline"):
+        service.render_intro_video(
+            24,
+            account_label="小博",
+            output_path="candidate.mp4",
+            pipeline_path="episode.pipeline.json",
+            acceptance_candidate=True,
+        )
+
+
+def test_acceptance_candidate_rejects_output_outside_manual_tests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bworkflow_sql.workflow_service as workflow_service
+
+    monkeypatch.setattr(workflow_service, "INTERNAL_WORKSPACE_ROOT", tmp_path)
+    service = object.__new__(workflow_service.WorkflowService)
+    service._required_project = lambda _project_id: {"name": "数码-耳机"}  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="must be under"):
+        service.render_intro_video(
+            24,
+            account_label="小博",
+            output_path=tmp_path / "outside" / "candidate.mp4",
+            acceptance_candidate=True,
+        )
