@@ -208,6 +208,18 @@ CREATE TABLE IF NOT EXISTS production_runs (
     blue_link_master_pending_count INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS episode_source_snapshots (
+    episode_id TEXT PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    master_snapshot_id TEXT NOT NULL,
+    source_sha256 TEXT NOT NULL,
+    source_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_episode_source_snapshots_project
+    ON episode_source_snapshots(project_id, created_at);
+
 CREATE TABLE IF NOT EXISTS resource_cleanup_candidates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
@@ -292,7 +304,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 """
 
-CURRENT_SCHEMA_VERSION = 16
+CURRENT_SCHEMA_VERSION = 17
 
 CONFIRMED_MASTER_ACCOUNT_BINDINGS = {
     "小燃": ("c025960c-5560-4630-8344-509a5c6d92a5", "3546911325817533"),
@@ -396,6 +408,7 @@ class Database:
             (14, self._migrate_v14),
             (15, self._migrate_v15),
             (16, self._migrate_v16),
+            (17, self._migrate_v17),
         ]
         for version, func in migrations:
             if current < version:
@@ -647,6 +660,23 @@ class Database:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_production_runs_episode_id "
             "ON production_runs(episode_id, confirmed_at)"
+        )
+
+    def _migrate_v17(self, conn: sqlite3.Connection) -> None:
+        """Persist immutable Master source projections for schema-v3 episodes."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS episode_source_snapshots (
+                episode_id TEXT PRIMARY KEY,
+                project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                master_snapshot_id TEXT NOT NULL,
+                source_sha256 TEXT NOT NULL,
+                source_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_episode_source_snapshots_project
+                ON episode_source_snapshots(project_id, created_at);
+            """
         )
 
     def _migrate_script_hashes(self, conn: sqlite3.Connection) -> None:

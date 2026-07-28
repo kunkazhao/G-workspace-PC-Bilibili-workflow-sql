@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import secrets
 import subprocess
@@ -22,6 +23,8 @@ from .utils import now_iso, safe_text
 LEGACY_INTRO_TEMPLATE_IDS = {"pain_avoidance_priority_v1"}
 BLOCKED_INTRO_TEMPLATE_IDS = {"recovered_markdown_intro_v1"}
 INTRO_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
+INTRO_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+INTRO_CATEGORY_IMAGE_ROLES = ("category_hero", "category_elements")
 INTRO_MATERIAL_MANIFEST_NAME = "intro-materials.json"
 
 
@@ -383,6 +386,36 @@ def preflight_intro_plan_for_cutme(
     required = _visual_cue_counts(plan)
     required_product_count = int(required.get("product_demo") or 0)
     required_triple_count = int(required.get("triple_cta") or 0)
+    missing_images = {
+        role: {
+            "required": int(required.get(role) or 0),
+            "available": len(_intro_category_image_files(category_dir, role)),
+            "folder": str(category_dir / role),
+        }
+        for role in INTRO_CATEGORY_IMAGE_ROLES
+        if int(required.get(role) or 0) > len(_intro_category_image_files(category_dir, role))
+    }
+    if missing_images:
+        return _record_intro_preflight_pipeline(
+            pipeline_path,
+            {
+                "ok": False,
+                "status": "blocked_missing_intro_category_image",
+                "message": "缺少模板要求的可复用品类图片",
+                "source_intro_plan_path": str(plan_path),
+                "template_id": safe_text(plan.get("template_id") or plan.get("templateId")),
+                "category_material_folder": str(category_dir),
+                "issues": [
+                    {"type": "missing_intro_category_image", "role": role, **detail}
+                    for role, detail in missing_images.items()
+                ],
+                "next": {
+                    "action": "generate_intro_category_images",
+                    "roles": list(missing_images),
+                    "folders": {role: detail["folder"] for role, detail in missing_images.items()},
+                },
+            },
+        )
     product_videos, material_manifest_path = _intro_product_demo_files(category_dir)
     triple_videos = _matching_triple_cta_files(common_dir, plan)
     template_id = safe_text(plan.get("template_id") or plan.get("templateId"))
@@ -557,6 +590,18 @@ def _ensure_selected_assets(
         return plan
 
     selected = dict(plan.get("selected_assets") or {})
+    category_dir = Path(asset_root) / project_category_folder(project)
+    for role in INTRO_CATEGORY_IMAGE_ROLES:
+        count = int(needed.get(role) or 0)
+        if count <= 0 or len(_selected_asset_list(selected.get(role))) >= count:
+            continue
+        pool = _intro_category_image_files(category_dir, role)
+        if len(pool) < count:
+            raise ValueError(f"品类图片不足：{category_dir / role} 需要 {count} 张，实际 {len(pool)} 张")
+        selected[role] = [
+            str(path)
+            for path in _stable_asset_sample(pool, count=count, seed=f"{seed or account_label}:{role}")
+        ]
     product_count = int(needed.get("product_demo") or 0)
     triple_count = int(needed.get("triple_cta") or 0)
     has_products = len(selected.get("product_demo") or []) >= product_count
@@ -660,6 +705,7 @@ def _visual_cue_counts(plan: dict[str, Any]) -> dict[str, int]:
         for role, count in (requirements.items() if isinstance(requirements, dict) else [])
         if str(role).strip() and int(count) > 0
     }
+    cue_counts: dict[str, int] = {}
     for scene in plan.get("scenes") or []:
         if not isinstance(scene, dict):
             continue
@@ -668,7 +714,9 @@ def _visual_cue_counts(plan: dict[str, Any]) -> dict[str, int]:
                 continue
             role = safe_text(cue.get("clip_role"))
             if role:
-                counts[role] = counts.get(role, 0) + 1
+                cue_counts[role] = cue_counts.get(role, 0) + 1
+    for role, count in cue_counts.items():
+        counts[role] = max(counts.get(role, 0), count)
     return counts
 
 
@@ -729,6 +777,33 @@ def _list_intro_video_files(folder: Path) -> list[Path]:
         for path in folder.iterdir()
         if path.is_file() and path.suffix.lower() in INTRO_VIDEO_EXTS
     )
+
+
+def _intro_category_image_files(category_dir: Path, role: str) -> list[Path]:
+    folder = category_dir / role
+    if not folder.is_dir():
+        return []
+    return sorted(
+        path
+        for path in folder.iterdir()
+        if path.is_file() and path.suffix.lower() in INTRO_IMAGE_EXTS
+    )
+
+
+def _selected_asset_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    return []
+
+
+def _stable_asset_sample(paths: list[Path], *, count: int, seed: str) -> list[Path]:
+    ranked = sorted(
+        paths,
+        key=lambda path: hashlib.sha256(f"{seed}:{path.name}".encode("utf-8")).digest(),
+    )
+    return ranked[:count]
 
 
 def _intro_product_demo_files(folder: Path) -> tuple[list[Path], Path | None]:

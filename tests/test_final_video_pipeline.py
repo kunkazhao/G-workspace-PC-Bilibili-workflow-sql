@@ -606,6 +606,7 @@ def test_run_final_video_pipeline_builds_renders_verifies_and_extracts_frames(tm
             closing_text="",
             dynamic_product_contexts=None,
             master_snapshot_id=None,
+            episode_id="",
         ):
             calls.append(
                 (

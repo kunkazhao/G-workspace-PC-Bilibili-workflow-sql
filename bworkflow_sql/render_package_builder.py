@@ -670,6 +670,7 @@ def build_product_recommendation_package(
     closing_text: str = "",
     dynamic_product_contexts: list[dict[str, Any]] | None = None,
     master_snapshot_id: str | None = None,
+    episode_id: str = "",
 ) -> ProductRenderPackageResult:
     if output_mode not in SUPPORTED_OUTPUT_MODES:
         raise ValueError(f"unsupported output_mode: {output_mode}")
@@ -695,8 +696,9 @@ def build_product_recommendation_package(
         raise ValueError(f"project does not exist: {project_id}")
 
     account = safe_text(account_label)
+    frozen_products = repo.episode_products(project_id, episode_id)
     products = _ordered_products(
-        repo.products(project_id, include_removed=False),
+        frozen_products if frozen_products is not None else repo.products(project_id, include_removed=False),
         mode=safe_text(mode) or "standard",
         top_uids=top_uids or [],
         product_uids=product_uids or [],

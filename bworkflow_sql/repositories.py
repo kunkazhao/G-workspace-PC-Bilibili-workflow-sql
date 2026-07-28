@@ -30,6 +30,75 @@ class Repository:
             )
         ]
 
+    def create_episode_source_snapshot(
+        self,
+        *,
+        project_id: int,
+        episode_id: str,
+        master_snapshot_id: str,
+        source_sha256: str,
+        source_json: str,
+    ) -> dict[str, Any]:
+        """Create one immutable source projection; exact retries are idempotent."""
+        identity = safe_text(episode_id)
+        if not identity:
+            raise ValueError("episode_id is required")
+        ts = now_iso()
+        with self.db.connect() as conn:
+            existing = conn.execute(
+                "SELECT * FROM episode_source_snapshots WHERE episode_id=?", (identity,)
+            ).fetchone()
+            if existing is not None:
+                if (
+                    int(existing["project_id"]) != int(project_id)
+                    or safe_text(existing["master_snapshot_id"]) != safe_text(master_snapshot_id)
+                    or safe_text(existing["source_sha256"]) != safe_text(source_sha256)
+                ):
+                    raise ValueError("episode source snapshot already exists with different content")
+                return dict(existing)
+            conn.execute(
+                """
+                INSERT INTO episode_source_snapshots
+                (episode_id, project_id, master_snapshot_id, source_sha256, source_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (identity, project_id, master_snapshot_id, source_sha256, source_json, ts),
+            )
+            row = conn.execute(
+                "SELECT * FROM episode_source_snapshots WHERE episode_id=?", (identity,)
+            ).fetchone()
+        return dict(row) if row is not None else {}
+
+    def episode_source_snapshot(
+        self, project_id: int, episode_id: str
+    ) -> dict[str, Any] | None:
+        identity = safe_text(episode_id)
+        if not identity:
+            return None
+        row = self.db.fetchone(
+            "SELECT * FROM episode_source_snapshots WHERE episode_id=? AND project_id=?",
+            (identity, project_id),
+        )
+        return dict(row) if row else None
+
+    def episode_products(self, project_id: int, episode_id: str) -> list[dict[str, Any]] | None:
+        source = self.episode_source_snapshot(project_id, episode_id)
+        if source is None:
+            return None
+        try:
+            payload = json.loads(safe_text(source.get("source_json")))
+            products = payload.get("product_projection") if isinstance(payload, dict) else None
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("episode source snapshot is invalid") from exc
+        if not isinstance(products, list):
+            raise ValueError("episode source snapshot lacks product_projection")
+        normalized: list[dict[str, Any]] = []
+        for item in products:
+            if not isinstance(item, dict) or not safe_text(item.get("uid")):
+                raise ValueError("episode source snapshot contains an invalid product")
+            normalized.append(dict(item))
+        return normalized
+
     def script_blocks(self, project_id: int) -> list[dict[str, Any]]:
         return [
             dict(row)

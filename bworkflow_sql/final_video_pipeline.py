@@ -61,6 +61,7 @@ def _run_dynamic_product_preflight(
     project_id: int,
     account_label: str,
     product_card_template_id: str,
+    episode_id: str = "",
 ) -> dict[str, Any]:
     method = getattr(workflow, "dynamic_product_card_preflight", None)
     if not callable(method):
@@ -83,6 +84,7 @@ def _run_dynamic_product_preflight(
         project_id,
         account_label=account_label,
         product_card_template_id=product_card_template_id,
+        episode_id=episode_id,
     )
     if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
         return {
@@ -141,11 +143,13 @@ def run_final_video_pipeline(
     explicit_output_path = bool(output_path)
     explicit_full_output_path = bool(full_output_path)
     explicit_media_output = explicit_output_path or explicit_full_output_path
+    episode_id, episode_key = _episode_identity_from_pipeline(pipeline_path)
     dynamic_preflight = _run_dynamic_product_preflight(
         workflow,
         project_id=project_id,
         account_label=account,
         product_card_template_id=product_card_template_id,
+        episode_id=episode_id,
     )
     if dynamic_preflight.get("ok") is not True:
         return {
@@ -156,7 +160,6 @@ def run_final_video_pipeline(
             "preflight": dynamic_preflight,
         }
     phase7_selection = None
-    episode_id, episode_key = _episode_identity_from_pipeline(pipeline_path)
     if pipeline_path:
         phase7_selection = validated_phase7_selection(
             pipeline_path,
@@ -253,6 +256,7 @@ def run_final_video_pipeline(
             closing_text=DEFAULT_CLOSING_TEXT,
             dynamic_product_contexts=dynamic_preflight.get("contexts"),
             master_snapshot_id=safe_text(dynamic_preflight.get("snapshot_id")),
+            episode_id=episode_id,
         )
     if package_result.get("ok") is not True:
         return {

@@ -133,6 +133,23 @@ class SyncService:
         force_refresh: bool = True,
         expected_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
+        _snapshot, plan = self.master_snapshot_plan(
+            project_id,
+            force_refresh=force_refresh,
+            expected_snapshot_id=expected_snapshot_id,
+        )
+        if not apply_changes:
+            return _master_plan_result(plan)
+        return self.repo.apply_master_snapshot_plan(plan)
+
+    def master_snapshot_plan(
+        self,
+        project_id: int,
+        *,
+        force_refresh: bool = True,
+        expected_snapshot_id: str | None = None,
+    ) -> tuple[Any, MasterSnapshotSyncPlan]:
+        """Fetch and normalize one Master snapshot once for callers that must freeze it."""
         project = self.repo.project(project_id)
         if not project:
             raise ValueError("请先创建或选择品类项目。")
@@ -168,9 +185,7 @@ class SyncService:
                 str(error),
                 details=error.details,
             ) from error
-        if not apply_changes:
-            return _master_plan_result(plan)
-        return self.repo.apply_master_snapshot_plan(plan)
+        return snapshot, plan
 
     def _validate_scheme_matches_project(self, project: dict[str, Any], summary: dict[str, Any]) -> None:
         project_category_id = safe_text(project.get("category_id"))

@@ -9,6 +9,22 @@ import pytest
 import bworkflow_sql.cutme_intro as cutme_intro_module
 
 
+def test_contract_asset_requirements_do_not_double_count_visual_cues() -> None:
+    plan = {
+        "asset_requirements": {"product_demo": 2, "triple_cta": 1},
+        "scenes": [
+            {"visual_cues": [{"clip_role": "product_demo"}]},
+            {"visual_cues": [{"clip_role": "product_demo"}]},
+            {"visual_cues": [{"clip_role": "triple_cta"}]},
+        ],
+    }
+
+    assert cutme_intro_module._visual_cue_counts(plan) == {
+        "product_demo": 2,
+        "triple_cta": 1,
+    }
+
+
 def _write_plan(path: Path) -> None:
     scenes = [
         {

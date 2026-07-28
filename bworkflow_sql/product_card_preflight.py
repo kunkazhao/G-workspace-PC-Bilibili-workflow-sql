@@ -13,6 +13,7 @@ from .dynamic_product_card import (
 )
 from .master_contracts import MasterContractAdapter, MasterContractError
 from .repositories import Repository
+from .episode_source_snapshot import snapshot_from_episode_source, source_payload_from_row
 from .template_config import product_card_slot_issues, resolve_product_card_template
 from .utils import safe_text
 
@@ -25,6 +26,7 @@ def dynamic_product_card_preflight(
     product_card_template_id: str,
     master_contracts: MasterContractAdapter | None = None,
     product_uid: str = "",
+    episode_id: str = "",
 ) -> dict[str, Any]:
     repo = Repository(db)
     project = repo.project(project_id)
@@ -88,28 +90,26 @@ def dynamic_product_card_preflight(
             ),
         )
 
-    adapter = master_contracts or MasterContractAdapter()
-    try:
-        snapshot = adapter.fetch_scheme_snapshot(
-            workspace_id,
-            scheme_id,
-            force_refresh=True,
-        )
-    except MasterContractError as exc:
-        return _failure(
-            project_id=project_id,
-            account_label=account_label,
-            template_id=template_id,
-            error_code=exc.code,
-            issues=(
-                DynamicPreflightIssue(
-                    code=exc.code,
-                    product_uid="",
-                    field="master_snapshot",
-                    message=str(exc),
-                ),
-            ),
-        )
+    source = repo.episode_source_snapshot(project_id, episode_id)
+    if source is not None:
+        try:
+            snapshot = snapshot_from_episode_source(source_payload_from_row(source))
+        except ValueError as exc:
+            return _failure(
+                project_id=project_id, account_label=account_label, template_id=template_id,
+                error_code="episode_source_snapshot_invalid",
+                issues=(DynamicPreflightIssue(code="episode_source_snapshot_invalid", product_uid="", field="episode_source_snapshot", message=str(exc)),),
+            )
+    else:
+        adapter = master_contracts or MasterContractAdapter()
+        try:
+            snapshot = adapter.fetch_scheme_snapshot(workspace_id, scheme_id, force_refresh=True)
+        except MasterContractError as exc:
+            return _failure(
+                project_id=project_id, account_label=account_label, template_id=template_id,
+                error_code=exc.code,
+                issues=(DynamicPreflightIssue(code=exc.code, product_uid="", field="master_snapshot", message=str(exc)),),
+            )
     identity_issues: list[DynamicPreflightIssue] = []
     if safe_text(snapshot.workspace.id) != workspace_id:
         identity_issues.append(
@@ -133,7 +133,7 @@ def dynamic_product_card_preflight(
     selected_uid = safe_text(product_uid)
     products = [
         product
-        for product in repo.products(project_id, include_removed=False)
+        for product in (repo.episode_products(project_id, episode_id) or repo.products(project_id, include_removed=False))
         if not selected_uid or safe_text(product.get("uid")) == selected_uid
     ]
     issues: list[DynamicPreflightIssue] = list(identity_issues)
@@ -285,6 +285,7 @@ def product_card_preflight(
     product_uid: str = "",
     expect_cover: str = "",
     master_contracts: MasterContractAdapter | None = None,
+    episode_id: str = "",
 ) -> dict[str, Any]:
     # `expect_cover` is retained only as a CLI/API compatibility argument. The
     # current Master snapshot is authoritative for dynamic rendering.
@@ -296,6 +297,7 @@ def product_card_preflight(
         product_card_template_id=product_card_template_id,
         master_contracts=master_contracts,
         product_uid=product_uid,
+        episode_id=episode_id,
     )
 
 

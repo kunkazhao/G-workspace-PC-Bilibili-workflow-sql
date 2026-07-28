@@ -256,6 +256,23 @@ def cmd_sync(args: argparse.Namespace) -> None:
     _json_out(results)
 
 
+def cmd_episode_source_binding(args: argparse.Namespace) -> None:
+    from .episode_source_binding import resolve_episode_source_binding
+
+    _, repo, sync, _ = _init()
+    _json_out(
+        resolve_episode_source_binding(
+            repo,
+            sync,
+            args.project_id,
+            expected_snapshot_id=args.expected_snapshot_id or "",
+            episode_id=args.episode_id or "",
+            require_current=bool(args.require_current),
+            apply=bool(args.apply),
+        )
+    )
+
+
 # ── voice ─────────────────────────────────────────────────────────────
 
 def cmd_voice(args: argparse.Namespace) -> None:
@@ -267,6 +284,8 @@ def cmd_voice(args: argparse.Namespace) -> None:
         account_label=args.account or "",
         voice_provider=args.voice_provider,
         uids=args.uids.split(",") if args.uids else None,
+        script_ids=args.script_ids.split(",") if args.script_ids else None,
+        episode_id=args.episode_id or "",
         start_service_if_needed=False,
         progress_hook=lambda msg: logs.append(msg),
     )
@@ -290,6 +309,8 @@ def cmd_voice_counts(args: argparse.Namespace) -> None:
         args.project_id,
         account_label=args.account or "",
         voice_provider=args.voice_provider,
+        script_ids=args.script_ids.split(",") if args.script_ids else None,
+        episode_id=args.episode_id or "",
     )
     _json_out({
         "ok": True,
@@ -1183,11 +1204,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--step", choices=["master", "markdown", "assets"])
     p.add_argument("--asset-type", choices=["image", "video", "voice"])
 
+    p = sub.add_parser("episode-source-binding", help="预检或签发新一期的冻结 Master 来源绑定")
+    p.add_argument("project_id", type=int)
+    p.add_argument("--expected-snapshot-id", default="", help="预检返回的 master_snapshot_id")
+    p.add_argument("--episode-id", default="", help="新一期唯一 ID；--apply 时签发不可变来源快照")
+    p.add_argument("--require-current", action="store_true", help="强制读取当前 Master，仅用于新一期启动前校验")
+    p.add_argument("--apply", action="store_true", help="显式应用已预检的 Master 快照后签发绑定")
+
     # voice
     p = sub.add_parser("voice", help="批量生成配音")
     p.add_argument("project_id", type=int)
     p.add_argument("--account", help="配音账户标签（如 小博）")
     p.add_argument("--uids", help="指定商品 UID，逗号分隔")
+    p.add_argument("--script-ids", help="指定文案 script_id，逗号分隔；可只生成某个引言或价格过渡配音")
+    p.add_argument("--episode-id", default="", help="按该期冻结的商品集合生成配音")
     p.add_argument(
         "--voice-provider",
         choices=[VOICE_PROVIDER_MINIMAX, VOICE_PROVIDER_INDEXTTS],
@@ -1199,6 +1229,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("voice-counts", help="配音生成数量预览")
     p.add_argument("project_id", type=int)
     p.add_argument("--account", help="配音账户标签")
+    p.add_argument("--script-ids", help="指定文案 script_id，逗号分隔")
+    p.add_argument("--episode-id", default="", help="按该期冻结的商品集合统计配音")
     p.add_argument(
         "--voice-provider",
         choices=[VOICE_PROVIDER_MINIMAX, VOICE_PROVIDER_INDEXTTS],
@@ -1657,11 +1689,14 @@ DISPATCH = {
     "script-doctor": cmd_script_doctor,
     "workflow-doctor": cmd_workflow_doctor,
     "materialize-episode": cmd_materialize_episode,
+    "episode-source-binding": cmd_episode_source_binding,
 }
 
 
 def main() -> None:
     import io
+    from .episode_source_binding import EpisodeSourceBindingError
+    from .sync_service import MasterSyncError
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
@@ -1701,6 +1736,23 @@ def main() -> None:
                         "owner": exc.owner,
                     },
                     "next_action": "等待当前渲染完成后再次发送“继续”",
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except (EpisodeSourceBindingError, MasterSyncError) as exc:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "status": "blocked",
+                    "error": {
+                        "code": exc.code,
+                        "message": str(exc),
+                        "details": exc.details,
+                    },
                 },
                 ensure_ascii=False,
             ),

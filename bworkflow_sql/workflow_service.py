@@ -299,6 +299,7 @@ class WorkflowService:
         account_label: str = "",
         uids: list[str] | None = None,
         script_ids: list[str] | None = None,
+        episode_id: str = "",
         voice_provider: str = VOICE_PROVIDER_INDEXTTS,
     ) -> list[str]:
         cmd = [f"{INTERNAL_PREFIX}voice", "--project-id", str(project_id)]
@@ -376,6 +377,7 @@ class WorkflowService:
         closing_text: str = "",
         dynamic_product_contexts: list[dict[str, Any]] | None = None,
         master_snapshot_id: str | None = None,
+        episode_id: str = "",
     ) -> dict[str, Any]:
         output_mode_value = safe_text(output_mode) or "final_mp4"
         if output_mode_value not in SUPPORTED_OUTPUT_MODES:
@@ -436,6 +438,7 @@ class WorkflowService:
             top_uids=top_uid_list,
             product_uids=product_uid_list,
             subtitle_alignment=subtitle_mode,
+            episode_id=episode_id,
             **build_kwargs,
         )
         output_path = (
@@ -539,6 +542,7 @@ class WorkflowService:
         product_card_template_id: str,
         product_uid: str = "",
         expect_cover: str = "",
+        episode_id: str = "",
     ) -> dict[str, Any]:
         from .product_card_preflight import product_card_preflight
 
@@ -550,6 +554,7 @@ class WorkflowService:
             product_uid=product_uid,
             expect_cover=expect_cover,
             master_contracts=self._resolved_master_contracts(),
+            episode_id=episode_id,
         )
 
     def dynamic_product_card_preflight(
@@ -558,6 +563,7 @@ class WorkflowService:
         *,
         account_label: str,
         product_card_template_id: str,
+        episode_id: str = "",
     ) -> dict[str, Any]:
         # Historical low-level helper only. No public CLI or UI route calls it.
         from .product_image_generation import regenerate_product_card_images
@@ -570,6 +576,7 @@ class WorkflowService:
             account_label=account_label,
             product_card_template_id=product_card_template_id,
             master_contracts=self._resolved_master_contracts(),
+            episode_id=episode_id,
         )
 
     def script_doctor(
@@ -605,7 +612,7 @@ class WorkflowService:
         top_uid_list = split_csv(top_uids) if isinstance(top_uids, str) else list(top_uids or [])
         checks: dict[str, Any] = {
             "phase7_selection": _phase7_selection_context(
-                self.repo.products(project_id, include_removed=False)
+                self._products_for_episode(project_id, episode_id)
             ),
             "script": None,
             "voice_and_assembly": None,
@@ -1020,7 +1027,7 @@ class WorkflowService:
         if not configuration:
             return 0, 0, 0
         identity, _settings = configuration
-        jobs = self._voice_jobs(project_id, uids=uids, script_ids=script_ids)
+        jobs = self._voice_jobs(project_id, uids=uids, script_ids=script_ids, episode_id=episode_id)
         existing, pending = self._split_existing_voice_jobs(project_id, jobs, account, identity=identity)
         return len(jobs), len(existing), len(pending)
 
@@ -1032,6 +1039,7 @@ class WorkflowService:
         voice_provider: str = VOICE_PROVIDER_INDEXTTS,
         uids: list[str] | None = None,
         script_ids: list[str] | None = None,
+        episode_id: str = "",
         output_dir: str | Path | None = None,
         start_service_if_needed: bool = True,
         progress_hook: Callable[[str], None] | None = None,
@@ -1055,7 +1063,7 @@ class WorkflowService:
         identity, synthesis_settings = configuration
         out_dir = Path(output_dir) if safe_text(output_dir) else self._voice_output_dir(project, account=account, account_label=account_label)
         out_dir.mkdir(parents=True, exist_ok=True)
-        jobs = self._voice_jobs(project_id, uids=uids, script_ids=script_ids)
+        jobs = self._voice_jobs(project_id, uids=uids, script_ids=script_ids, episode_id=episode_id)
         if not jobs:
             return WorkflowRunResult([f"{INTERNAL_PREFIX}voice"], stdout="没有需要生成配音的文案。\n")
 
@@ -1367,6 +1375,7 @@ class WorkflowService:
             top_uids=top_uid_list,
             product_uids=product_uid_list,
             product_order_strategy=order_strategy,
+            episode_id=episode_id,
         )
         blocks = self.repo.script_blocks(project_id)
         assets = self.repo.asset_bindings(project_id)
@@ -1563,6 +1572,7 @@ class WorkflowService:
             top_uids=top_uid_list,
             product_uids=product_uid_list,
             product_order_strategy=order_strategy,
+            episode_id=episode_id,
         )
         blocks = self.repo.script_blocks(project_id)
         assets = self.repo.asset_bindings(project_id)
@@ -2230,8 +2240,9 @@ class WorkflowService:
         *,
         uids: list[str] | None = None,
         script_ids: list[str] | None = None,
+        episode_id: str = "",
     ) -> list[VoiceJob]:
-        products = {item["uid"]: item for item in self.repo.products(project_id, include_removed=False)}
+        products = {item["uid"]: item for item in self._products_for_episode(project_id, episode_id)}
         selected = {uid.casefold() for uid in (uids or [])}
         selected_scripts = {script_id.casefold() for script_id in (script_ids or [])}
         jobs: list[VoiceJob] = []
@@ -2844,8 +2855,9 @@ class WorkflowService:
         top_uids: list[str],
         product_uids: list[str],
         product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
+        episode_id: str = "",
     ) -> list[dict[str, Any]]:
-        products = self.repo.products(project_id, include_removed=False)
+        products = self._products_for_episode(project_id, episode_id)
         explicit_rank = {uid.casefold(): index for index, uid in enumerate(product_uids)}
         if explicit_rank:
             products = sorted(
@@ -3110,6 +3122,11 @@ class WorkflowService:
             episode_id=episode_id,
             scope=f"price-transition:{'|'.join(labels)}",
         )
+
+    def _products_for_episode(self, project_id: int, episode_id: str = "") -> list[dict[str, Any]]:
+        """New schema-v3 episodes replay their captured selection; legacy calls remain live."""
+        frozen = self.repo.episode_products(project_id, episode_id)
+        return frozen if frozen is not None else self.repo.products(project_id, include_removed=False)
 
     def _voice_ready_for_block(
         self,
