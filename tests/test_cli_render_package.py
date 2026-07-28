@@ -273,6 +273,8 @@ def test_assemble_plan_parser_registers_ordering_options():
             "P003,P001,P002",
             "--product-order-strategy",
             "stable",
+            "--episode-id",
+            "episode:test-plan",
         ]
     )
 
@@ -284,6 +286,7 @@ def test_assemble_plan_parser_registers_ordering_options():
     assert args.top_uids == "P003,P001"
     assert args.product_uids == "P003,P001,P002"
     assert args.product_order_strategy == "stable"
+    assert args.episode_id == "episode:test-plan"
 
 
 def test_assemble_parser_registers_ordering_options():
@@ -305,6 +308,8 @@ def test_assemble_parser_registers_ordering_options():
             "stable",
             "--output",
             "spoken.md",
+            "--episode-id",
+            "episode:test-assemble",
         ]
     )
 
@@ -317,6 +322,7 @@ def test_assemble_parser_registers_ordering_options():
     assert args.product_uids == "P003,P001,P002"
     assert args.product_order_strategy == "stable"
     assert args.output == "spoken.md"
+    assert args.episode_id == "episode:test-assemble"
 
 
 def test_render_final_video_parser_registers_command():
@@ -479,6 +485,7 @@ def _workflow_doctor_args() -> Namespace:
         mode="top",
         top_uids="P003,P001",
         product_order_strategy="stable",
+        episode_id="episode:test-doctor",
         product_card_template_id="muban-xiaobo-2",
         product_media_mode="cover_only",
     )
@@ -513,6 +520,7 @@ def test_cmd_workflow_doctor_writes_blocked_v1_observation(capsys, monkeypatch):
             mode,
             top_uids,
             product_order_strategy,
+            episode_id,
             product_card_template_id,
             product_media_mode,
         ):
@@ -523,6 +531,7 @@ def test_cmd_workflow_doctor_writes_blocked_v1_observation(capsys, monkeypatch):
                     "scheme_name": scheme_name,
                     "intro_label": intro_label,
                     "intro_index": intro_index,
+                    "episode_id": episode_id,
                     "mode": mode,
                     "top_uids": top_uids,
                     "product_order_strategy": product_order_strategy,
@@ -576,6 +585,7 @@ def test_cmd_workflow_doctor_writes_blocked_v1_observation(capsys, monkeypatch):
             "mode": "top",
             "top_uids": "P003,P001",
             "product_order_strategy": "stable",
+            "episode_id": "episode:test-doctor",
             "product_card_template_id": "muban-xiaobo-2",
             "product_media_mode": "cover_only",
         }
@@ -666,12 +676,14 @@ def test_cmd_assemble_plan_writes_preview_json(capsys, monkeypatch):
             top_uids,
             product_uids,
             product_order_strategy,
+            episode_id,
         ):
             calls.append(
                 {
                     "project_id": project_id,
                     "account_label": account_label,
                     "intro_index": intro_index,
+                    "episode_id": episode_id,
                 }
             )
             return {
@@ -691,13 +703,14 @@ def test_cmd_assemble_plan_writes_preview_json(capsys, monkeypatch):
             top_uids="P003,P001",
             product_uids="P003,P001,P002",
             product_order_strategy="stable",
+            episode_id="episode:test-plan",
         )
     )
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["status"] == "ready_to_assemble"
-    assert calls == [{"project_id": 3, "account_label": "小博", "intro_index": 2}]
+    assert calls == [{"project_id": 3, "account_label": "小博", "intro_index": 2, "episode_id": "episode:test-plan"}]
 
 
 def test_cmd_render_package_writes_success_json_and_package(

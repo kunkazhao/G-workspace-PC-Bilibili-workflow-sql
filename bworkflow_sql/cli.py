@@ -5,7 +5,7 @@
   python -m bworkflow_sql status 3
   python -m bworkflow_sql sync 3
   python -m bworkflow_sql voice 3 --account 小博
-  python -m bworkflow_sql assemble 3 --account 小博 --intro-index 1
+  python -m bworkflow_sql assemble 3 --account 小博 --intro-index 1 --episode-id episode:...
   python -m bworkflow_sql assets-check 3
   python -m bworkflow_sql voice-counts 3 --account 小博
   python -m bworkflow_sql copy-lint 3
@@ -313,6 +313,7 @@ def cmd_assemble(args: argparse.Namespace) -> None:
         product_order_strategy=args.product_order_strategy,
         output_markdown_path=args.output or None,
         display_template=args.display_template or "",
+        episode_id=args.episode_id or "",
     )
     _json_out({
         "ok": result.returncode == 0,
@@ -336,6 +337,7 @@ def cmd_assemble_plan(args: argparse.Namespace) -> None:
         top_uids=args.top_uids,
         product_uids=args.product_uids,
         product_order_strategy=args.product_order_strategy,
+        episode_id=args.episode_id or "",
     )
     _json_out(result)
 
@@ -1060,6 +1062,7 @@ def cmd_workflow_doctor(args: argparse.Namespace) -> None:
             product_order_strategy=args.product_order_strategy,
             product_card_template_id=args.product_card_template_id or "",
             product_media_mode=args.product_media_mode,
+            episode_id=args.episode_id or "",
         )
         payload = build_workflow_observation(result)
     except ProjectNotFoundError:
@@ -1214,6 +1217,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top-uids", default="", help="comma-separated product UIDs pinned to the top")
     p.add_argument("--product-uids", default="", help="comma-separated complete product order; disables reshuffling")
     p.add_argument("--product-order-strategy", choices=["price_segment_shuffle", "stable"], default="price_segment_shuffle")
+    p.add_argument("--episode-id", default="", help="stable episode id used to freeze random copy-version selection")
 
     p = sub.add_parser("assemble-plan", help="Preview spoken-script assembly without writing files")
     p.add_argument("project_id", type=int)
@@ -1223,6 +1227,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top-uids", default="", help="comma-separated product UIDs pinned to the top")
     p.add_argument("--product-uids", default="", help="comma-separated complete product order; disables reshuffling")
     p.add_argument("--product-order-strategy", choices=["price_segment_shuffle", "stable"], default="price_segment_shuffle")
+    p.add_argument("--episode-id", default="", help="stable episode id used to freeze random copy-version selection")
 
     # outline
     p = sub.add_parser("outline", help="创建/更新文案 MD 骨架（价格段自动从 Master scheme 派生）")
@@ -1580,6 +1585,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mode", choices=["standard", "top"], default="standard")
     p.add_argument("--top-uids", default="", help="comma-separated product UIDs pinned to the top")
     p.add_argument("--product-order-strategy", choices=["price_segment_shuffle", "stable"], default="price_segment_shuffle")
+    p.add_argument("--episode-id", default="", help="stable episode id used to freeze random copy-version selection")
     p.add_argument(
         "--product-card-template-id",
         default="",

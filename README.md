@@ -286,7 +286,7 @@ Output rules:
 - `口播稿输出 MD` is selected in the `组合口播稿` workflow. It is the final combined spoken script, and the assembly step overwrites the whole file.
 - Reusable asset Markdown and final spoken-script Markdown remain separate roles. `materialize-episode` may update only reusable asset Markdown. `assemble` and formal final-video production write final spoken scripts through the centralized materializer and never write back into the reusable asset library.
 - `materialize-episode` has no target-path override. Its target comes from the project's canonical asset Markdown binding; `--episode-path` is not supported.
-- `assemble-plan` and `assemble` accept `--product-uids UID1,UID2,...` to reproduce a product order before rendering. They cannot prove exact reconstruction of an already rendered MP4 when a product has multiple script-block versions; use that run's RenderPackage or `materialize-final-script` instead.
+- `assemble-plan` and `assemble` accept `--episode-id episode:...` to make product-copy and price-transition version selection stable for one episode. A new episode rerandomizes. Use the same `--episode-id` in preview and assembly; the run manifest records the selected script ids/hashes for later reconstruction.
 - The spoken script manifest is an internal task file under `data/workspace/project-<id>/manifests/`.
 - Internal generated files are kept under `data/workspace`.
 - Jianying UI and public CLI output are retired. Existing drafts and the

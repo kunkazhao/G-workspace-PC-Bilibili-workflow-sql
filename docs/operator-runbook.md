@@ -487,6 +487,10 @@ RenderPackage 会报告 `price_transition_plan` 缺失并停止。最终 MP4 使
 ASR 字幕对齐结果重算画面项出现时间，CutMe 再校验
 `priceTransitionPlanVersion=1.0.0` 和 2-3 个结构化画面项。
 
+同一价格段可以在 `transitions[]` 中保存多个不同 `block_label` 的版本；每个
+非空 Markdown 版本都必须有对应计划。`assemble-plan` 和 `assemble` 统一传入
+当前 `--episode-id`，商品正文和价格过渡各随机选择一个版本并在本期固定。
+
 新增模板时，先在 CutMe 仓库的 `intro_templates` 中新增模板和 `visual_cues` 契约，再用本仓库 `intro-plan --template <template_id>` 生成计划文件。不要只改提示词而不更新模板契约，否则 CutMe 无法稳定知道哪些段落要插产品展示和引导三连。
 
 回归验证：

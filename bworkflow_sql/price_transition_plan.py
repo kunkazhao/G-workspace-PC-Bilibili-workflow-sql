@@ -41,7 +41,6 @@ def validate_price_transition_plan_set(payload: dict[str, Any]) -> dict[str, Any
 
     normalized: list[dict[str, Any]] = []
     seen_keys: set[tuple[str, str]] = set()
-    seen_ranges: set[str] = set()
     for index, raw in enumerate(transitions, start=1):
         if not isinstance(raw, dict):
             raise ValueError(f"价格过渡计划第 {index} 项必须是对象")
@@ -57,9 +56,6 @@ def validate_price_transition_plan_set(payload: dict[str, Any]) -> dict[str, Any
         if key in seen_keys:
             raise ValueError(f"价格过渡计划存在重复版本：{price_range_label}/{block_label}")
         seen_keys.add(key)
-        if price_range_label in seen_ranges:
-            raise ValueError(f"每个价格段只能有一个自动剪辑版本：{price_range_label}")
-        seen_ranges.add(price_range_label)
 
         items = _validate_items(
             raw.get("items"),

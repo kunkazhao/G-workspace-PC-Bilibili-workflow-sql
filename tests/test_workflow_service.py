@@ -14,7 +14,7 @@ from bworkflow_sql.repositories import Repository
 from bworkflow_sql.settings import INTERNAL_WORKSPACE_ROOT, JIANYING_ENGINE_DIR
 from bworkflow_sql.sync_service import SyncService
 from bworkflow_sql.utils import now_iso, text_hash
-from bworkflow_sql.workflow_errors import AmbiguousProjectReferenceError
+from bworkflow_sql.workflow_errors import AmbiguousProjectReferenceError, InvalidWorkflowRequestError
 import bworkflow_sql.workflow_service as workflow_service_module
 import bworkflow_sql.tts_helpers as tts_helpers_module
 from bworkflow_sql.tts_helpers import voice_synthesis_identity
@@ -1227,14 +1227,13 @@ def test_explicit_product_uids_preserve_exact_assembly_order(tmp_path: Path, mon
     assert [product["uid"] for product in products] == ["YXEJ002", "YXEJ003"]
 
 
-def test_assembly_randomly_selects_one_product_and_price_version(tmp_path: Path, monkeypatch):
+def test_assembly_freezes_random_product_and_price_versions_by_episode(tmp_path: Path):
     db, project_id = seed_project(tmp_path)
     repo = Repository(db)
     service = WorkflowService(db)
     ts = now_iso()
     product_version = "PRODUCT VERSION TWO."
     price_version = "PRICE VERSION TWO."
-    monkeypatch.setattr(workflow_service_module.random, "choice", lambda items: items[-1])
     with db.connect() as conn:
         conn.execute(
             """
@@ -1254,18 +1253,68 @@ def test_assembly_randomly_selects_one_product_and_price_version(tmp_path: Path,
         )
     seed_ready_voice_assets(db, project_id, tmp_path)
 
-    result = service.run_command(service.build_assembly_command(project_id, mode="standard", account_label="小燃"))
+    episode_id = "episode:copy-selection-a"
+    plan = service.assemble_spoken_script_plan(
+        project_id,
+        mode="standard",
+        account_label="小燃",
+        episode_id=episode_id,
+    )
+    result = service.run_command(
+        service.build_assembly_command(
+            project_id,
+            mode="standard",
+            account_label="小燃",
+            episode_id=episode_id,
+        )
+    )
 
     assert result.returncode == 0
     spoken_path = Path(repo.project(project_id)["spoken_md_path"])
     text = spoken_path.read_text(encoding="utf-8")
-    assert price_version in text
-    assert product_version in text
-    assert "这个价格段值得看。" not in text
-    assert "这是商品文案。" not in text
     manifest_path = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "manifests" / f"{spoken_path.stem}.manifest.json"
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert [entry["source_label"] for entry in payload["entries"][:3]] == ["引言1", "价格过渡 0-100", "版本2"]
+    emitted = {
+        entry["section"]: entry["text_hash"]
+        for entry in payload["entries"]
+        if entry["section"] in {"product", "price_transition"}
+    }
+    assert payload["episode_id"] == episode_id
+    planned_hashes = {
+        entry["section"]: entry["text_hash"]
+        for entry in plan["sequence"]
+        if entry["section"] in {"product", "price_transition"}
+    }
+    assert emitted == planned_hashes
+    assert any(body in text for body in (product_version, "这是商品文案。"))
+    assert any(body in text for body in (price_version, "这个价格段值得看。"))
+
+
+def test_episode_copy_selection_can_change_for_a_new_episode():
+    blocks = [
+        {"id": 1, "script_id": "one", "block_label": "正文"},
+        {"id": 2, "script_id": "two", "block_label": "正文二"},
+    ]
+    selected = {
+        workflow_service_module._episode_stable_script_choice(
+            blocks,
+            episode_id=f"episode:{index}",
+            scope="product:P001",
+        )["block_label"]
+        for index in range(32)
+    }
+
+    assert selected == {"正文", "正文二"}
+
+
+def test_multiple_copy_versions_require_episode_id():
+    blocks = [
+        {"id": 1, "script_id": "one", "block_label": "正文"},
+        {"id": 2, "script_id": "two", "block_label": "正文二"},
+    ]
+
+    with pytest.raises(InvalidWorkflowRequestError, match="必须提供 episode_id"):
+        workflow_service_module._episode_stable_script_choice(blocks, episode_id="", scope="product:P001")
 
 
 def test_assembly_matches_imported_voice_by_uid_account_and_hash_without_script_block_id(tmp_path: Path):

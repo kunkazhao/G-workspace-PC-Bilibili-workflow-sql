@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import locale
 import math
@@ -324,6 +325,7 @@ class WorkflowService:
         product_uids: list[str] | None = None,
         output_markdown_path: str | Path | None = None,
         display_template: str = "",
+        episode_id: str = "",
     ) -> list[str]:
         project = self.repo.project(project_id)
         if not project:
@@ -350,6 +352,8 @@ class WorkflowService:
             cmd += ["--top-uids", ",".join(top_uids)]
         if display_template:
             cmd += ["--display-template", display_template]
+        if safe_text(episode_id):
+            cmd += ["--episode-id", safe_text(episode_id)]
         return cmd
 
     def prepare_product_recommendation_output(
@@ -593,6 +597,7 @@ class WorkflowService:
         product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
         product_card_template_id: str = "",
         product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
+        episode_id: str = "",
     ) -> dict[str, Any]:
         project_id = self.resolve_project_ref(project_ref, scheme_name=scheme_name)
         project = self._required_project(project_id)
@@ -632,6 +637,7 @@ class WorkflowService:
             mode=mode,
             top_uids=top_uid_list,
             product_order_strategy=product_order_strategy,
+            episode_id=episode_id,
         )
         checks["voice_and_assembly"] = assembly
         issues.extend(_workflow_doctor_issues("assemble-plan", assembly.get("issues") or []))
@@ -1346,6 +1352,7 @@ class WorkflowService:
         product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
         output_markdown_path: str | Path | None = None,
         display_template: str = "",
+        episode_id: str = "",
     ) -> WorkflowRunResult:
         project = self._required_project(project_id)
         account = self._resolve_account(account_label)
@@ -1422,7 +1429,7 @@ class WorkflowService:
         for product in products:
             is_top_product = product["uid"].casefold() in top_set
             if not is_top_product:
-                price_block = self._matching_price_block(product, price_blocks)
+                price_block = self._matching_price_block(product, price_blocks, episode_id=episode_id)
                 if price_block:
                     price_key = safe_text(price_block.get("price_range_label")) or str(price_block["id"])
                     if price_key not in used_price_labels:
@@ -1456,7 +1463,11 @@ class WorkflowService:
             versions = product_blocks.get(product["uid"], [])
             if not versions:
                 continue
-            block = self._choose_voice_ready_block(versions, assets, uid=product["uid"], account_label=account_label) or versions[0]
+            block = _episode_stable_script_choice(
+                versions,
+                episode_id=episode_id,
+                scope=f"product:{safe_text(product.get('uid'))}",
+            )
             self._raise_if_missing_voice(
                 project_id,
                 account_label=account_label,
@@ -1510,6 +1521,7 @@ class WorkflowService:
             "project_id": project_id,
             "project_name": safe_text(project.get("name")),
             "category": safe_text(project.get("category_name")),
+            "episode_id": safe_text(episode_id),
             "mode": mode,
             "product_order_strategy": order_strategy,
             "account_label": account_label,
@@ -1537,6 +1549,7 @@ class WorkflowService:
         top_uids: str | list[str] | None = None,
         product_uids: str | list[str] | None = None,
         product_order_strategy: str = DEFAULT_PRODUCT_ORDER_STRATEGY,
+        episode_id: str = "",
     ) -> dict[str, Any]:
         project = self._required_project(project_id)
         account = self._resolve_account(account_label)
@@ -1588,7 +1601,7 @@ class WorkflowService:
             uid = safe_text(product.get("uid"))
             is_top_product = uid.casefold() in top_set
             if not is_top_product:
-                price_block = self._matching_price_block(product, price_blocks)
+                price_block = self._matching_price_block(product, price_blocks, episode_id=episode_id)
                 if price_block:
                     price_key = safe_text(price_block.get("price_range_label")) or str(price_block["id"])
                     if price_key not in used_price_labels:
@@ -1622,7 +1635,11 @@ class WorkflowService:
                     }
                 )
                 continue
-            block = self._choose_voice_ready_block(versions, assets, uid=uid, account_label=account_label) or versions[0]
+            block = _episode_stable_script_choice(
+                versions,
+                episode_id=episode_id,
+                scope=f"product:{uid}",
+            )
             sequence.append(_assembly_plan_entry(order, "product", block, product=product))
             if not self._voice_ready_for_block(assets, uid=uid, block=block, account_label=account_label):
                 issues.append(self._missing_voice_issue(project_id, account_label=account_label, block=block, uid=uid, product=product))
@@ -1653,10 +1670,12 @@ class WorkflowService:
             top_uids=top_uid_list,
             product_uids=product_uid_list,
             product_order_strategy=order_strategy,
+            episode_id=episode_id,
         )
         return {
             "ok": status == "ready_to_assemble",
             "status": status,
+            "episode_id": safe_text(episode_id),
             "project": {
                 "id": int(project_id),
                 "name": safe_text(project.get("name")),
@@ -1781,6 +1800,7 @@ class WorkflowService:
                 product_uids=split_csv(args.get("uids", "")),
                 output_markdown_path=args.get("output-markdown", ""),
                 display_template=args.get("display-template", ""),
+                episode_id=args.get("episode-id", ""),
             )
         raise ValueError(f"未知内部任务：{cmd[0]}")
 
@@ -2884,6 +2904,7 @@ class WorkflowService:
         top_uids: list[str],
         product_uids: list[str],
         product_order_strategy: str,
+        episode_id: str,
     ) -> str:
         parts = [
             "python",
@@ -2904,6 +2925,8 @@ class WorkflowService:
             parts.extend(["--top-uids", ",".join(top_uids)])
         if product_uids:
             parts.extend(["--product-uids", ",".join(product_uids)])
+        if safe_text(episode_id):
+            parts.extend(["--episode-id", safe_text(episode_id)])
         return " ".join(parts)
 
     def _voice_scope_fragment(self, project: dict[str, Any], account_label: str) -> str:
@@ -3069,12 +3092,24 @@ class WorkflowService:
         price = first_number(safe_text(product.get("price_label")))
         if price is None:
             return []
-        matched = [block for block in blocks if price_in_range(price, safe_text(block.get("price_range_label")))]
-        return [random.choice(matched)] if matched else []
+        return [block for block in blocks if price_in_range(price, safe_text(block.get("price_range_label")))]
 
-    def _matching_price_block(self, product: dict[str, Any], blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    def _matching_price_block(
+        self,
+        product: dict[str, Any],
+        blocks: list[dict[str, Any]],
+        *,
+        episode_id: str = "",
+    ) -> dict[str, Any] | None:
         matched = self._matching_price_blocks(product, blocks)
-        return matched[0] if matched else None
+        if not matched:
+            return None
+        labels = sorted({safe_text(block.get("price_range_label")) for block in matched})
+        return _episode_stable_script_choice(
+            matched,
+            episode_id=episode_id,
+            scope=f"price-transition:{'|'.join(labels)}",
+        )
 
     def _voice_ready_for_block(
         self,
@@ -3767,6 +3802,31 @@ def decode_process_output(value: bytes | str | None) -> str:
         except (LookupError, UnicodeDecodeError):
             continue
     return value.decode("utf-8", errors="replace")
+
+
+def _episode_stable_script_choice(
+    blocks: list[dict[str, Any]],
+    *,
+    episode_id: str,
+    scope: str,
+) -> dict[str, Any]:
+    if not blocks:
+        raise ValueError("没有可选文案版本。")
+    ordered = sorted(
+        blocks,
+        key=lambda block: (
+            safe_text(block.get("script_id")),
+            safe_text(block.get("block_label")),
+            int(block.get("id") or 0),
+        ),
+    )
+    if len(ordered) == 1:
+        return ordered[0]
+    identity = safe_text(episode_id)
+    if not identity:
+        raise InvalidWorkflowRequestError("存在多个文案版本时必须提供 episode_id，以便本期稳定随机。")
+    digest = hashlib.sha256(f"{identity}\n{scope}".encode("utf-8")).digest()
+    return ordered[int.from_bytes(digest[:8], "big") % len(ordered)]
 
 
 class JsonHttpClient:
