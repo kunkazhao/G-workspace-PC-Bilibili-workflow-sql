@@ -236,6 +236,42 @@ def test_voice_jobs_treat_mixed_uids_and_script_ids_as_union(tmp_path: Path):
     assert {job.block["script_id"] for job in jobs} == {"product:YXEJ002:V001", intro_id, price_id}
 
 
+def test_episode_voice_jobs_follow_the_locked_assembly_selection(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    ts = now_iso()
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO script_blocks
+                (project_id, script_type, owner_uid, price_range_label, block_label, body, text_hash, source, source_anchor, created_at, updated_at)
+            VALUES (?, 'product', 'YXEJ002', '', '版本2', '第二版商品正文。', ?, 'test', '', ?, ?)
+            """,
+            (project_id, text_hash("第二版商品正文。"), ts, ts),
+        )
+        conn.execute(
+            """
+            INSERT INTO script_blocks
+                (project_id, script_type, owner_uid, price_range_label, block_label, body, text_hash, source, source_anchor, created_at, updated_at)
+            VALUES (?, 'price_transition', '', '0-100', '版本2', '第二版价格过渡。', ?, 'test', '', ?, ?)
+            """,
+            (project_id, text_hash("第二版价格过渡。"), ts, ts),
+        )
+
+    episode_id = "episode:voice-selection"
+    plan = service.assemble_spoken_script_plan(project_id, account_label="小燃", episode_id=episode_id)
+    expected_block_ids = {
+        entry["script_block_id"]
+        for entry in plan["sequence"]
+        if entry["section"] != "closing"
+    }
+
+    jobs = service._voice_jobs(project_id, episode_id=episode_id)
+
+    assert {job.block["id"] for job in jobs} == expected_block_ids
+    assert service.voice_generation_counts(project_id, account_label="小燃", episode_id=episode_id) == (3, 0, 3)
+
+
 def test_assemble_plan_previews_sequence_without_writing_spoken_files(tmp_path: Path):
     db, project_id = seed_project(tmp_path)
     repo = Repository(db)
@@ -260,6 +296,21 @@ def test_assemble_plan_previews_sequence_without_writing_spoken_files(tmp_path: 
     ]
     assert plan["next"]["action"] == "assemble"
     assert not spoken_path.exists()
+
+
+def test_assemble_plan_targets_only_missing_voice_script_ids(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+
+    plan = service.assemble_spoken_script_plan(
+        project_id,
+        account_label="小燃",
+        episode_id="episode:targeted-voice",
+    )
+
+    assert plan["status"] == "voice_incomplete"
+    assert "--episode-id episode:targeted-voice" in plan["next"]["command"]
+    assert "--script-ids intro:V001,price:0-100:V001,product:YXEJ002:V001" in plan["next"]["follow_up_command"]
 
 
 def test_assemble_plan_top_uids_string_is_not_split_into_characters(tmp_path: Path):

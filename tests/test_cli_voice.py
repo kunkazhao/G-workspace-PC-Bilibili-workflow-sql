@@ -10,6 +10,7 @@ class FakeWorkflowService:
         self.counted_provider = ""
         self.generated_script_ids = None
         self.counted_script_ids = None
+        self.counted_episode_id = ""
 
     def generate_voice(self, project_id, **kwargs):
         self.generated_provider = kwargs["voice_provider"]
@@ -19,6 +20,7 @@ class FakeWorkflowService:
     def voice_generation_counts(self, project_id, **kwargs):
         self.counted_provider = kwargs["voice_provider"]
         self.counted_script_ids = kwargs.get("script_ids")
+        self.counted_episode_id = kwargs.get("episode_id", "")
         return 3, 1, 2
 
 
@@ -62,3 +64,16 @@ def test_voice_and_counts_cli_can_target_one_script_id(monkeypatch, capsys):
 
     assert workflow.generated_script_ids == ["intro:V003"]
     assert workflow.counted_script_ids == ["intro:V003"]
+
+
+def test_voice_counts_cli_passes_episode_id(monkeypatch, capsys):
+    workflow = FakeWorkflowService()
+    monkeypatch.setattr(cli, "_init", lambda: (None, None, None, workflow))
+
+    cli.cmd_voice_counts(
+        cli.build_parser().parse_args(
+            ["voice-counts", "7", "--episode-id", "episode:locked-copy"]
+        )
+    )
+
+    assert workflow.counted_episode_id == "episode:locked-copy"

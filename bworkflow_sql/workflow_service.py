@@ -312,6 +312,8 @@ class WorkflowService:
             cmd += ["--uids", ",".join(uids)]
         if script_ids:
             cmd += ["--script-ids", ",".join(script_ids)]
+        if safe_text(episode_id):
+            cmd += ["--episode-id", safe_text(episode_id)]
         return cmd
 
     def build_assembly_command(
@@ -1018,6 +1020,7 @@ class WorkflowService:
         voice_provider: str = VOICE_PROVIDER_INDEXTTS,
         uids: list[str] | None = None,
         script_ids: list[str] | None = None,
+        episode_id: str = "",
     ) -> tuple[int, int, int]:
         account = self._resolve_account(account_label)
         if not account:
@@ -1600,7 +1603,16 @@ class WorkflowService:
                 account_label=account_label,
                 block_label=safe_text(intro_block.get("block_label")),
             ):
-                issues.append(self._missing_voice_issue(project_id, account_label=account_label, block=intro_block, uid="INTRO", product={}))
+                issues.append(
+                    self._missing_voice_issue(
+                        project_id,
+                        account_label=account_label,
+                        block=intro_block,
+                        uid="INTRO",
+                        product={},
+                        episode_id=episode_id,
+                    )
+                )
             order += 1
         else:
             issues.append({"level": "warning", "code": "missing_intro_block", "message": "no synced intro block"})
@@ -1631,6 +1643,7 @@ class WorkflowService:
                                     block=price_block,
                                     uid="PRICE_TRANSITION",
                                     product={},
+                                    episode_id=episode_id,
                                 )
                             )
                         order += 1
@@ -1652,7 +1665,16 @@ class WorkflowService:
             )
             sequence.append(_assembly_plan_entry(order, "product", block, product=product))
             if not self._voice_ready_for_block(assets, uid=uid, block=block, account_label=account_label):
-                issues.append(self._missing_voice_issue(project_id, account_label=account_label, block=block, uid=uid, product=product))
+                issues.append(
+                    self._missing_voice_issue(
+                        project_id,
+                        account_label=account_label,
+                        block=block,
+                        uid=uid,
+                        product=product,
+                        episode_id=episode_id,
+                    )
+                )
             order += 1
 
         sequence.append(
@@ -1672,6 +1694,11 @@ class WorkflowService:
             status = "voice_incomplete"
         else:
             status = "ready_to_assemble"
+        missing_voice_script_ids = [
+            safe_text(issue.get("script_id"))
+            for issue in issues
+            if issue.get("code") == "missing_voice_asset" and safe_text(issue.get("script_id"))
+        ]
         assemble_command = self._assemble_cli_command(
             project_id,
             account_label=account_label,
@@ -1681,6 +1708,12 @@ class WorkflowService:
             product_uids=product_uid_list,
             product_order_strategy=order_strategy,
             episode_id=episode_id,
+        )
+        voice_episode_arg = f" --episode-id {episode_id}" if safe_text(episode_id) else ""
+        voice_script_arg = (
+            f" --script-ids {','.join(missing_voice_script_ids)}"
+            if missing_voice_script_ids
+            else ""
         )
         return {
             "ok": status == "ready_to_assemble",
@@ -1704,11 +1737,11 @@ class WorkflowService:
             "next": {
                 "action": "assemble" if status == "ready_to_assemble" else ("generate_voice" if status == "voice_incomplete" else "sync_or_fill_content"),
                 "command": assemble_command if status == "ready_to_assemble" else (
-                    f"python -m bworkflow_sql voice-counts {project_id} --account {account_label}"
+                    f"python -m bworkflow_sql voice-counts {project_id} --account {account_label}{voice_episode_arg}{voice_script_arg}"
                     if status == "voice_incomplete"
                     else f"python -m bworkflow_sql script-doctor {project_id}"
                 ),
-                "follow_up_command": f"python -m bworkflow_sql voice {project_id} --account {account_label}" if status == "voice_incomplete" else "",
+                "follow_up_command": f"python -m bworkflow_sql voice {project_id} --account {account_label}{voice_episode_arg}{voice_script_arg}" if status == "voice_incomplete" else "",
             },
         }
 
@@ -1797,6 +1830,7 @@ class WorkflowService:
                 voice_provider=args.get("voice-provider", VOICE_PROVIDER_INDEXTTS),
                 uids=split_csv(args.get("uids", "")) or None,
                 script_ids=split_csv(args.get("script-ids", "")) or None,
+                episode_id=args.get("episode-id", ""),
                 output_dir=args.get("output-dir", ""),
             )
         if cmd[0] == f"{INTERNAL_PREFIX}assembly":
@@ -2245,9 +2279,19 @@ class WorkflowService:
         products = {item["uid"]: item for item in self._products_for_episode(project_id, episode_id)}
         selected = {uid.casefold() for uid in (uids or [])}
         selected_scripts = {script_id.casefold() for script_id in (script_ids or [])}
+        selected_block_ids: set[int] | None = None
+        if episode_id and not selected and not selected_scripts:
+            plan = self.assemble_spoken_script_plan(project_id, episode_id=episode_id)
+            selected_block_ids = {
+                int(entry["script_block_id"])
+                for entry in plan["sequence"]
+                if int(entry.get("script_block_id") or 0) > 0
+            }
         jobs: list[VoiceJob] = []
         product_index = 0
         for block in self.repo.script_blocks(project_id):
+            if selected_block_ids is not None and int(block["id"]) not in selected_block_ids:
+                continue
             block_script_id = safe_text(block.get("script_id")).casefold()
             if block["script_type"] == "product":
                 uid = block["owner_uid"]
@@ -3193,7 +3237,11 @@ class WorkflowService:
         block: dict[str, Any],
         uid: str,
         product: dict[str, Any],
+        episode_id: str = "",
     ) -> dict[str, Any]:
+        voice_episode_arg = f" --episode-id {episode_id}" if safe_text(episode_id) else ""
+        script_id = safe_text(block.get("script_id"))
+        voice_script_arg = f" --script-ids {script_id}" if script_id else ""
         return {
             "level": "error",
             "code": "missing_voice_asset",
@@ -3208,8 +3256,8 @@ class WorkflowService:
             "price_range_label": safe_text(block.get("price_range_label")),
             "account_label": account_label,
             "text_hash": safe_text(block.get("text_hash")),
-            "command": f"python -m bworkflow_sql voice-counts {project_id} --account {account_label}",
-            "follow_up_command": f"python -m bworkflow_sql voice {project_id} --account {account_label}",
+            "command": f"python -m bworkflow_sql voice-counts {project_id} --account {account_label}{voice_episode_arg}{voice_script_arg}",
+            "follow_up_command": f"python -m bworkflow_sql voice {project_id} --account {account_label}{voice_episode_arg}{voice_script_arg}",
         }
 
     def _raise_if_missing_voice(
