@@ -194,7 +194,7 @@ def test_frozen_rerender_creates_candidate_without_demoting_published_pipeline(
 
     class FakeAdapter:
         def render_final(self, package_path, *, output_path, cache_dir=None):
-            assert cache_dir == tmp_path / "workspace" / "project-1" / "render" / "final-video-cache"
+            assert cache_dir == tmp_path / "workspace" / "render-cache" / "clip-cache-v1"
             output = Path(output_path)
             output.write_bytes(b"rerendered")
             return {"artifacts": {"output_path": str(output)}}

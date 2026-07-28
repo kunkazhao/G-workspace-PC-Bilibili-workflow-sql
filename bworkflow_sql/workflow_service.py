@@ -30,7 +30,7 @@ from .cutme_intro import (
     run_cutme_render,
 )
 from .db import Database
-from .master_contracts import MasterContractAdapter
+from .master_contracts import MasterContractAdapter, MasterContractError
 from .repositories import Repository
 from .resource_lifecycle import (
     DERIVED_ASSET_RETENTION_DAYS,
@@ -240,6 +240,70 @@ class WorkflowService:
         if self.master_contracts is None:
             self.master_contracts = MasterContractAdapter()
         return self.master_contracts
+
+    def phase7_live_selection_context(self, project_id: int, *, episode_id: str = "") -> dict[str, Any]:
+        """Read the current Master featured set before Phase 7 is confirmed.
+
+        The episode snapshot still owns the product/copy replay. This separate,
+        read-only context owns only the mutable featured-to-pinning suggestion.
+        """
+        project = self._required_project(project_id)
+        workspace_id = safe_text(project.get("workspace_id"))
+        scheme_id = safe_text(project.get("scheme_id"))
+        if not workspace_id or not scheme_id:
+            return {
+                "status": "blocked",
+                "source": "master_live",
+                "error_code": "phase7_master_identity_missing",
+                "featured_count": 0,
+                "featured_products": [],
+            }
+        try:
+            snapshot = self._resolved_master_contracts().fetch_scheme_snapshot(
+                workspace_id,
+                scheme_id,
+                force_refresh=True,
+            )
+        except MasterContractError as exc:
+            return {
+                "status": "blocked",
+                "source": "master_live",
+                "error_code": exc.code,
+                "featured_count": 0,
+                "featured_products": [],
+            }
+
+        episode_products = self._products_for_episode(project_id, episode_id)
+        episode_uids = {safe_text(item.get("uid")) for item in episode_products if safe_text(item.get("uid"))}
+        live_uids = {item.uid for item in snapshot.products if item.uid}
+        if episode_uids != live_uids:
+            return {
+                "status": "blocked",
+                "source": "master_live",
+                "error_code": "phase7_master_product_set_drift",
+                "master_snapshot_id": snapshot.snapshot_id,
+                "generated_at_utc": snapshot.generated_at_utc,
+                "featured_count": 0,
+                "featured_products": [],
+                "episode_only_uids": sorted(episode_uids - live_uids),
+                "master_only_uids": sorted(live_uids - episode_uids),
+            }
+        featured_products = [
+            {"uid": item.uid, "title": item.title}
+            for item in snapshot.products
+            if item.featured
+        ]
+        return {
+            "status": "ready",
+            "source": "master_live",
+            "master_snapshot_id": snapshot.snapshot_id,
+            "generated_at_utc": snapshot.generated_at_utc,
+            "workspace_id": workspace_id,
+            "scheme_id": scheme_id,
+            "product_uids": sorted(live_uids),
+            "featured_count": len(featured_products),
+            "featured_products": featured_products,
+        }
 
     def export_project_markdown(self, project_id: int, target_path: str | Path | None = None) -> Path:
         project = self.repo.project(project_id)
@@ -527,6 +591,7 @@ class WorkflowService:
         account_label: str,
         product_card_template_id: str = "",
         product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
+        products: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         return diagnose_template_flow(
             self.db,
@@ -534,6 +599,7 @@ class WorkflowService:
             account_label=account_label,
             product_card_template_id=product_card_template_id,
             product_media_mode=product_media_mode,
+            products=products,
         )
 
     def product_card_preflight(
@@ -613,8 +679,9 @@ class WorkflowService:
         account = safe_text(account_label)
         top_uid_list = split_csv(top_uids) if isinstance(top_uids, str) else list(top_uids or [])
         checks: dict[str, Any] = {
-            "phase7_selection": _phase7_selection_context(
-                self._products_for_episode(project_id, episode_id)
+            "phase7_selection": self.phase7_live_selection_context(
+                project_id,
+                episode_id=episode_id,
             ),
             "script": None,
             "voice_and_assembly": None,
@@ -691,6 +758,7 @@ class WorkflowService:
                 account_label=account,
                 product_card_template_id=product_card_template_id,
                 product_media_mode=product_media_mode,
+                products=self._products_for_episode(project_id, episode_id),
             )
             checks["template"] = template
             issues.extend(_workflow_doctor_issues("template-doctor", template.get("issues") or []))
@@ -1715,6 +1783,14 @@ class WorkflowService:
             if missing_voice_script_ids
             else ""
         )
+        execution_contract = _assembly_execution_contract(
+            episode_id=episode_id,
+            project_id=project_id,
+            account_label=account_label,
+            sequence=sequence,
+            content_complete=not content_incomplete,
+            voice_complete=not voice_incomplete,
+        )
         return {
             "ok": status == "ready_to_assemble",
             "status": status,
@@ -1733,6 +1809,7 @@ class WorkflowService:
                 "sequence_entries": len(sequence),
             },
             "sequence": sequence,
+            "execution_contract": execution_contract,
             "issues": issues,
             "next": {
                 "action": "assemble" if status == "ready_to_assemble" else ("generate_voice" if status == "voice_incomplete" else "sync_or_fill_content"),
@@ -3332,6 +3409,45 @@ def _assembly_plan_entry(
     }
 
 
+def _assembly_execution_contract(
+    *,
+    episode_id: str,
+    project_id: int,
+    account_label: str,
+    sequence: list[dict[str, Any]],
+    content_complete: bool,
+    voice_complete: bool,
+) -> dict[str, Any]:
+    """Canonical, hashable selection snapshot used before any paid voice/render action."""
+    identity_ready = bool(safe_text(episode_id))
+    canonical = {
+        "schema_version": 1,
+        "episode_id": safe_text(episode_id),
+        "project_id": int(project_id),
+        "account_label": safe_text(account_label),
+        "sequence": [
+            {
+                key: entry.get(key)
+                for key in (
+                    "order", "section", "script_type", "script_block_id", "script_id",
+                    "owner_uid", "product_uid", "price_range_label", "block_label", "text_hash",
+                )
+            }
+            for entry in sequence
+        ],
+        "gates": {
+            "episode_identity": "passed" if identity_ready else "blocked",
+            "content_selection": "passed" if content_complete else "blocked",
+            "voice_text_hash": "passed" if voice_complete else "blocked",
+            "execution_ready": "passed" if identity_ready and content_complete and voice_complete else "blocked",
+        },
+    }
+    digest = hashlib.sha256(
+        json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {**canonical, "contract_sha256": f"sha256:{digest}"}
+
+
 def render_package_next_step(
     *,
     project_id: int,
@@ -3423,25 +3539,6 @@ def _workflow_doctor_issues(source: str, issues: list[dict[str, Any]]) -> list[d
         item["source"] = source
         result.append(item)
     return result
-
-
-def _phase7_selection_context(products: list[dict[str, Any]]) -> dict[str, Any]:
-    featured_products: list[dict[str, str]] = []
-    for product in products:
-        try:
-            product_card = json.loads(safe_text(product.get("product_card_json")) or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            product_card = {}
-        if not isinstance(product_card, dict) or product_card.get("featured") is not True:
-            continue
-        uid = safe_text(product.get("uid"))
-        title = safe_text(product.get("title"))
-        if uid and title:
-            featured_products.append({"uid": uid, "title": title})
-    return {
-        "featured_count": len(featured_products),
-        "featured_products": featured_products,
-    }
 
 
 def _workflow_doctor_payload(

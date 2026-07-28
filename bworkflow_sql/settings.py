@@ -48,6 +48,11 @@ DEFAULT_INTRO_ASSET_ROOT = Path(r"G:\2026项目-b站\素材-自动剪辑")
 DEFAULT_RECOMMENDATION_BACKGROUND_ROOT = Path(
     os.environ.get("BWORKFLOW_RECOMMENDATION_BACKGROUND_ROOT", r"G:\2026项目-b站\素材-剪辑\1-背景图")
 )
+# Formal RenderPackages use one approved global visual profile.  It is deliberately
+# not task/account configurable: a stable background maximizes reusable clip-cache
+# hits and makes the visual recipe auditable.
+GLOBAL_VISUAL_PROFILE_ID = "bilibili-global-visual-v1"
+GLOBAL_RECOMMENDATION_BACKGROUND = Path(r"G:\2026项目-b站\素材-剪辑\1-背景图\背景1 (6).png")
 DEFAULT_VOICE_ROOT = Path(r"G:\2026项目-b站\素材-配音")
 DEFAULT_STANDALONE_VOICE_ROOT = Path(r"G:\2026项目-b站")
 DEFAULT_PUBLISHED_VIDEO_ROOT = Path(r"G:\2026项目-b站\已发布视频")

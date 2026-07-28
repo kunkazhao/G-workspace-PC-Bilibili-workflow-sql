@@ -16,7 +16,7 @@ pytestmark = pytest.mark.usefixtures("isolated_final_video_workspace")
 REAL_PROJECT_ROOT = INTERNAL_WORKSPACE_ROOT.resolve() / "project-23"
 REAL_GUARDED_ROOTS = (
     REAL_PROJECT_ROOT / "runs",
-    REAL_PROJECT_ROOT / "render" / "final-video-cache",
+    INTERNAL_WORKSPACE_ROOT.resolve() / "render-cache" / "clip-cache-v1",
 )
 
 

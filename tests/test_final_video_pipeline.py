@@ -33,9 +33,41 @@ def ready_dynamic_preflight(monkeypatch: pytest.MonkeyPatch):
             "status": "ready",
             "issues": [],
             "contexts": [],
+            "media_readiness": {"selected_paths": {}},
             "snapshot_id": "test-snapshot",
         },
     )
+
+
+def test_final_render_blocks_if_verified_video_changes_before_package_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    video = tmp_path / "P001.mp4"
+    video.write_bytes(b"not-a-real-video")
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_dynamic_product_preflight",
+        lambda workflow, **kwargs: {
+            "ok": True,
+            "contexts": [],
+            "media_readiness": {"selected_paths": {"P001": str(video)}},
+        },
+    )
+
+    result = run_final_video_pipeline(
+        object(),
+        project_id=1,
+        account_label="xiaobo",
+        acceptance_mode="none",
+        probe_video=lambda _path: {"ok": False, "reason": "decode_failed"},
+    )
+
+    assert result["ok"] is False
+    assert result["stage"] == "media_readiness_snapshot"
+    assert result["media_snapshot"]["issues"][0]["uid"] == "P001"
 
 
 @pytest.fixture(autouse=True)
@@ -92,7 +124,7 @@ def test_dynamic_preflight_failure_has_no_render_or_cache_side_effects(
     workspace = tmp_path / "workspace"
     monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", workspace)
     render_root = workspace / "project-23" / "render"
-    cache_manifest = render_root / "final-video-cache" / "clip-cache-manifest.json"
+    cache_manifest = tmp_path / "workspace" / "render-cache" / "clip-cache-v1" / "clip-cache-manifest.json"
     cache_manifest.parent.mkdir(parents=True)
     sentinel = b"sentinel-cache-bytes"
     cache_manifest.write_bytes(sentinel)
@@ -191,9 +223,10 @@ def test_dynamic_preflight_success_enters_existing_package_flow(
             calls["preflight"] += 1
             return {
                 "ok": True,
-                "issues": [],
-                "contexts": frozen_contexts,
-                "snapshot_id": "snapshot-1",
+                    "issues": [],
+                    "contexts": frozen_contexts,
+                    "media_readiness": {"selected_paths": {}},
+                    "snapshot_id": "snapshot-1",
             }
 
         def prepare_product_recommendation_output(self, *args, **kwargs):
@@ -372,7 +405,7 @@ def test_run_final_video_pipeline_uses_one_adapter_call_and_preserves_cutme_resu
         probe_video=lambda path: {"duration": 1.0},
     )
 
-    expected_cache_dir = tmp_path / "workspace" / "project-23" / "render" / "final-video-cache"
+    expected_cache_dir = tmp_path / "workspace" / "render-cache" / "clip-cache-v1"
     assert adapter.calls == [(package_path.resolve(), output_mp4.resolve(), expected_cache_dir)]
     assert result["job_package_path"] == str(job_package_path)
     assert result["output_mp4"] == str(output_mp4)
@@ -1269,7 +1302,7 @@ def test_run_final_video_pipeline_passes_project_level_cache_dir_to_cutme(
     monkeypatch.setattr(pipeline_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
     package_path = tmp_path / "render-package.json"
     output_mp4 = tmp_path / "exports" / "final.mp4"
-    cache_dir = tmp_path / "workspace" / "project-23" / "render" / "final-video-cache"
+    cache_dir = tmp_path / "workspace" / "render-cache" / "clip-cache-v1"
     clip_cache_manifest = cache_dir / "clip-cache-manifest.json"
     package_path.write_text(
         json.dumps(

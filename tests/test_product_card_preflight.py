@@ -26,6 +26,7 @@ from bworkflow_sql.master_contracts import (
     MasterWorkspace,
 )
 from bworkflow_sql.product_card_preflight import dynamic_product_card_preflight
+from bworkflow_sql.media_readiness import snapshot_verified_product_videos
 from bworkflow_sql.repositories import Repository
 from bworkflow_sql.utils import now_iso, text_hash
 from bworkflow_sql.workflow_service import WorkflowService
@@ -184,6 +185,7 @@ def _seed_project(
             "workspace_id": "workspace-1",
             "scheme_id": "scheme-1",
             "category_name": category_name,
+            "video_root": str(tmp_path / "video"),
         }
     )
     ts = now_iso()
@@ -248,7 +250,30 @@ def _run(
         account_label="xiaobo",
         product_card_template_id="muban-test-1",
         master_contracts=FakeMasterAdapter(snapshot),
+        probe_video=lambda _path: {"ok": True, "duration": 1.0, "has_video": True},
     )
+
+
+def test_media_snapshot_rechecks_selected_file_and_records_fingerprint(tmp_path: Path):
+    video = tmp_path / "P001.mp4"
+    video.write_bytes(b"verified-video")
+    snapshot = snapshot_verified_product_videos(
+        {"selected_paths": {"P001": str(video)}},
+        probe_video=lambda _path: {"ok": True, "duration": 1.0, "has_video": True},
+    )
+
+    assert snapshot["ok"] is True
+    assert snapshot["items"][0]["uid"] == "P001"
+    assert len(snapshot["items"][0]["sha256"]) == 64
+
+    video.unlink()
+    missing = snapshot_verified_product_videos(
+        {"selected_paths": {"P001": str(video)}},
+        probe_video=lambda _path: {"ok": True},
+    )
+
+    assert missing["ok"] is False
+    assert missing["issues"][0]["code"] == "product_video_changed_or_unavailable"
 
 
 def test_decimal_price_formatting_is_strict_and_rounds_half_up():
@@ -386,7 +411,7 @@ def test_cross_account_and_unknown_templates_are_blocked(
     assert result["error_code"] == "invalid_product_card_template"
 
 
-def test_video_is_preferred_and_remote_cover_is_the_fallback(
+def test_video_uses_verified_disk_file_even_when_binding_is_stale(
     tmp_path: Path,
     product_card_metadata: Path,
 ):
@@ -397,6 +422,13 @@ def test_video_is_preferred_and_remote_cover_is_the_fallback(
 
     with db.connect() as conn:
         conn.execute("UPDATE asset_bindings SET status='missing' WHERE asset_type='video'")
+    result = _run(db, project_id, _snapshot((_snapshot_product("P001"),)))
+    assert result["contexts"][0]["media_kind"] == "video"
+    audit_item = result["media_readiness"]["items"][0]
+    assert audit_item["status"] == "verified"
+    assert audit_item["candidates"][0]["binding_statuses"] == ["missing"]
+
+    (tmp_path / "video" / "P001.mp4").unlink()
     result = _run(db, project_id, _snapshot((_snapshot_product("P001"),)))
     assert result["contexts"][0]["media_kind"] == "cover"
     assert result["contexts"][0]["media_asset"] == "https://example.test/cover.jpg"

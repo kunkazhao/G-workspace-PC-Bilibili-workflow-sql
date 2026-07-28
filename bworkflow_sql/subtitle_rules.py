@@ -5,7 +5,7 @@ import re
 
 SUBTITLE_BREAK_RE = re.compile(r"[，,。!！?？；;：:]|……|…")
 SUBTITLE_DROP_PUNCT_RE = re.compile(r"[，,。!！?？；;：:]|……|…")
-SUBTITLE_ALIGN_DROP_RE = re.compile(r'[\s，,。.!！?？；;：:、/\\\-—_~+·`"“”\'‘’（）()【】\[\]{}《》<>]+|……|…')
+SUBTITLE_ALIGN_DROP_RE = re.compile(r'[\s，,。.!！?？；;：:、/\\\-—_~+·`"“”\'‘’（）()【】\[\]{}《》<>%％]+|……|…')
 
 _SUBTITLE_BREAK_CONJUNCTIONS = (
     "但是", "不过", "所以", "因为", "因此", "而且", "并且", "于是",

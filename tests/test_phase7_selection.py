@@ -19,6 +19,18 @@ def _pipeline(tmp_path: Path) -> Path:
     return path
 
 
+def _live_source() -> dict:
+    return {
+        "status": "ready",
+        "master_snapshot_id": "sha256:" + "a" * 64,
+        "generated_at_utc": "2026-07-29T00:00:00Z",
+        "workspace_id": "workspace-1",
+        "scheme_id": "scheme-1",
+        "product_uids": ["FSY032", "FSY033"],
+        "featured_products": [{"uid": "FSY032", "title": "Featured item"}],
+    }
+
+
 def test_confirm_phase7_selection_writes_explicit_hash_bound_state(tmp_path: Path) -> None:
     pipeline = _pipeline(tmp_path)
 
@@ -38,9 +50,65 @@ def test_confirm_phase7_selection_writes_explicit_hash_bound_state(tmp_path: Pat
     assert result["selection_hash"].startswith("sha256:")
     assert confirmation["source"] == "explicit_user_confirmation"
     assert confirmation["selection_hash"] == result["selection_hash"]
-    assert confirmation["selection"]["product_media_mode"] == "video_preferred"
 
 
+def test_schema_v3_phase7_confirmation_binds_current_master_source(tmp_path: Path) -> None:
+    pipeline = _pipeline(tmp_path)
+    payload = json.loads(pipeline.read_text(encoding="utf-8"))
+    payload["schema_version"] = 3
+    pipeline.write_text(json.dumps(payload), encoding="utf-8")
+
+    confirmed = confirm_phase7_selection(
+        pipeline,
+        output_branch="final_mp4",
+        account="xiaobo",
+        product_card_template_id="muban-xiaobo-1",
+        product_media_mode="video_preferred",
+        product_order_strategy="price_segment_shuffle",
+        mode="top",
+        top_uids="FSY032",
+        source_snapshot=_live_source(),
+    )
+    validated = validated_phase7_selection(
+        pipeline,
+        required_output="final_mp4",
+        account="xiaobo",
+        product_card_template_id="muban-xiaobo-1",
+        product_media_mode="video_preferred",
+        product_order_strategy="price_segment_shuffle",
+        mode="top",
+        top_uids="FSY032",
+    )
+
+    assert confirmed["confirmation"]["source_snapshot"]["master_snapshot_id"] == "sha256:" + "a" * 64
+    assert validated["source_snapshot"]["featured_products"] == [{"uid": "FSY032", "title": "Featured item"}]
+
+
+def test_schema_v3_phase7_confirmation_without_live_source_cannot_render(tmp_path: Path) -> None:
+    pipeline = _pipeline(tmp_path)
+    payload = json.loads(pipeline.read_text(encoding="utf-8"))
+    payload["schema_version"] = 3
+    pipeline.write_text(json.dumps(payload), encoding="utf-8")
+    confirm_phase7_selection(
+        pipeline,
+        output_branch="final_mp4",
+        account="xiaobo",
+        product_card_template_id="muban-xiaobo-1",
+        product_media_mode="video_preferred",
+        product_order_strategy="price_segment_shuffle",
+        mode="standard",
+    )
+
+    with pytest.raises(Phase7SelectionError, match="Master live-source"):
+        validated_phase7_selection(
+            pipeline,
+            required_output="final_mp4",
+            account="xiaobo",
+            product_card_template_id="muban-xiaobo-1",
+            product_media_mode="video_preferred",
+            product_order_strategy="price_segment_shuffle",
+            mode="standard",
+        )
 def test_formal_render_rejects_missing_phase7_confirmation(tmp_path: Path) -> None:
     pipeline = _pipeline(tmp_path)
 

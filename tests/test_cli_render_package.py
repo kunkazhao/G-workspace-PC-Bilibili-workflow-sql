@@ -55,6 +55,45 @@ def test_render_package_parser_registers_command():
     assert args.output == "out.json"
 
 
+def test_confirm_phase7_selection_uses_verified_live_master_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    pipeline = tmp_path / ".pipeline.json"
+    pipeline.write_text(
+        json.dumps({"schema_version": 3, "episode_id": "episode:test", "bworkflow_project_id": 3, "phases": {}}),
+        encoding="utf-8",
+    )
+    captured: list[dict] = []
+
+    class FakeWorkflow:
+        def phase7_live_selection_context(self, project_id: int, *, episode_id: str):
+            assert (project_id, episode_id) == (3, "episode:test")
+            return {
+                "status": "ready",
+                "master_snapshot_id": "sha256:" + "a" * 64,
+                "generated_at_utc": "2026-07-29T00:00:00Z",
+                "workspace_id": "workspace-1",
+                "scheme_id": "scheme-1",
+                "product_uids": ["P001"],
+                "featured_products": [{"uid": "P001", "title": "Featured"}],
+            }
+
+    monkeypatch.setattr(cli, "_init", lambda: ("db", None, None, FakeWorkflow()))
+    monkeypatch.setattr(cli, "_json_out", captured.append)
+    cli.cmd_confirm_phase7_selection(
+        Namespace(
+            pipeline=str(pipeline),
+            output_branch="final_mp4",
+            account="xiaobo",
+            product_card_template_id="muban-xiaobo-1",
+            product_media_mode="video_preferred",
+            product_order_strategy="price_segment_shuffle",
+            mode="top",
+            top_uids="P001",
+        )
+    )
+
+    assert captured[0]["confirmation"]["source_snapshot"]["master_snapshot_id"] == "sha256:" + "a" * 64
+
+
 def test_product_card_preflight_parser_registers_command():
     args = cli.build_parser().parse_args(
         [
@@ -66,6 +105,8 @@ def test_product_card_preflight_parser_registers_command():
             "muban-xiaobo-1",
             "--product-uid",
             "P001",
+            "--episode-id",
+            "episode:test-1",
             "--expect-cover",
             "P001-new.png",
         ]
@@ -76,7 +117,16 @@ def test_product_card_preflight_parser_registers_command():
     assert args.account == "xiaobo"
     assert args.product_card_template_id == "muban-xiaobo-1"
     assert args.product_uid == "P001"
+    assert args.episode_id == "episode:test-1"
     assert args.expect_cover == "P001-new.png"
+
+
+def test_assets_check_parser_accepts_single_asset_type():
+    args = cli.build_parser().parse_args(["assets-check", "3", "--asset-type", "video"])
+
+    assert args.command == "assets-check"
+    assert args.project_id == 3
+    assert args.asset_type == "video"
 
 
 def test_intro_preflight_parser_registers_command():
@@ -254,6 +304,18 @@ def test_assemble_plan_parser_registers_command():
     assert args.project_id == 3
     assert args.account == "小博"
     assert args.intro_index == 2
+
+
+def test_pipeline_voice_and_assembly_commands_register_contract_gates():
+    parser = cli.build_parser()
+    voice = parser.parse_args(["voice", "3", "--pipeline", "episode.pipeline.json", "--confirm-paid-voice"])
+    counts = parser.parse_args(["voice-counts", "3", "--pipeline", "episode.pipeline.json"])
+    assemble = parser.parse_args(["assemble", "3", "--pipeline", "episode.pipeline.json"])
+
+    assert voice.pipeline == "episode.pipeline.json"
+    assert voice.confirm_paid_voice is True
+    assert counts.pipeline == "episode.pipeline.json"
+    assert assemble.pipeline == "episode.pipeline.json"
 
 
 def test_assemble_plan_parser_registers_ordering_options():
@@ -916,6 +978,7 @@ def test_cmd_product_card_preflight_writes_gate_json(capsys, monkeypatch):
             product_card_template_id,
             product_uid,
             expect_cover,
+            episode_id,
         ):
             calls.append(
                 {
@@ -924,6 +987,7 @@ def test_cmd_product_card_preflight_writes_gate_json(capsys, monkeypatch):
                     "product_card_template_id": product_card_template_id,
                     "product_uid": product_uid,
                     "expect_cover": expect_cover,
+                    "episode_id": episode_id,
                 }
             )
             return {
@@ -942,6 +1006,7 @@ def test_cmd_product_card_preflight_writes_gate_json(capsys, monkeypatch):
             product_card_template_id="muban-xiaobo-1",
             product_uid="P001",
             expect_cover="P001-new.png",
+            episode_id="episode:test-1",
         )
     )
 
@@ -956,6 +1021,7 @@ def test_cmd_product_card_preflight_writes_gate_json(capsys, monkeypatch):
             "product_card_template_id": "muban-xiaobo-1",
             "product_uid": "P001",
             "expect_cover": "P001-new.png",
+            "episode_id": "episode:test-1",
         }
     ]
 

@@ -21,6 +21,7 @@ from .production_recipe import build_production_recipe, write_production_recipe
 from .artifact_approvals import resolve_approved_intro_video
 from .final_spoken_script import materialize_final_spoken_script
 from .render_gate import acquire_production_render_slot, build_render_owner
+from .media_readiness import snapshot_verified_product_videos
 
 Runner = Callable[..., Any]
 ProbeVideo = Callable[[Path], dict[str, Any]]
@@ -159,6 +160,16 @@ def run_final_video_pipeline(
             or "dynamic_product_preflight_failed",
             "preflight": dynamic_preflight,
         }
+    media_readiness = dynamic_preflight.get("media_readiness")
+    media_snapshot = snapshot_verified_product_videos(media_readiness, probe_video=probe_video)
+    if media_snapshot.get("ok") is not True:
+        return {
+            "ok": False,
+            "stage": "media_readiness_snapshot",
+            "error_code": "product_video_changed_or_unavailable",
+            "preflight": dynamic_preflight,
+            "media_snapshot": media_snapshot,
+        }
     phase7_selection = None
     if pipeline_path:
         phase7_selection = validated_phase7_selection(
@@ -175,7 +186,7 @@ def run_final_video_pipeline(
 
     render_root = INTERNAL_WORKSPACE_ROOT / f"project-{project_id}" / "render"
     render_root.mkdir(parents=True, exist_ok=True)
-    clip_cache_dir = render_root / "final-video-cache"
+    clip_cache_dir = INTERNAL_WORKSPACE_ROOT / "render-cache" / "clip-cache-v1"
     clip_cache_manifest_path = clip_cache_dir / "clip-cache-manifest.json"
     render_work_root = render_root / "episodes" / episode_key if episode_key else render_root
     render_work_root.mkdir(parents=True, exist_ok=True)
@@ -379,6 +390,8 @@ def run_final_video_pipeline(
         "product_order_strategy": product_order_strategy,
         "subtitle_alignment": subtitle_mode,
         "product_card_template_id": safe_text(product_card_template_id) or None,
+        "media_readiness": media_readiness,
+        "media_snapshot": media_snapshot,
         "package_path": str(package_path),
         "job_package_path": str(job_package_path),
         "production_recipe_path": str(recipe_path),
@@ -394,6 +407,7 @@ def run_final_video_pipeline(
         "acceptance_mode": acceptance,
         "phase7_selection_hash": (phase7_selection or {}).get("selection_hash"),
         "phase7_selection_source": (phase7_selection or {}).get("source"),
+        "phase7_source_snapshot": (phase7_selection or {}).get("source_snapshot"),
         "render_package": package_result,
         "cutme": {
             "result": cutme_result,
@@ -995,6 +1009,7 @@ def _final_video_run_manifest_payload(
             "acceptance_mode": result.get("acceptance_mode"),
             "phase7_selection_hash": result.get("phase7_selection_hash"),
             "phase7_selection_source": result.get("phase7_selection_source"),
+            "phase7_source_snapshot": result.get("phase7_source_snapshot"),
         },
         "inputs": {
             "render_package_path": result.get("package_path"),
@@ -1002,6 +1017,8 @@ def _final_video_run_manifest_payload(
             "intro_video_path": str(intro_video_path) if intro_video_path else None,
             "intro_video_source_plan_path": str(intro_video_source_plan_path) if intro_video_source_plan_path else None,
             "intro_subtitles": result.get("intro_subtitles"),
+            "product_media_readiness": result.get("media_readiness"),
+            "product_media_snapshot": result.get("media_snapshot"),
         },
         "recipe": {
             "path": str(recipe_path),

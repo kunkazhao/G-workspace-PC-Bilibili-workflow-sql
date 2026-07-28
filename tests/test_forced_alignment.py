@@ -74,6 +74,19 @@ def test_items_keep_display_only_plus_without_voice_anchor() -> None:
     assert result == [(0.0, 1.2, "漫步者 R1700BT+")]
 
 
+def test_items_ignore_unspoken_percent_sign_during_exact_alignment() -> None:
+    result = forced_alignment.items_to_subtitle_segments(
+        ["AI功能达到99.9%的抗菌效果"],
+        [
+            {"text": "AI功能达到999的抗菌效果", "start": 0.0, "end": 2.0},
+        ],
+        offset_sec=0.0,
+        audio_duration_sec=2.1,
+    )
+
+    assert result == [(0.0, 2.0, "AI功能达到99.9%的抗菌效果")]
+
+
 def test_point_anchor_inside_clause_does_not_invent_timing() -> None:
     result = forced_alignment.items_to_subtitle_segments(
         ["日常一轮清洁"],

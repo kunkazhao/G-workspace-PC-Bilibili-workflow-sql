@@ -20,7 +20,8 @@ from .db import Database
 from .repositories import Repository
 from .settings import (
     DEFAULT_INTRO_ASSET_ROOT,
-    DEFAULT_RECOMMENDATION_BACKGROUND_ROOT,
+    GLOBAL_RECOMMENDATION_BACKGROUND,
+    GLOBAL_VISUAL_PROFILE_ID,
     INTERNAL_WORKSPACE_ROOT,
 )
 from .subtitle_rules import normalize_subtitle_alignment_text
@@ -80,9 +81,6 @@ def _price_transition_sound_effects(
     return {role: str(path) for role, path in resolved.items()}
 
 
-def _product_motion_seed(project_id: int, account_label: str, product_uid: str) -> str:
-    source = f"product-motion-v1|{project_id}|{safe_text(account_label)}|{safe_text(product_uid)}"
-    return hashlib.sha256(source.encode("utf-8")).hexdigest()[:24]
 WHOLE_VIDEO_OUTRO_KEYWORD = "整片结尾"
 WHOLE_VIDEO_OUTRO_COMMON_FOLDER = "1-通用"
 PRODUCT_COVER_CACHE_ROOT = INTERNAL_WORKSPACE_ROOT / "product-covers"
@@ -906,7 +904,6 @@ def build_product_recommendation_package(
                 project_id=project_id,
                 account=account,
                 closing_text=outro_text,
-                segment_ids=[safe_text(item.get("id")) for item in segments],
             )
             outro_duration = probe_media_duration_seconds(outro_video)
             closing_duration = get_audio_duration_seconds(closing_audio)
@@ -954,6 +951,7 @@ def build_product_recommendation_package(
             "account": account,
             "bworkflowProjectId": int(project_id),
             "masterSchemeId": safe_text(project.get("scheme_id")),
+            "visualProfileId": GLOBAL_VISUAL_PROFILE_ID,
             **(
                 {"masterSnapshotId": safe_text(master_snapshot_id)}
                 if output_mode == "final_mp4" and safe_text(master_snapshot_id)
@@ -978,7 +976,7 @@ def build_product_recommendation_package(
         "segments": segments,
         "assets": (
             {
-                "recommendationBackgroundCandidates": [str(DEFAULT_RECOMMENDATION_BACKGROUND_ROOT)],
+                "recommendationBackground": str(GLOBAL_RECOMMENDATION_BACKGROUND),
                 "assetFallbackPolicy": "forbid",
             }
             if output_mode == "final_mp4"
@@ -1024,7 +1022,6 @@ def _select_whole_video_outro(
     project_id: int,
     account: str,
     closing_text: str,
-    segment_ids: list[str],
 ) -> tuple[Path, str]:
     common_dir = Path(DEFAULT_INTRO_ASSET_ROOT) / WHOLE_VIDEO_OUTRO_COMMON_FOLDER
     candidates = sorted(
@@ -1040,11 +1037,10 @@ def _select_whole_video_outro(
         )
     seed_source = "|".join(
         [
-            "whole-video-outro-v1",
+            "whole-video-outro-v2",
             str(project_id),
             safe_text(account),
             text_hash(closing_text),
-            ",".join(segment_ids),
         ]
     )
     seed = hashlib.sha256(seed_source.encode("utf-8")).hexdigest()[:24]
@@ -1442,15 +1438,22 @@ def _has_matching_price_groups(products: list[dict[str, Any]], price_blocks: lis
 
 def _matching_price_label(product: dict[str, Any], price_blocks: list[dict[str, Any]]) -> str:
     dynamic_label = safe_text(product.get("_dynamic_price_band_label"))
-    if dynamic_label:
-        return dynamic_label
     price = _first_number(safe_text(product.get("price_label")))
-    if price is None:
-        return ""
-    for block in price_blocks:
-        label = safe_text(block.get("price_range_label"))
-        if _price_in_range(price, label):
-            return label
+    if price is not None:
+        for block in price_blocks:
+            label = safe_text(block.get("price_range_label"))
+            if _price_in_range(price, label):
+                return label
+
+    # Dynamic cards may use a broad display band (for example, "200元以内"),
+    # while price-transition scripts use narrower source ranges. Only use that
+    # display band when it is an exact transition label; otherwise it would
+    # silently suppress the transition segment.
+    if dynamic_label and any(
+        dynamic_label == safe_text(block.get("price_range_label"))
+        for block in price_blocks
+    ):
+        return dynamic_label
     return ""
 
 

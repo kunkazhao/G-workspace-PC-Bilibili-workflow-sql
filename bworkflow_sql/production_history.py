@@ -328,12 +328,7 @@ class ProductionHistoryService:
             candidate_dir = target_root.parent / ".bworkflow-staging"
             candidate_dir.mkdir(parents=True, exist_ok=True)
         candidate_path = candidate_dir / f"complete-candidate-{timestamp}.partial.mp4"
-        cache_dir = (
-            INTERNAL_WORKSPACE_ROOT
-            / f"project-{record['project_id']}"
-            / "render"
-            / "final-video-cache"
-        )
+        cache_dir = INTERNAL_WORKSPACE_ROOT / "render-cache" / "clip-cache-v1"
         render_owner = build_render_owner(
             phase="production_rerender",
             pipeline_path=pipeline,

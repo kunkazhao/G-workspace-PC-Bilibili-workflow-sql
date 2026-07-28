@@ -5,6 +5,7 @@ import re
 import sqlite3
 import struct
 import wave
+from types import SimpleNamespace
 
 import pytest
 
@@ -295,7 +296,30 @@ def test_assemble_plan_previews_sequence_without_writing_spoken_files(tmp_path: 
         "closing",
     ]
     assert plan["next"]["action"] == "assemble"
+    assert plan["execution_contract"]["gates"]["episode_identity"] == "blocked"
     assert not spoken_path.exists()
+
+
+def test_assemble_plan_emits_hashable_episode_execution_contract(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    service = WorkflowService(db)
+    seed_ready_voice_assets(db, project_id, tmp_path)
+
+    plan = service.assemble_spoken_script_plan(
+        project_id,
+        account_label="小燃",
+        episode_id="episode:contract-1",
+    )
+
+    contract = plan["execution_contract"]
+    assert contract["episode_id"] == "episode:contract-1"
+    assert contract["gates"] == {
+        "episode_identity": "passed",
+        "content_selection": "passed",
+        "voice_text_hash": "passed",
+        "execution_ready": "passed",
+    }
+    assert contract["contract_sha256"].startswith("sha256:")
 
 
 def test_assemble_plan_targets_only_missing_voice_script_ids(tmp_path: Path):
@@ -451,9 +475,32 @@ def test_workflow_doctor_exposes_featured_products_for_phase7_confirmation(tmp_p
         },
     )
 
+    monkeypatch.setattr(
+        service,
+        "phase7_live_selection_context",
+        lambda project_id_arg, *, episode_id="": {
+            "status": "ready",
+            "source": "master_live",
+            "master_snapshot_id": "sha256:" + "a" * 64,
+            "generated_at_utc": "2026-07-29T00:00:00Z",
+            "workspace_id": "workspace-1",
+            "scheme_id": "scheme-1",
+            "product_uids": ["YXEJ002"],
+            "featured_count": 1,
+            "featured_products": [{"uid": "YXEJ002", "title": "竹林鸟夜莺Z1"}],
+        },
+    )
+
     result = service.workflow_doctor(project_id, account_label="灏忕噧")
 
     assert result["checks"]["phase7_selection"] == {
+        "status": "ready",
+        "source": "master_live",
+        "master_snapshot_id": "sha256:" + "a" * 64,
+        "generated_at_utc": "2026-07-29T00:00:00Z",
+        "workspace_id": "workspace-1",
+        "scheme_id": "scheme-1",
+        "product_uids": ["YXEJ002"],
         "featured_count": 1,
         "featured_products": [{"uid": "YXEJ002", "title": "竹林鸟夜莺Z1"}],
     }
@@ -569,23 +616,28 @@ def test_workflow_doctor_includes_template_check_after_assembly_ready(tmp_path: 
     def fake_template_doctor(
         project_id_arg: int,
         *,
-        account_label: str,
-        product_card_template_id: str,
-        product_media_mode: str,
-    ) -> dict[str, object]:
+            account_label: str,
+            product_card_template_id: str,
+            product_media_mode: str,
+            products: list[dict[str, object]] | None = None,
+        ) -> dict[str, object]:
         template_calls.append(
             {
                 "project_id": project_id_arg,
                 "account_label": account_label,
                 "product_card_template_id": product_card_template_id,
-                "product_media_mode": product_media_mode,
+                    "product_media_mode": product_media_mode,
+                    "products": [
+                        {"uid": row["uid"], "title": row["title"]}
+                        for row in (products or [])
+                    ],
             }
         )
         return {
             "ok": False,
             "status": "issues_found",
-            "issues": [{"code": "missing_ready_image_binding", "uid": "YXEJ002"}],
-            "next": {"action": "regenerate_product_images", "command": "python -m bworkflow_sql product-images 1"},
+            "issues": [{"code": "template_metadata_incomplete", "field": "coverMediaSlot"}],
+            "next": {"action": "fix_template_metadata_then_recheck"},
         }
 
     monkeypatch.setattr(service, "template_doctor", fake_template_doctor)
@@ -603,16 +655,22 @@ def test_workflow_doctor_includes_template_check_after_assembly_ready(tmp_path: 
     assert result["checks"]["template"]["status"] == "issues_found"
     assert result["issues"][-1] == {
         "source": "template-doctor",
-        "code": "missing_ready_image_binding",
-        "uid": "YXEJ002",
+        "code": "template_metadata_incomplete",
+        "field": "coverMediaSlot",
     }
-    assert result["next"]["action"] == "regenerate_product_images"
+    assert result["next"]["action"] == "fix_template_metadata_then_recheck"
     assert template_calls == [
         {
             "project_id": project_id,
             "account_label": "灏忕噧",
             "product_card_template_id": "muban-xiaoran-1",
             "product_media_mode": "video_preferred",
+            "products": [
+                {
+                    "uid": "YXEJ002",
+                    "title": "竹林鸟夜莺Z1",
+                }
+            ],
         }
     ]
 
@@ -1339,6 +1397,31 @@ def test_assembly_freezes_random_product_and_price_versions_by_episode(tmp_path:
     assert emitted == planned_hashes
     assert any(body in text for body in (product_version, "这是商品文案。"))
     assert any(body in text for body in (price_version, "这个价格段值得看。"))
+
+
+def test_phase7_live_selection_uses_master_featured_not_local_frozen_flags(tmp_path: Path):
+    db, project_id = seed_project(tmp_path)
+    with db.connect() as conn:
+        conn.execute("UPDATE projects SET workspace_id='workspace-1' WHERE id=?", (project_id,))
+        conn.execute(
+            "UPDATE products SET product_card_json=? WHERE project_id=? AND uid='YXEJ002'",
+            (json.dumps({"featured": False}), project_id),
+        )
+
+    class FakeMaster:
+        def fetch_scheme_snapshot(self, workspace_id, scheme_id, *, force_refresh=False):
+            assert (workspace_id, scheme_id, force_refresh) == ("workspace-1", "scheme-1", True)
+            return SimpleNamespace(
+                snapshot_id="sha256:" + "b" * 64,
+                generated_at_utc="2026-07-29T00:00:00Z",
+                products=(SimpleNamespace(uid="YXEJ002", title="竹林鸟夜莺Z1", featured=True),),
+            )
+
+    context = WorkflowService(db, master_contracts=FakeMaster()).phase7_live_selection_context(project_id)
+
+    assert context["status"] == "ready"
+    assert context["source"] == "master_live"
+    assert context["featured_products"] == [{"uid": "YXEJ002", "title": "竹林鸟夜莺Z1"}]
 
 
 def test_episode_copy_selection_can_change_for_a_new_episode():

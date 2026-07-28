@@ -23,7 +23,7 @@ python -m bworkflow_sql render-final-video <project_id> --pipeline <.pipeline.js
 预检使用同一份冻结 Master 方案快照检查全部商品；商品名称、实际整数元价格、
 唯一价格段、当前配音、商品视频或封面、模板必填槽位任何一项失败，都在
 CutMe job 和缓存写入前整体阻断并返回 UID。缓存固定在
-`data/workspace/project-<id>/render/final-video-cache`，不跨项目且不自动清理。
+`data/workspace/render-cache/clip-cache-v1`，可跨项目/期次复用且不自动清理。
 
 `product-images`、剪映公开 CLI/UI 和模板校准草稿已退役。历史图片、绑定、
 草稿和引擎保留但不再兼容新槽位/模板。CutMe still 只用于模板压力预览和
@@ -38,7 +38,10 @@ CutMe job 和缓存写入前整体阻断并返回 UID。缓存固定在
 ## 媒体工作区与正式成片履历
 
 阶段 7 开始时，先运行 `template-doctor` 展示 `media_inventory`，并读取
-`workflow-doctor.checks.phase7_selection.featured_products`。没有重点商品时默认
+`workflow-doctor.checks.phase7_selection` 的 `source=master_live`、实时
+`master_snapshot_id` 和 `featured_products`。不要用 episode 冻结投影的旧
+`featured` 标记替代这一读操作；若实时方案与本期冻结的 UID 集合不同，或 Master
+不可用，停止并处理该阻塞，不能回退到旧状态。没有重点商品时默认
 `standard` 且不置顶；一款时展示 UID/完整名称并询问是否置顶；多款时展示全部
 UID/完整名称并询问是否全部置顶。随后一次确认输出分支、账号、商品卡模板、商品素材方式和排序。
 确认后运行：
@@ -48,7 +51,8 @@ python -m bworkflow_sql confirm-phase7-selection --pipeline <.pipeline.json> --o
 ```
 
 `render-package` 与 `render-final-video` 必须携带同一 pipeline 和完全一致的参数；
-缺少确认、选择哈希损坏或参数不一致都会阻断。旧候选片没有匹配的
+schema-v3 episode 的确认还会绑定实时 Master snapshot ID、商品 UID 集合和
+featured 清单；缺少该来源、选择哈希损坏或参数不一致都会阻断。旧候选片没有匹配的
 `phase7_selection_hash` 时只能作为诊断产物，不能执行 `confirm-production`。
 商品卡模板还必须有版本、正式组件源码、文字承载依赖源码和容量基线 SHA-256
 绑定的 `textCapacityCertification`；任一源码或基线变化后认证自动失效。
@@ -188,8 +192,8 @@ Remotion-first 商品卡模板从 CutMe 元数据进入账号模板列表，显�
 
 | 检查 | 命令或数据 | 判定 |
 |---|---|---|
-| 待生成数量 | `python -m bworkflow_sql voice-counts <project_id> --account <账号> --voice-provider minimax|indextts` | 必须与随后 `voice` 使用同一个 provider。 |
-| 实际生成 | `python -m bworkflow_sql voice <project_id> --account <账号> --voice-provider minimax|indextts` | 省略参数时默认 `minimax`。 |
+| 待生成数量 | `python -m bworkflow_sql voice-counts <project_id> --pipeline <.pipeline.json> --voice-provider minimax|indextts` | 以本期执行合同按 text hash 统计。 |
+| 实际生成 | `python -m bworkflow_sql voice <project_id> --pipeline <.pipeline.json> --voice-provider minimax|indextts --confirm-paid-voice` | 仅生成合同中缺失的 hash；显式确认才会产生付费请求。 |
 | 账号配置 | `SELECT provider, voice_id, model, settings_json, enabled FROM account_voice_profiles WHERE account_id=<id>` | 当前 provider 必须有一条启用 profile；旧 account 字段只作兼容后备。 |
 | 复用来源 | 查询 `asset_bindings.voice_provider/voice_model/voice_id/synthesis_settings_hash/generation_fingerprint` | 任一生成身份字段变化都应重新生成，不得复用旧音频。 |
 | 写入失败 | 检查旧 ready binding 和旧文件仍存在 | 新文件先独立生成；DB 提交后才清理旧文件。 |
@@ -241,8 +245,8 @@ python -m bworkflow_sql render-final-video <project_id> --account <账号> --int
 传入 `--delivery-dir` 后，只把 `完整成片-<timestamp>.mp4` 写到交付目录一级。
 不要再创建 `01_最终成片` 二级目录，也不要把目录名、账号名塞进文件名。验收截图写入
 `02_验收证据\<timestamp>\frames\`，RenderPackage、片头字幕 ASS 等过程文件写入
-`03_过程记录\<timestamp>\`。项目级片段缓存仍在
-`data\workspace\project-<id>\render\final-video-cache\`，不进入交付目录。该共享目录由
+`03_过程记录\<timestamp>\`。共享片段缓存在
+`data\workspace\render-cache\clip-cache-v1\`，不进入交付目录。该共享目录由
 CutMe 跨进程互斥；片段以内容键命名并原子发布，失败批次只更新
 `clip-cache-manifest.in-progress.json`，完整成片和母带成功后才替换正式 manifest。
 
@@ -252,7 +256,7 @@ CutMe 跨进程互斥；片段以内容键命名并原子发布，失败批次�
 返回和 run manifest 会记录 `timings`，用于复盘 package、CutMe 渲染、
 ffprobe、抽帧、loudnorm 各阶段耗时。
 
-CutMe fast-final 会在上面的项目级缓存目录写 `clip-cache-manifest.json`，用于跨运行复用
+CutMe fast-final 会在上面的共享缓存目录写 `clip-cache-manifest.json`，用于跨项目、跨期次复用
 未变化的引言、价格、商品和结尾段。manifest 同时记录命中/重渲染数量、阶段耗时、
 视频编码和母带证据，并由 B-Workflow 写入 run manifest。这个缓存是加速项，不是前置
 条件：manifest 不可读或某个 clip 缺失时，系统必须安全重渲染对应片段，不能因此阻断生成。

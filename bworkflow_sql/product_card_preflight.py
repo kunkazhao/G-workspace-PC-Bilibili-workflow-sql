@@ -12,6 +12,7 @@ from .dynamic_product_card import (
     validate_price_ranges,
 )
 from .master_contracts import MasterContractAdapter, MasterContractError
+from .media_readiness import ProbeVideo, audit_product_video_media
 from .repositories import Repository
 from .episode_source_snapshot import snapshot_from_episode_source, source_payload_from_row
 from .template_config import product_card_slot_issues, resolve_product_card_template
@@ -27,6 +28,7 @@ def dynamic_product_card_preflight(
     master_contracts: MasterContractAdapter | None = None,
     product_uid: str = "",
     episode_id: str = "",
+    probe_video: ProbeVideo | None = None,
 ) -> dict[str, Any]:
     repo = Repository(db)
     project = repo.project(project_id)
@@ -173,6 +175,12 @@ def dynamic_product_card_preflight(
         snapshot_by_uid[uid] = snapshot_product
 
     assets = repo.asset_bindings(project_id)
+    media_readiness = audit_product_video_media(
+        products,
+        assets,
+        video_root=safe_text(project.get("video_root")),
+        probe_video=probe_video,
+    )
     blocks = repo.script_blocks(project_id)
     blocks_by_uid: dict[str, list[dict[str, Any]]] = {}
     for block in blocks:
@@ -210,7 +218,7 @@ def dynamic_product_card_preflight(
                     message="Active product has no current product script block.",
                 )
             )
-        media_kind, media_asset = _select_product_media(snapshot_product, assets)
+        media_kind, media_asset = _select_product_media(snapshot_product, media_readiness)
         context, product_issues = build_dynamic_product_context(
             snapshot_product,
             parsed_price_ranges=parsed_ranges,
@@ -272,6 +280,7 @@ def dynamic_product_card_preflight(
         },
         "issues": issue_dicts,
         "contexts": contexts,
+        "media_readiness": media_readiness,
         "next": None,
     }
 
@@ -286,6 +295,7 @@ def product_card_preflight(
     expect_cover: str = "",
     master_contracts: MasterContractAdapter | None = None,
     episode_id: str = "",
+    probe_video: ProbeVideo | None = None,
 ) -> dict[str, Any]:
     # `expect_cover` is retained only as a CLI/API compatibility argument. The
     # current Master snapshot is authoritative for dynamic rendering.
@@ -298,6 +308,7 @@ def product_card_preflight(
         master_contracts=master_contracts,
         product_uid=product_uid,
         episode_id=episode_id,
+        probe_video=probe_video,
     )
 
 
@@ -324,6 +335,7 @@ def _failure(
         },
         "issues": [item.as_dict() for item in issues],
         "contexts": [],
+        "media_readiness": None,
         "next": None,
     }
 
@@ -360,19 +372,13 @@ def _select_script_and_voice(
 
 def _select_product_media(
     snapshot_product: Any,
-    assets: list[dict[str, Any]],
+    media_readiness: dict[str, Any],
 ) -> tuple[str, str]:
     uid = safe_text(snapshot_product.uid)
-    for asset in assets:
-        if safe_text(asset.get("asset_type")) != "video":
-            continue
-        if safe_text(asset.get("uid")) != uid:
-            continue
-        if safe_text(asset.get("status")) != "ready":
-            continue
-        path = Path(safe_text(asset.get("path")))
-        if path.is_file():
-            return "video", str(path.resolve())
+    selected_paths = media_readiness.get("selected_paths") if isinstance(media_readiness, dict) else {}
+    video_path = safe_text(selected_paths.get(uid)) if isinstance(selected_paths, dict) else ""
+    if video_path:
+        return "video", video_path
 
     cover = safe_text(snapshot_product.card.cover_url)
     if _valid_cover(cover):

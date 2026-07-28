@@ -1,20 +1,17 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from .db import Database
-from .product_image_modes import regeneration_mode_for_issue_codes
+from .media_readiness import audit_product_video_media
 from .render_package_builder import (
     DEFAULT_PRODUCT_MEDIA_MODE,
     SUPPORTED_PRODUCT_MEDIA_MODES,
-    product_card_content_fingerprint,
     product_card_payload_for_product,
 )
 from .repositories import Repository
 from .template_config import (
     display_video_slot_for_product_card_template_id,
-    image_set_for_template,
     product_card_text_capacity_certification_issues,
     resolve_product_card_template,
 )
@@ -26,8 +23,7 @@ REQUIRED_TEMPLATE_METADATA_KEYS = (
     "outputCanvas",
     "cardPlacement",
     "coverMediaSlot",
-    "fieldMapping",
-    "requiredFields",
+    "slotDeclarations",
 )
 
 
@@ -38,6 +34,7 @@ def diagnose_template_flow(
     account_label: str,
     product_card_template_id: str = "",
     product_media_mode: str = DEFAULT_PRODUCT_MEDIA_MODE,
+    products: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     account = safe_text(account_label)
     requested_template_id = safe_text(product_card_template_id)
@@ -69,7 +66,7 @@ def diagnose_template_flow(
             issues=issues,
             next_hint={
                 "action": "confirm_product_card_template",
-                "command": _product_images_command(project_id, account, requested_template_id or "<template-id>"),
+                "command": "",
             },
         )
 
@@ -86,9 +83,6 @@ def diagnose_template_flow(
         "confirmed": True,
         "selectionSource": "explicit",
     }
-    expected_image_set = _safe_path_component(
-        image_set_for_template(safe_text(selected_template.get("displayName")))
-    )
     issues.extend(_template_metadata_issues(selected_template))
     try:
         display_video_slot_for_product_card_template_id(template_id)
@@ -103,55 +97,31 @@ def diagnose_template_flow(
         )
 
     assets = repo.asset_bindings(project_id)
-    products = repo.products(project_id, include_removed=False)
+    active_products = products if products is not None else repo.products(project_id, include_removed=False)
+    media_readiness = audit_product_video_media(
+        active_products,
+        assets,
+        video_root=safe_text(project.get("video_root")),
+    )
+    selected_video_paths = media_readiness.get("selected_paths") or {}
     product_count = 0
     video_ready_items: list[dict[str, Any]] = []
     video_missing_items: list[dict[str, Any]] = []
-    for product in products:
+    for product in active_products:
         product_count += 1
         uid = safe_text(product.get("uid"))
         title = safe_text(product.get("title"))
-        video = _ready_video_asset(assets, uid=uid)
-        if video:
-            video_ready_items.append({"uid": uid, "title": title, "path": safe_text(video.get("path"))})
+        video_path = safe_text(selected_video_paths.get(uid))
+        if video_path:
+            video_ready_items.append({"uid": uid, "title": title, "path": video_path})
         else:
             video_missing_items.append({"uid": uid, "title": title})
-        image = _ready_image_asset(
-            assets,
-            uid=uid,
-            account_label=account,
-            preferred_image_set=expected_image_set,
-        )
-        image_path = Path(safe_text(image.get("path"))) if image else None
-        if image is None:
-            issues.append(
-                {
-                    "level": "warning",
-                    "code": "missing_ready_image_binding",
-                    "uid": uid,
-                    "message": "ready product-card image binding is missing for this account.",
-                }
-            )
-        elif not _image_path_uses_template(
-            image_path,
-            account_label=account,
-            image_set=expected_image_set,
-        ):
-            issues.append(
-                {
-                    "level": "error",
-                    "code": "wrong_template_binding",
-                    "uid": uid,
-                    "path": str(image_path),
-                    "expected_image_set": expected_image_set,
-                    "message": "ready product-card image binding points to a different account/template directory.",
-                }
-            )
-
         product_card = product_card_payload_for_product(
             product,
             project=project,
-            fallback_image_path=image_path,
+            # Formal Remotion segments resolve their own structured cover/video
+            # media. Historical whole-card PNG bindings are never render input.
+            fallback_image_path=None,
             account_label=account,
             product_card_template_id=template_id,
         )
@@ -174,40 +144,13 @@ def diagnose_template_flow(
                     "message": "video_preferred output requires productCard.coverMediaSlot or a derived displayVideoSlot.",
                 }
             )
-        if image is None:
-            continue
-        stored_fingerprint = safe_text(image.get("text_hash"))
-        expected_fingerprint = product_card_content_fingerprint(product, product_card)
-        if not stored_fingerprint:
-            issues.append(
-                {
-                    "level": "warning",
-                    "code": "unknown_legacy_image_hash",
-                    "uid": uid,
-                    "path": str(image_path),
-                    "message": "ready image has no product-card fingerprint; treat it as legacy until regenerated.",
-                }
-            )
-        elif expected_fingerprint and stored_fingerprint != expected_fingerprint:
-            issues.append(
-                {
-                    "level": "warning",
-                    "code": "stale_product_image",
-                    "uid": uid,
-                    "path": str(image_path),
-                    "stored_fingerprint": stored_fingerprint,
-                    "expected_fingerprint": expected_fingerprint,
-                    "message": "product-card image fingerprint does not match the selected template/product payload.",
-                }
-            )
-
     return _payload(
         project_id=project_id,
         account=account,
         media_mode=media_mode,
         template=template,
         products_checked=product_count,
-        media_inventory=_media_inventory(video_ready_items, video_missing_items),
+        media_inventory=_media_inventory(video_ready_items, video_missing_items, readiness=media_readiness),
         issues=issues,
         next_hint=_next_hint(project_id, account, template_id, issues),
     )
@@ -249,7 +192,7 @@ def _template_metadata_issues(metadata: dict[str, Any]) -> list[dict[str, Any]]:
     template_id = safe_text(metadata.get("templateId"))
     for key in REQUIRED_TEMPLATE_METADATA_KEYS:
         value = metadata.get(key)
-        if key == "requiredFields":
+        if key == "slotDeclarations":
             ok = isinstance(value, list) and bool(value)
         else:
             ok = isinstance(value, dict) and bool(value)
@@ -301,23 +244,6 @@ def _next_hint(
                 f"--product-card-template-id {template_id}"
             ),
         }
-    if codes.intersection(
-        {
-            "wrong_template_binding",
-            "unknown_legacy_image_hash",
-            "stale_product_image",
-            "missing_ready_image_binding",
-        }
-    ):
-        return {
-            "action": "regenerate_product_images",
-            "command": _product_images_command(
-                project_id,
-                account,
-                template_id,
-                mode=regeneration_mode_for_issue_codes(codes),
-            ),
-        }
     if codes.intersection({"missing_video_slot", "display_video_slot_unavailable"}):
         return {
             "action": "fix_template_metadata_then_recheck",
@@ -327,57 +253,6 @@ def _next_hint(
         "action": "inspect_issues",
         "command": f"python -m bworkflow_sql template-doctor {project_id} --account {account} --product-card-template-id {template_id}",
     }
-
-
-def _product_images_command(project_id: int, account: str, template_id: str, *, mode: str = "stale") -> str:
-    return (
-        f"python -m bworkflow_sql product-images {project_id} "
-        f"--account {account} --mode {mode} --product-card-template-id {template_id}"
-    )
-
-
-def _ready_image_asset(
-    assets: list[dict[str, Any]],
-    *,
-    uid: str,
-    account_label: str,
-    preferred_image_set: str = "",
-) -> dict[str, Any] | None:
-    account = safe_text(account_label)
-    image_set = safe_text(preferred_image_set)
-    candidates: list[dict[str, Any]] = []
-    for asset in assets:
-        if safe_text(asset.get("asset_type")) != "image":
-            continue
-        if safe_text(asset.get("status")) != "ready":
-            continue
-        if safe_text(asset.get("uid")) != uid:
-            continue
-        asset_account = safe_text(asset.get("account_label"))
-        if account and asset_account not in {account, ""}:
-            continue
-        path = Path(safe_text(asset.get("path")))
-        if not path.is_file():
-            continue
-        candidates.append(asset)
-    if not candidates:
-        return None
-    return sorted(
-        candidates,
-        key=lambda item: (
-            (
-                not _image_path_uses_template(
-                    Path(safe_text(item.get("path"))),
-                    account_label=account,
-                    image_set=image_set,
-                )
-                if image_set
-                else False
-            ),
-            safe_text(item.get("account_label")) != account,
-            safe_text(item.get("path")),
-        ),
-    )[0]
 
 
 def _ready_video_asset(assets: list[dict[str, Any]], *, uid: str) -> dict[str, Any] | None:
@@ -398,6 +273,8 @@ def _ready_video_asset(assets: list[dict[str, Any]], *, uid: str) -> dict[str, A
 def _media_inventory(
     video_ready_items: list[dict[str, Any]],
     video_missing_items: list[dict[str, Any]],
+    *,
+    readiness: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "total_products": len(video_ready_items) + len(video_missing_items),
@@ -406,24 +283,8 @@ def _media_inventory(
         "video_items": video_ready_items,
         "missing_video_items": video_missing_items,
         "mode_explanation": {
-            "cover_only": "all products use product-card images",
-            "video_preferred": "ready product videos are used; missing videos fall back to product-card images",
+            "cover_only": "all products use their current product cover inside the dynamic card",
+            "video_preferred": "ready product videos are used; missing videos fall back to the current product cover",
         },
+        "readiness": readiness or {},
     }
-
-
-def _image_path_uses_template(path: Path | None, *, account_label: str, image_set: str) -> bool:
-    if path is None:
-        return False
-    account = _safe_path_component(account_label)
-    template = _safe_path_component(image_set)
-    parts = [safe_text(part) for part in path.parts]
-    for index, part in enumerate(parts[:-1]):
-        if part == account and parts[index + 1] == template:
-            return True
-    return False
-
-
-def _safe_path_component(value: str) -> str:
-    text = safe_text(value).strip()
-    return text or "item"

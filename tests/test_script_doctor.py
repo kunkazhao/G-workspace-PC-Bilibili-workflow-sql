@@ -802,6 +802,12 @@ Alpha 的单品文案。
 
 Beta 的单品文案。
 
+### 499元-OLD001-Old Keyboard
+
+#### 正文
+
+历史方案保留的正文。
+
 ## 价格过渡文案
 
 ### 300-500元
@@ -821,6 +827,7 @@ Beta 的单品文案。
     assert result["summary"]["script_blocks_synced"] == 4
     assert result["next"]["action"] == "continue_downstream"
     assert result["next"]["task"] == "进入配音检查"
+    assert any(issue["code"] == "extra_markdown_product" for issue in result["issues"])
 
 
 def test_script_doctor_requires_selected_intro_when_multiple_versions(tmp_path: Path, monkeypatch):

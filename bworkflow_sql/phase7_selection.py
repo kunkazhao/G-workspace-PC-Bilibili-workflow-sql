@@ -85,6 +85,14 @@ def phase7_selection_hash(selection: Mapping[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def phase7_confirmation_hash(selection: Mapping[str, Any], source_snapshot: Mapping[str, Any] | None = None) -> str:
+    payload: dict[str, Any] = {"selection": dict(selection)}
+    if source_snapshot is not None:
+        payload["source_snapshot"] = dict(source_snapshot)
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 def confirm_phase7_selection(
     pipeline_path: str | Path,
     *,
@@ -95,6 +103,7 @@ def confirm_phase7_selection(
     product_order_strategy: str,
     mode: str,
     top_uids: str | list[str] | tuple[str, ...] | None = None,
+    source_snapshot: Mapping[str, Any] | None = None,
     confirmed_at: str = "",
 ) -> dict[str, Any]:
     selection = normalize_phase7_selection(
@@ -106,7 +115,8 @@ def confirm_phase7_selection(
         mode=mode,
         top_uids=top_uids,
     )
-    selection_digest = phase7_selection_hash(selection)
+    normalized_source = _normalize_source_snapshot(source_snapshot, selection=selection)
+    selection_digest = phase7_confirmation_hash(selection, normalized_source)
     timestamp = safe_text(confirmed_at) or datetime.now().astimezone().isoformat(timespec="seconds")
 
     def update(payload: dict[str, Any]) -> None:
@@ -121,6 +131,8 @@ def confirm_phase7_selection(
             "selection_hash": selection_digest,
             "selection": selection,
         }
+        if normalized_source is not None:
+            assembly["selection_confirmation"]["source_snapshot"] = normalized_source
         phases["assembly"] = assembly
         payload["phases"] = phases
         payload["account"] = selection["account"]
@@ -156,6 +168,7 @@ def validated_phase7_selection(
     assembly = phases.get("assembly") if isinstance(phases.get("assembly"), dict) else {}
     confirmation = assembly.get("selection_confirmation") if isinstance(assembly.get("selection_confirmation"), dict) else {}
     stored_selection = confirmation.get("selection") if isinstance(confirmation.get("selection"), dict) else {}
+    source_snapshot = confirmation.get("source_snapshot") if isinstance(confirmation.get("source_snapshot"), dict) else None
     if (
         confirmation.get("status") != "confirmed"
         or confirmation.get("source") != PHASE7_SELECTION_SOURCE
@@ -166,7 +179,13 @@ def validated_phase7_selection(
             "phase 7 settings must be explicitly confirmed before formal rendering",
         )
     stored_hash = safe_text(confirmation.get("selection_hash"))
-    if not stored_hash or stored_hash != phase7_selection_hash(stored_selection):
+    requires_live_source = _pipeline_schema_version(payload) >= 3
+    if requires_live_source and source_snapshot is None:
+        raise Phase7SelectionError(
+            "phase7_selection_invalid",
+            "episode phase 7 selection is missing its confirmed Master live-source snapshot",
+        )
+    if not stored_hash or stored_hash != phase7_confirmation_hash(stored_selection, source_snapshot):
         raise Phase7SelectionError(
             "phase7_selection_invalid",
             "phase 7 selection confirmation hash is missing or invalid",
@@ -200,4 +219,95 @@ def validated_phase7_selection(
         "selection_hash": stored_hash,
         "source": PHASE7_SELECTION_SOURCE,
         "confirmed_at": safe_text(confirmation.get("confirmed_at")),
+        "source_snapshot": source_snapshot,
     }
+
+
+def _normalize_source_snapshot(
+    source_snapshot: Mapping[str, Any] | None,
+    *,
+    selection: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if source_snapshot is None:
+        return None
+    status = safe_text(source_snapshot.get("status"))
+    snapshot_id = safe_text(source_snapshot.get("master_snapshot_id"))
+    product_uids = [safe_text(uid) for uid in source_snapshot.get("product_uids") or []]
+    product_uids = sorted({uid for uid in product_uids if uid})
+    if status != "ready" or not snapshot_id or not product_uids:
+        raise Phase7SelectionError("phase7_selection_invalid", "phase 7 requires a verified Master live-source snapshot")
+    invalid_top_uids = [uid for uid in selection.get("top_uids") or [] if uid not in product_uids]
+    if invalid_top_uids:
+        raise Phase7SelectionError(
+            "phase7_selection_invalid",
+            "top UIDs are absent from the confirmed Master source: " + ", ".join(invalid_top_uids),
+        )
+    featured_products = source_snapshot.get("featured_products")
+    normalized_featured = [
+        {"uid": safe_text(item.get("uid")), "title": safe_text(item.get("title"))}
+        for item in featured_products or []
+        if isinstance(item, Mapping) and safe_text(item.get("uid")) and safe_text(item.get("title"))
+    ]
+    return {
+        "kind": "bworkflow.phase7_master_live_selection",
+        "status": "ready",
+        "master_snapshot_id": snapshot_id,
+        "generated_at_utc": safe_text(source_snapshot.get("generated_at_utc")),
+        "workspace_id": safe_text(source_snapshot.get("workspace_id")),
+        "scheme_id": safe_text(source_snapshot.get("scheme_id")),
+        "product_uids": product_uids,
+        "featured_products": normalized_featured,
+    }
+
+
+def execution_contract_inputs(pipeline_path: str | Path) -> dict[str, Any]:
+    """Read the already-confirmed Phase 7 scope; never infer it from project rows."""
+    pipeline = Path(pipeline_path).expanduser().resolve()
+    if not pipeline.is_file():
+        raise Phase7SelectionError("phase7_selection_unconfirmed", f"pipeline does not exist: {pipeline}")
+    payload = json.loads(pipeline.read_text(encoding="utf-8-sig"))
+    phases = payload.get("phases") if isinstance(payload, dict) and isinstance(payload.get("phases"), dict) else {}
+    assembly = phases.get("assembly") if isinstance(phases.get("assembly"), dict) else {}
+    confirmation = assembly.get("selection_confirmation") if isinstance(assembly.get("selection_confirmation"), dict) else {}
+    selection = confirmation.get("selection") if isinstance(confirmation.get("selection"), dict) else {}
+    source_snapshot = confirmation.get("source_snapshot") if isinstance(confirmation.get("source_snapshot"), dict) else None
+    if confirmation.get("status") != "confirmed" or confirmation.get("source") != PHASE7_SELECTION_SOURCE:
+        raise Phase7SelectionError("phase7_selection_unconfirmed", "formal assembly requires a confirmed phase 7 selection")
+    normalized = normalize_phase7_selection(
+        output_branch=safe_text(selection.get("output_branch")),
+        account=safe_text(selection.get("account")),
+        product_card_template_id=safe_text(selection.get("product_card_template_id")),
+        product_media_mode=safe_text(selection.get("product_media_mode")),
+        product_order_strategy=safe_text(selection.get("product_order_strategy")),
+        mode=safe_text(selection.get("mode")),
+        top_uids=selection.get("top_uids") or [],
+    )
+    if dict(selection) != normalized or safe_text(confirmation.get("selection_hash")) != phase7_confirmation_hash(normalized, source_snapshot):
+        raise Phase7SelectionError("phase7_selection_invalid", "phase 7 selection confirmation hash is invalid")
+    source = _normalize_source_snapshot(source_snapshot, selection=normalized)
+    if source is None:
+        raise Phase7SelectionError("phase7_selection_invalid", "formal assembly requires a confirmed Master source snapshot")
+    episode_id = safe_text(payload.get("episode_id"))
+    if not episode_id:
+        raise Phase7SelectionError("episode_identity_missing", "formal assembly requires pipeline episode_id")
+    try:
+        project_id = int(payload.get("bworkflow_project_id") or 0)
+    except (TypeError, ValueError):
+        project_id = 0
+    if project_id <= 0:
+        raise Phase7SelectionError("episode_identity_missing", "formal assembly requires pipeline B-Workflow project identity")
+    return {
+        "episode_id": episode_id,
+        "project_id": project_id,
+        "selection": normalized,
+        "selection_hash": safe_text(confirmation.get("selection_hash")),
+        "source_snapshot": source,
+        "product_uids": list(source["product_uids"]),
+    }
+
+
+def _pipeline_schema_version(payload: Mapping[str, Any]) -> int:
+    try:
+        return int(payload.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        return 0

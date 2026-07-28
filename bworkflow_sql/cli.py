@@ -275,17 +275,86 @@ def cmd_episode_source_binding(args: argparse.Namespace) -> None:
 
 # ── voice ─────────────────────────────────────────────────────────────
 
+def _pipeline_contract_values(args: argparse.Namespace) -> dict[str, object]:
+    """Use only the confirmed episode scope when a formal pipeline is supplied."""
+    pipeline = getattr(args, "pipeline", "")
+    if not pipeline:
+        return {}
+    from .phase7_selection import execution_contract_inputs
+
+    scoped = execution_contract_inputs(pipeline)
+    if int(scoped["project_id"]) != int(args.project_id):
+        raise ValueError("pipeline B-Workflow project does not match the command project_id")
+    selection = scoped["selection"]
+    return {
+        "account_label": selection["account"],
+        "mode": selection["mode"],
+        "top_uids": selection["top_uids"],
+        "product_uids": scoped["product_uids"],
+        "product_order_strategy": selection["product_order_strategy"],
+        "episode_id": scoped["episode_id"],
+    }
+
+
+def _pipeline_contract_voice_plan(wf, args: argparse.Namespace) -> dict[str, object] | None:
+    values = _pipeline_contract_values(args)
+    if not values:
+        return None
+    plan = wf.assemble_spoken_script_plan(
+        args.project_id,
+        intro_index=args.intro_index if hasattr(args, "intro_index") else 1,
+        **values,
+    )
+    gates = plan["execution_contract"]["gates"]
+    if gates["episode_identity"] != "passed" or gates["content_selection"] != "passed":
+        raise ValueError("episode execution contract is not content-ready; voice generation is blocked")
+    return plan
+
+
+def _contract_missing_voice_script_ids(plan: dict[str, object]) -> list[str]:
+    return [
+        str(issue["script_id"])
+        for issue in plan["issues"]
+        if issue.get("code") == "missing_voice_asset" and issue.get("script_id")
+    ]
+
+
 def cmd_voice(args: argparse.Namespace) -> None:
     _, _, _, wf = _init()
     logs: list[str] = []
+    contract_plan = _pipeline_contract_voice_plan(wf, args)
+    if contract_plan and (args.uids or args.script_ids):
+        raise ValueError("--pipeline is the sole execution contract; do not combine it with --uids or --script-ids")
+    values = _pipeline_contract_values(args)
+    if contract_plan:
+        missing_script_ids = _contract_missing_voice_script_ids(contract_plan)
+        if not missing_script_ids:
+            _json_out({
+                "ok": True,
+                "status": "all_contract_voices_ready",
+                "paid_generation": False,
+                "execution_contract": contract_plan["execution_contract"],
+            })
+            return
+        if not args.confirm_paid_voice:
+            _json_out({
+                "ok": False,
+                "status": "paid_voice_confirmation_required",
+                "missing_script_ids": missing_script_ids,
+                "execution_contract": contract_plan["execution_contract"],
+            })
+            sys.exit(2)
+        script_ids = missing_script_ids
+    else:
+        script_ids = args.script_ids.split(",") if args.script_ids else None
 
     result = wf.generate_voice(
         args.project_id,
-        account_label=args.account or "",
+        account_label=str(values.get("account_label") or args.account or ""),
         voice_provider=args.voice_provider,
-        uids=args.uids.split(",") if args.uids else None,
-        script_ids=args.script_ids.split(",") if args.script_ids else None,
-        episode_id=args.episode_id or "",
+        uids=None if contract_plan else (args.uids.split(",") if args.uids else None),
+        script_ids=script_ids,
+        episode_id=str(values.get("episode_id") or args.episode_id or ""),
         start_service_if_needed=False,
         progress_hook=lambda msg: logs.append(msg),
     )
@@ -296,6 +365,7 @@ def cmd_voice(args: argparse.Namespace) -> None:
         "logs": logs,
         "stdout": result.stdout,
         "stderr": result.stderr,
+        "execution_contract": contract_plan["execution_contract"] if contract_plan else None,
     })
     if result.returncode != 0:
         sys.exit(result.returncode)
@@ -305,18 +375,28 @@ def cmd_voice(args: argparse.Namespace) -> None:
 
 def cmd_voice_counts(args: argparse.Namespace) -> None:
     _, _, _, wf = _init()
-    total, existing, pending = wf.voice_generation_counts(
-        args.project_id,
-        account_label=args.account or "",
-        voice_provider=args.voice_provider,
-        script_ids=args.script_ids.split(",") if args.script_ids else None,
-        episode_id=args.episode_id or "",
-    )
+    contract_plan = _pipeline_contract_voice_plan(wf, args)
+    if contract_plan and args.script_ids:
+        raise ValueError("--pipeline is the sole execution contract; do not combine it with --script-ids")
+    values = _pipeline_contract_values(args)
+    if contract_plan:
+        total = sum(1 for entry in contract_plan["sequence"] if entry.get("section") != "closing")
+        pending = len(_contract_missing_voice_script_ids(contract_plan))
+        existing = total - pending
+    else:
+        total, existing, pending = wf.voice_generation_counts(
+            args.project_id,
+            account_label=str(values.get("account_label") or args.account or ""),
+            voice_provider=args.voice_provider,
+            script_ids=args.script_ids.split(",") if args.script_ids else None,
+            episode_id=str(values.get("episode_id") or args.episode_id or ""),
+        )
     _json_out({
         "ok": True,
         "total": total,
         "existing": existing,
         "pending": pending,
+        "execution_contract": contract_plan["execution_contract"] if contract_plan else None,
     })
 
 
@@ -324,17 +404,18 @@ def cmd_voice_counts(args: argparse.Namespace) -> None:
 
 def cmd_assemble(args: argparse.Namespace) -> None:
     _, _, _, wf = _init()
+    values = _pipeline_contract_values(args)
     result = wf.assemble_spoken_script(
         args.project_id,
-        account_label=args.account or "",
+        account_label=str(values.get("account_label") or args.account or ""),
         intro_index=args.intro_index,
-        mode=args.mode,
-        top_uids=args.top_uids,
-        product_uids=args.product_uids,
-        product_order_strategy=args.product_order_strategy,
+        mode=str(values.get("mode") or args.mode),
+        top_uids=values.get("top_uids") or args.top_uids,
+        product_uids=values.get("product_uids") or args.product_uids,
+        product_order_strategy=str(values.get("product_order_strategy") or args.product_order_strategy),
         output_markdown_path=args.output or None,
         display_template=args.display_template or "",
-        episode_id=args.episode_id or "",
+        episode_id=str(values.get("episode_id") or args.episode_id or ""),
     )
     _json_out({
         "ok": result.returncode == 0,
@@ -350,15 +431,19 @@ def cmd_assemble(args: argparse.Namespace) -> None:
 
 def cmd_assemble_plan(args: argparse.Namespace) -> None:
     _, _, _, wf = _init()
+    values: dict[str, object] = {
+        "account_label": args.account or "",
+        "intro_index": args.intro_index,
+        "mode": args.mode,
+        "top_uids": args.top_uids,
+        "product_uids": args.product_uids,
+        "product_order_strategy": args.product_order_strategy,
+        "episode_id": args.episode_id or "",
+    }
+    values.update(_pipeline_contract_values(args))
     result = wf.assemble_spoken_script_plan(
         args.project_id,
-        account_label=args.account or "",
-        intro_index=args.intro_index,
-        mode=args.mode,
-        top_uids=args.top_uids,
-        product_uids=args.product_uids,
-        product_order_strategy=args.product_order_strategy,
-        episode_id=args.episode_id or "",
+        **values,
     )
     _json_out(result)
 
@@ -674,6 +759,21 @@ def cmd_publishing_context(args: argparse.Namespace) -> None:
     _json_out(ProductionHistoryService(repo).publishing_context(args.production_run_id))
 
 
+def cmd_account_master_binding(args: argparse.Namespace) -> None:
+    _, repo, _, _ = _init()
+    label = str(args.account or "").strip()
+    account = next((item for item in repo.accounts() if str(item.get("label") or "").strip() == label), None)
+    if account is None or not str(account.get("master_account_id") or "").strip():
+        raise ValueError("account has no confirmed Master account binding")
+    _json_out(
+        {
+            "ok": True,
+            "account_label": label,
+            "master_account_id": str(account["master_account_id"]).strip(),
+        }
+    )
+
+
 def cmd_record_blue_link_backfill(args: argparse.Namespace) -> None:
     from .blue_link_backfill import MasterBlueLinkBackfillClient
     from .production_history import ProductionHistoryService
@@ -815,7 +915,7 @@ def cmd_assets_check(args: argparse.Namespace) -> None:
     if not project:
         _json_err(f"项目不存在: {args.project_id}")
 
-    r = sync.sync_assets(args.project_id)
+    r = sync.sync_assets(args.project_id, asset_type=args.asset_type or None)
 
     products = repo.products(args.project_id, include_removed=False)
     assets = repo.asset_bindings(args.project_id)
@@ -949,6 +1049,7 @@ def cmd_product_card_preflight(args: argparse.Namespace) -> None:
         product_card_template_id=args.product_card_template_id or "",
         product_uid=args.product_uid or "",
         expect_cover=args.expect_cover or "",
+        episode_id=args.episode_id or "",
     )
     _json_out(result)
 
@@ -1156,8 +1257,23 @@ def cmd_render_final_video(args: argparse.Namespace) -> None:
 
 
 def cmd_confirm_phase7_selection(args: argparse.Namespace) -> None:
+    _db, _sync, _research, workflow = _init()
+    pipeline_path = Path(args.pipeline).expanduser().resolve()
+    payload = json.loads(pipeline_path.read_text(encoding="utf-8-sig"))
+    project_id = payload.get("bworkflow_project_id") if isinstance(payload, dict) else None
+    if not isinstance(project_id, int) or project_id <= 0:
+        raise Phase7SelectionError("phase7_selection_invalid", "pipeline is missing bworkflow_project_id")
+    source_snapshot = workflow.phase7_live_selection_context(
+        project_id,
+        episode_id=str(payload.get("episode_id") or ""),
+    )
+    if source_snapshot.get("status") != "ready":
+        raise Phase7SelectionError(
+            str(source_snapshot.get("error_code") or "phase7_master_snapshot_unavailable"),
+            "cannot confirm phase 7 selection without a verified current Master snapshot",
+        )
     result = confirm_phase7_selection(
-        args.pipeline,
+        pipeline_path,
         output_branch=args.output_branch,
         account=args.account,
         product_card_template_id=args.product_card_template_id,
@@ -1165,6 +1281,7 @@ def cmd_confirm_phase7_selection(args: argparse.Namespace) -> None:
         product_order_strategy=args.product_order_strategy,
         mode=args.mode,
         top_uids=args.top_uids,
+        source_snapshot=source_snapshot,
     )
     _json_out(result)
 
@@ -1218,6 +1335,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--uids", help="指定商品 UID，逗号分隔")
     p.add_argument("--script-ids", help="指定文案 script_id，逗号分隔；可只生成某个引言或价格过渡配音")
     p.add_argument("--episode-id", default="", help="按该期冻结的商品集合生成配音")
+    p.add_argument("--pipeline", default="", help="formal episode pipeline; confirmed Phase 7 scope is the sole voice contract")
+    p.add_argument("--confirm-paid-voice", action="store_true", help="explicitly authorize paid generation for only the contract's missing text hashes")
     p.add_argument(
         "--voice-provider",
         choices=[VOICE_PROVIDER_MINIMAX, VOICE_PROVIDER_INDEXTTS],
@@ -1238,6 +1357,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="按指定配音实现计算可复用与待生成数量",
     )
 
+    p.add_argument("--pipeline", default="", help="formal episode pipeline; confirmed Phase 7 scope is the sole voice contract")
+
     # assemble
     p = sub.add_parser("assemble", help="组合口播稿")
     p.add_argument("project_id", type=int)
@@ -1251,6 +1372,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--product-order-strategy", choices=["price_segment_shuffle", "stable"], default="price_segment_shuffle")
     p.add_argument("--episode-id", default="", help="stable episode id used to freeze random copy-version selection")
 
+    p.add_argument("--pipeline", default="", help="formal episode pipeline; confirmed Phase 7 scope is the sole assembly contract")
+
     p = sub.add_parser("assemble-plan", help="Preview spoken-script assembly without writing files")
     p.add_argument("project_id", type=int)
     p.add_argument("--account", help="配音账户标签")
@@ -1260,6 +1383,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--product-uids", default="", help="comma-separated complete product order; disables reshuffling")
     p.add_argument("--product-order-strategy", choices=["price_segment_shuffle", "stable"], default="price_segment_shuffle")
     p.add_argument("--episode-id", default="", help="stable episode id used to freeze random copy-version selection")
+    p.add_argument("--pipeline", default="", help="formal episode pipeline; locks the plan to confirmed Phase 7 scope")
 
     # outline
     p = sub.add_parser("outline", help="创建/更新文案 MD 骨架（价格段自动从 Master scheme 派生）")
@@ -1387,6 +1511,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("publishing-context", help="读取正式成片绑定的 Master 账号 ID、B站 MID 和方案 ID")
     p.add_argument("production_run_id", type=int)
 
+    p = sub.add_parser("account-master-binding", help="读取账户已确认的 Master 账号绑定")
+    p.add_argument("--account", required=True)
+
     p = sub.add_parser("record-blue-link-backfill", help="记录 Master 蓝链回流结果并更新 pipeline 状态")
     p.add_argument("production_run_id", type=int)
     p.add_argument("--pipeline", required=True)
@@ -1456,6 +1583,12 @@ def build_parser() -> argparse.ArgumentParser:
     # assets-check
     p = sub.add_parser("assets-check", help="素材完整性检查")
     p.add_argument("project_id", type=int)
+    p.add_argument(
+        "--asset-type",
+        choices=["image", "video", "voice"],
+        default="",
+        help="optional single asset type to rescan",
+    )
 
     p = sub.add_parser("render-package", help="Generate Remotion RenderPackage")
     p.add_argument("project_id", type=int)
@@ -1592,6 +1725,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--product-uid", default="", help="optional single product UID to check")
     p.add_argument(
+        "--episode-id",
+        default="",
+        help="optional schema-v2 episode id; validates against its frozen source snapshot",
+    )
+    p.add_argument(
         "--expect-cover",
         default="",
         help="deprecated compatibility argument; current Master snapshot cover is authoritative",
@@ -1669,6 +1807,7 @@ DISPATCH = {
     "rerender-production": cmd_rerender_production,
     "complete-publishing": cmd_complete_publishing,
     "publishing-context": cmd_publishing_context,
+    "account-master-binding": cmd_account_master_binding,
     "record-blue-link-backfill": cmd_record_blue_link_backfill,
     "resolve-blue-links": cmd_resolve_blue_links,
     "blue-link-backfill-report": cmd_blue_link_backfill_report,

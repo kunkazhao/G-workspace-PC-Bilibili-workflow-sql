@@ -9,7 +9,6 @@ from PIL import Image
 
 from bworkflow_sql.db import Database
 from bworkflow_sql.render_package_builder import (
-    _product_motion_seed,
     _price_transition_sound_effects,
     build_product_recommendation_package as _build_product_recommendation_package,
 )
@@ -91,6 +90,20 @@ def _contexts_for_builder_test(db: Database, project_id: int) -> list[dict[str, 
     return contexts
 
 
+def test_price_transition_matches_actual_price_before_dynamic_card_display_band():
+    import bworkflow_sql.render_package_builder as builder
+
+    label = builder._matching_price_label(
+        {"price_label": "99元", "_dynamic_price_band_label": "200元以内"},
+        [
+            {"price_range_label": "100元以下"},
+            {"price_range_label": "100-200元"},
+        ],
+    )
+
+    assert label == "100元以下"
+
+
 def build_product_recommendation_package(db: Database, **kwargs):
     if kwargs.get("output_mode") == "final_mp4" and "dynamic_product_contexts" not in kwargs:
         project_id = int(kwargs["project_id"])
@@ -149,14 +162,6 @@ def test_price_transition_sound_effects_use_the_shared_asset_contract(tmp_path: 
         "itemTick": str(sfx_dir / "sfx_progress_tick.wav"),
         "exitWhoosh": str(sfx_dir / "sfx_transition_whoosh.wav"),
     }
-
-
-def test_product_motion_seed_is_stable_per_project_account_and_product():
-    first = _product_motion_seed(23, "小博", "P001")
-
-    assert first == _product_motion_seed(23, "小博", "P001")
-    assert first != _product_motion_seed(23, "小燃", "P001")
-    assert first != _product_motion_seed(24, "小博", "P001")
 
 
 def _insert_script(
@@ -457,6 +462,11 @@ def test_final_mp4_uses_only_frozen_dynamic_contexts_and_no_product_png(
 
     assert result.missing == []
     assert result.package["project"]["masterSnapshotId"] == "snapshot-frozen-1"
+    assert result.package["project"]["visualProfileId"] == "bilibili-global-visual-v1"
+    assert result.package["assets"] == {
+        "recommendationBackground": r"G:\2026项目-b站\素材-剪辑\1-背景图\背景1 (6).png",
+        "assetFallbackPolicy": "forbid",
+    }
     products = [
         item for item in result.package["segments"]
         if item["type"] == "product_recommendation"

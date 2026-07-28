@@ -284,6 +284,7 @@ def diagnose_script_flow(
         blocks=blocks,
         selected_intro=selected_intro,
         products_total=len(products),
+        active_product_uids={safe_text(product.get("uid")) for product in products},
     )
     issues.extend(markdown_sync["issues"])
 
@@ -341,6 +342,7 @@ def _markdown_sync_status(
     blocks: list[dict[str, Any]],
     selected_intro: ScriptVariant | None,
     products_total: int,
+    active_product_uids: set[str],
 ) -> dict[str, Any]:
     if parsed is None:
         return {"synced": False, "synced_count": 0, "issues": []}
@@ -352,6 +354,8 @@ def _markdown_sync_status(
         item = parsed.intro_scripts[0]
         expected.append(("intro", "", "", item.label, item.body))
     for product in parsed.products:
+        if product.uid not in active_product_uids:
+            continue
         for script in product.scripts:
             expected.append(("product", product.uid, "", script.label or "正文", script.body))
     for price in parsed.price_transitions:
