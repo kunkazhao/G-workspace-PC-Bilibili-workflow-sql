@@ -112,11 +112,48 @@ def _build_delivery_archive(video: Path, cover: Path) -> Path:
     return output
 
 
+def _delivery_contract(task: dict[str, Any], *, video_sha256: str, video_size: int, cover_sha256: str, cover_size: int) -> dict[str, Any]:
+    """Build the immutable facts that authorize one publishing archive upload."""
+    missing = [
+        label
+        for field, label in (
+            ("title", "标题"),
+            ("description", "简介"),
+            ("product_links", "商品链接"),
+        )
+        if not safe_text(task.get(field))
+    ]
+    if safe_text(task.get("blue_link_status")) != "complete":
+        missing.append("补充蓝链")
+    if missing:
+        raise PublishingDeliveryError(f"发布交付合同未满足：{'、'.join(missing)}未完整，不能上传压缩包")
+    return {
+        "version": 1,
+        "task_id": safe_text(task.get("id")),
+        "title_sha256": hashlib.sha256(safe_text(task.get("title")).encode("utf-8")).hexdigest(),
+        "description_sha256": hashlib.sha256(safe_text(task.get("description")).encode("utf-8")).hexdigest(),
+        "product_links_sha256": hashlib.sha256(safe_text(task.get("product_links")).encode("utf-8")).hexdigest(),
+        "blue_link_status": "complete",
+        "artifacts": {
+            "full_mp4": {"sha256": video_sha256, "size_bytes": video_size},
+            "cover_image": {"sha256": cover_sha256, "size_bytes": cover_size},
+        },
+    }
+
+
+def _contract_hash(contract: dict[str, Any]) -> str:
+    encoded = json.dumps(contract, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 def upload_approved_publishing_assets(
     pipeline_path: str | Path,
     *,
     master_url: str = DEFAULT_MASTER_API_BASE_URL,
+    confirm_upload_archive: bool = False,
 ) -> dict[str, Any]:
+    if not confirm_upload_archive:
+        raise PublishingDeliveryError("上传发布素材压缩包是外部交付操作；请显式传入 --confirm-upload-archive")
     pipeline_file = Path(pipeline_path).expanduser().resolve()
     pipeline = json.loads(pipeline_file.read_text(encoding="utf-8-sig"))
     if not isinstance(pipeline, dict):
@@ -131,11 +168,16 @@ def upload_approved_publishing_assets(
     task = current.get("task") if isinstance(current.get("task"), dict) else {}
     if safe_text(task.get("bilibili_url")):
         raise PublishingDeliveryError("发布管理已填写 B站链接；不能覆盖已发布任务的交付物")
-    if safe_text(task.get("blue_link_status")) != "complete":
-        raise PublishingDeliveryError("补充蓝链尚未完整，不能上传发布交付物")
-
-    video, _, _ = _approved_file(pipeline, "full_mp4")
-    cover, _, _ = _approved_file(pipeline, "cover_image")
+    video, video_sha256, video_size = _approved_file(pipeline, "full_mp4")
+    cover, cover_sha256, cover_size = _approved_file(pipeline, "cover_image")
+    contract = _delivery_contract(
+        task,
+        video_sha256=video_sha256,
+        video_size=video_size,
+        cover_sha256=cover_sha256,
+        cover_size=cover_size,
+    )
+    contract_hash = _contract_hash(contract)
     archive = _build_delivery_archive(video, cover)
     sha256 = _sha256(archive)
     size_bytes = archive.stat().st_size
@@ -178,7 +220,11 @@ def upload_approved_publishing_assets(
         payload={"current_phase": "awaiting_bilibili_publish"},
     )
     final_task = projection.get("task") if isinstance(projection.get("task"), dict) else {}
-    if not final_task.get("delivery_ready") or final_task.get("publication_status") != "ready":
+    if (
+        not final_task.get("archive_ready")
+        or not final_task.get("delivery_ready")
+        or final_task.get("publication_status") != "ready"
+    ):
         raise PublishingDeliveryError("发布管理未确认完整交付物，拒绝推进流程")
 
     def mutate(current_pipeline: dict[str, Any]) -> None:
@@ -190,6 +236,13 @@ def upload_approved_publishing_assets(
             "remote_publication_status": "ready",
             "remote_current_phase": "awaiting_bilibili_publish",
             "uploaded_assets": [confirmed],
+            "delivery_contract": {
+                "status": "uploaded",
+                "confirmed_by": "explicit_cli_flag",
+                "contract_hash": contract_hash,
+                "contract": contract,
+                "uploaded_at": now_iso(),
+            },
         })
         current_pipeline["publishing"] = current_publishing
         phases = current_pipeline.get("phases") if isinstance(current_pipeline.get("phases"), dict) else {}
@@ -202,4 +255,11 @@ def upload_approved_publishing_assets(
         current_pipeline["updated_at"] = now_iso()
 
     atomic_update_pipeline(pipeline_file, mutate)
-    return {"ok": True, "task_id": task_id, "assets": [confirmed], "task": final_task, "legacy_cleanup": cleaned.get("task")}
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "assets": [confirmed],
+        "delivery_contract": {"contract_hash": contract_hash, "contract": contract},
+        "task": final_task,
+        "legacy_cleanup": cleaned.get("task"),
+    }

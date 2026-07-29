@@ -802,7 +802,13 @@ def cmd_reopen_publishing(args: argparse.Namespace) -> None:
 def cmd_upload_publishing_assets(args: argparse.Namespace) -> None:
     from .publishing_delivery import upload_approved_publishing_assets
 
-    _json_out(upload_approved_publishing_assets(args.pipeline, master_url=args.master_url))
+    _json_out(
+        upload_approved_publishing_assets(
+            args.pipeline,
+            master_url=args.master_url,
+            confirm_upload_archive=bool(args.confirm_upload_archive),
+        )
+    )
 
 
 def cmd_record_blue_link_backfill(args: argparse.Namespace) -> None:
@@ -1546,6 +1552,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("upload-publishing-assets", help="将已验收成片和封面打包为 ZIP 后上传到既有发布管理")
     p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json")
     p.add_argument("--master-url", default=DEFAULT_MASTER_API_BASE_URL, help="Master API 地址")
+    p.add_argument("--confirm-upload-archive", action="store_true", help="确认上传压缩包到发布管理")
 
     p = sub.add_parser("publishing-context", help="读取正式成片绑定的 Master 账号 ID、B站 MID 和方案 ID")
     p.add_argument("production_run_id", type=int)
