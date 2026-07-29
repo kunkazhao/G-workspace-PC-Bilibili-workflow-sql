@@ -1543,7 +1543,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("production_run_id", type=int)
     p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json")
 
-    p = sub.add_parser("upload-publishing-assets", help="将已验收成片和封面上传到既有发布管理")
+    p = sub.add_parser("upload-publishing-assets", help="将已验收成片和封面打包为 ZIP 后上传到既有发布管理")
     p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json")
     p.add_argument("--master-url", default=DEFAULT_MASTER_API_BASE_URL, help="Master API 地址")
 

@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import os
+import tempfile
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +90,28 @@ def _put_file(url: str, path: Path, headers: dict[str, Any]) -> None:
         raise PublishingDeliveryError(f"上传 {path.name} 到发布管理失败: {exc}") from exc
 
 
+def _build_delivery_archive(video: Path, cover: Path) -> Path:
+    output = video.parent / f"{video.parent.name}-发布素材.zip"
+    with tempfile.NamedTemporaryFile(
+        dir=output.parent,
+        prefix=f".{output.stem}-",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+    try:
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+            archive.write(video, arcname=video.name)
+            archive.write(cover, arcname=cover.name)
+        with zipfile.ZipFile(temporary) as archive:
+            if archive.testzip() is not None:
+                raise PublishingDeliveryError("发布素材压缩包校验失败")
+        os.replace(temporary, output)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return output
+
+
 def upload_approved_publishing_assets(
     pipeline_path: str | Path,
     *,
@@ -109,37 +134,42 @@ def upload_approved_publishing_assets(
     if safe_text(task.get("blue_link_status")) != "complete":
         raise PublishingDeliveryError("补充蓝链尚未完整，不能上传发布交付物")
 
-    assets = (("video", "full_mp4"), ("cover", "cover_image"))
-    confirmed: list[dict[str, Any]] = []
-    for kind, approval_key in assets:
-        path, sha256, size_bytes = _approved_file(pipeline, approval_key)
-        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        metadata = {
-            "kind": kind,
-            "filename": path.name,
-            "content_type": content_type,
-            "size_bytes": size_bytes,
-            "sha256": sha256,
-        }
-        presign = _request_json(
-            "POST",
-            f"{base_url}/api/publishing/tasks/{task_id}/assets/presign",
-            workspace_id=workspace_id,
-            payload=metadata,
-        )
-        upload_url = safe_text(presign.get("upload_url"))
-        object_key = safe_text(presign.get("object_key"))
-        headers = presign.get("headers") if isinstance(presign.get("headers"), dict) else {}
-        if not upload_url or not object_key:
-            raise PublishingDeliveryError("Master 未返回有效的上传地址")
-        _put_file(upload_url, path, headers)
-        response = _request_json(
-            "POST",
-            f"{base_url}/api/publishing/tasks/{task_id}/assets/confirm",
-            workspace_id=workspace_id,
-            payload={**metadata, "object_key": object_key},
-        )
-        confirmed.append({"kind": kind, "path": str(path), "sha256": sha256, "size_bytes": size_bytes, "object_key": object_key, "task": response.get("task")})
+    video, _, _ = _approved_file(pipeline, "full_mp4")
+    cover, _, _ = _approved_file(pipeline, "cover_image")
+    archive = _build_delivery_archive(video, cover)
+    sha256 = _sha256(archive)
+    size_bytes = archive.stat().st_size
+    metadata = {
+        "kind": "archive",
+        "filename": archive.name,
+        "content_type": mimetypes.guess_type(archive.name)[0] or "application/zip",
+        "size_bytes": size_bytes,
+        "sha256": sha256,
+    }
+    presign = _request_json(
+        "POST",
+        f"{base_url}/api/publishing/tasks/{task_id}/assets/presign",
+        workspace_id=workspace_id,
+        payload=metadata,
+    )
+    upload_url = safe_text(presign.get("upload_url"))
+    object_key = safe_text(presign.get("object_key"))
+    headers = presign.get("headers") if isinstance(presign.get("headers"), dict) else {}
+    if not upload_url or not object_key:
+        raise PublishingDeliveryError("Master 未返回有效的上传地址")
+    _put_file(upload_url, archive, headers)
+    _request_json(
+        "POST",
+        f"{base_url}/api/publishing/tasks/{task_id}/assets/confirm",
+        workspace_id=workspace_id,
+        payload={**metadata, "object_key": object_key},
+    )
+    confirmed = {"kind": "archive", "path": str(archive), "sha256": sha256, "size_bytes": size_bytes, "object_key": object_key}
+    cleaned = _request_json(
+        "DELETE",
+        f"{base_url}/api/publishing/tasks/{task_id}/assets/legacy",
+        workspace_id=workspace_id,
+    )
 
     projection = _request_json(
         "PATCH",
@@ -159,7 +189,7 @@ def upload_approved_publishing_assets(
             "assets_uploaded_at": now_iso(),
             "remote_publication_status": "ready",
             "remote_current_phase": "awaiting_bilibili_publish",
-            "uploaded_assets": [{key: value for key, value in item.items() if key != "task"} for item in confirmed],
+            "uploaded_assets": [confirmed],
         })
         current_pipeline["publishing"] = current_publishing
         phases = current_pipeline.get("phases") if isinstance(current_pipeline.get("phases"), dict) else {}
@@ -172,4 +202,4 @@ def upload_approved_publishing_assets(
         current_pipeline["updated_at"] = now_iso()
 
     atomic_update_pipeline(pipeline_file, mutate)
-    return {"ok": True, "task_id": task_id, "assets": [{key: value for key, value in item.items() if key != "task"} for item in confirmed], "task": final_task}
+    return {"ok": True, "task_id": task_id, "assets": [confirmed], "task": final_task, "legacy_cleanup": cleaned.get("task")}
