@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from .episode_lifecycle import assert_pipeline_actionable_payload
+
 
 def sha256_file(path: str | Path) -> str:
     digest = hashlib.sha256()
@@ -63,6 +65,7 @@ def atomic_update_pipeline(
     payload = json.loads(pipeline.read_text(encoding="utf-8-sig"))
     if not isinstance(payload, dict):
         raise ValueError("pipeline must contain a JSON object")
+    assert_pipeline_actionable_payload(payload)
     ensure_episode_id(payload, pipeline_path=pipeline)
     update(payload)
     staged = pipeline.with_name(f".{pipeline.name}.{uuid4().hex}.tmp")

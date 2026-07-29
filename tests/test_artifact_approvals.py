@@ -4,11 +4,13 @@ from pathlib import Path
 import pytest
 
 from bworkflow_sql.artifact_approvals import (
+    atomic_update_pipeline,
     confirm_intro_video,
     resolve_approved_intro_video,
     sha256_file,
     write_production_confirmation,
 )
+from bworkflow_sql.episode_lifecycle import EpisodeLifecycleError
 
 
 def test_confirm_intro_video_writes_bound_approval_atomically(tmp_path: Path) -> None:
@@ -90,3 +92,25 @@ def test_resolve_approved_intro_video_verifies_video_and_source_plan(tmp_path: P
     intro.write_bytes(b"changed")
     with pytest.raises(ValueError, match="size has changed|hash has changed"):
         resolve_approved_intro_video(pipeline)
+
+
+def test_atomic_pipeline_updates_reject_a_superseded_episode(tmp_path: Path) -> None:
+    pipeline = tmp_path / ".pipeline.json"
+    pipeline.write_text(
+        json.dumps(
+            {
+                "episode_id": "episode:old",
+                "lifecycle": {
+                    "status": "superseded",
+                    "superseded_by_episode_id": "episode:new",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EpisodeLifecycleError) as error:
+        atomic_update_pipeline(pipeline, lambda payload: payload.update({"changed": True}))
+
+    assert error.value.code == "episode_superseded"
+    assert "changed" not in json.loads(pipeline.read_text(encoding="utf-8"))

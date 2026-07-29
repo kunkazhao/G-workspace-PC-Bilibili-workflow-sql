@@ -27,6 +27,7 @@ from typing import Any
 
 from .cutme_intro import preflight_intro_plan_for_cutme
 from .cutme_adapter import CutMeAdapterError
+from .episode_lifecycle import EpisodeLifecycleError, assert_pipeline_actionable
 from .render_gate import RenderBusyError
 from .public_contracts import build_workflow_observation, build_workflow_observation_error
 from .phase7_selection import (
@@ -56,6 +57,12 @@ def _json_err(message: str, code: int = 1) -> None:
         file=sys.stderr,
     )
     sys.exit(code)
+
+
+def _assert_actionable_pipeline_arg(args: argparse.Namespace) -> None:
+    pipeline = str(getattr(args, "pipeline", "") or "").strip()
+    if pipeline:
+        assert_pipeline_actionable(pipeline)
 
 
 def _init() -> tuple:
@@ -1848,7 +1855,26 @@ def main() -> None:
     )
 
     try:
+        _assert_actionable_pipeline_arg(args)
         DISPATCH[args.command](args)
+    except EpisodeLifecycleError as exc:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "status": "blocked",
+                    "error": {
+                        "code": exc.code,
+                        "message": str(exc),
+                        "replacement_episode_id": exc.replacement_episode_id,
+                        "retryable": False,
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
     except Phase7SelectionError as exc:
         print(
             json.dumps(
