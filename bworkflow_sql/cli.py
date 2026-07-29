@@ -781,6 +781,30 @@ def cmd_account_master_binding(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_reopen_publishing(args: argparse.Namespace) -> None:
+    from .artifact_approvals import atomic_update_pipeline
+
+    _, repo, _, _ = _init()
+    pipeline = Path(args.pipeline).expanduser().resolve()
+    production = repo.reopen_production_publishing(args.production_run_id)
+
+    def mutate(payload: dict[str, Any]) -> None:
+        phases = payload.get("phases") if isinstance(payload.get("phases"), dict) else {}
+        phases["publishing"] = {"status": "ready_for_upload", "production_run_id": args.production_run_id}
+        phases.pop("blue_link_backfill", None)
+        payload["phases"] = phases
+        payload["current_phase"] = "publishing"
+        payload["next_action"] = "补充蓝链完成后，上传已验收的成片和封面到发布管理。"
+    atomic_update_pipeline(pipeline, mutate)
+    _json_out({"ok": True, "production": production, "pipeline": str(pipeline)})
+
+
+def cmd_upload_publishing_assets(args: argparse.Namespace) -> None:
+    from .publishing_delivery import upload_approved_publishing_assets
+
+    _json_out(upload_approved_publishing_assets(args.pipeline, master_url=args.master_url))
+
+
 def cmd_record_blue_link_backfill(args: argparse.Namespace) -> None:
     from .blue_link_backfill import MasterBlueLinkBackfillClient
     from .production_history import ProductionHistoryService
@@ -1515,6 +1539,14 @@ def build_parser() -> argparse.ArgumentParser:
     destination.add_argument("--archive-dir", default="", help="覆盖项目目录的最终归档路径；默认使用当前月份目录/原项目目录名")
     destination.add_argument("--current-path", default="", help="项目目录已整体手工移动时，传入其中正式成片的当前完整路径")
 
+    p = sub.add_parser("reopen-publishing", help="纠正误标的已发布状态，恢复为待上传交付物")
+    p.add_argument("production_run_id", type=int)
+    p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json")
+
+    p = sub.add_parser("upload-publishing-assets", help="将已验收成片和封面上传到既有发布管理")
+    p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json")
+    p.add_argument("--master-url", default=DEFAULT_MASTER_API_BASE_URL, help="Master API 地址")
+
     p = sub.add_parser("publishing-context", help="读取正式成片绑定的 Master 账号 ID、B站 MID 和方案 ID")
     p.add_argument("production_run_id", type=int)
 
@@ -1813,6 +1845,8 @@ DISPATCH = {
     "rerender-production-preflight": cmd_rerender_production_preflight,
     "rerender-production": cmd_rerender_production,
     "complete-publishing": cmd_complete_publishing,
+    "reopen-publishing": cmd_reopen_publishing,
+    "upload-publishing-assets": cmd_upload_publishing_assets,
     "publishing-context": cmd_publishing_context,
     "account-master-binding": cmd_account_master_binding,
     "record-blue-link-backfill": cmd_record_blue_link_backfill,

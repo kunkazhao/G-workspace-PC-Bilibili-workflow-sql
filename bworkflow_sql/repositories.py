@@ -285,6 +285,27 @@ class Repository:
             row = conn.execute("SELECT * FROM production_runs WHERE id=?", (production_run_id,)).fetchone()
         return dict(row)
 
+    def reopen_production_publishing(self, production_run_id: int) -> dict[str, Any]:
+        with self.db.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE production_runs
+                SET publish_status='confirmed', published_at=NULL, archived_at=NULL,
+                    published_video_url='', bvid='', aid='', video_owner_mid='',
+                    blue_link_backfill_id='', blue_link_backfill_status='',
+                    blue_link_matched_count=0, blue_link_unresolved_count=0,
+                    blue_link_browser_pending_count=0, blue_link_browser_deferred_count=0,
+                    blue_link_browser_suspended_count=0, blue_link_title_candidate_count=0,
+                    blue_link_master_pending_count=0
+                WHERE id=?
+                """,
+                (production_run_id,),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"正式成片记录不存在: {production_run_id}")
+            row = conn.execute("SELECT * FROM production_runs WHERE id=?", (production_run_id,)).fetchone()
+        return dict(row)
+
     def record_blue_link_backfill(
         self,
         production_run_id: int,
