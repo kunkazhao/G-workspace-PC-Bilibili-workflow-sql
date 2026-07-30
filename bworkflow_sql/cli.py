@@ -794,7 +794,7 @@ def cmd_reopen_publishing(args: argparse.Namespace) -> None:
         phases.pop("blue_link_backfill", None)
         payload["phases"] = phases
         payload["current_phase"] = "publishing"
-        payload["next_action"] = "补充蓝链完成后，上传已验收的成片和封面到发布管理。"
+        payload["next_action"] = "补充蓝链或普通商品链接任一分支就绪后，上传已验收的成片和封面到发布管理。"
     atomic_update_pipeline(pipeline, mutate)
     _json_out({"ok": True, "production": production, "pipeline": str(pipeline)})
 

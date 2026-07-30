@@ -119,21 +119,35 @@ def _delivery_contract(task: dict[str, Any], *, video_sha256: str, video_size: i
         for field, label in (
             ("title", "标题"),
             ("description", "简介"),
-            ("product_links", "商品链接"),
         )
         if not safe_text(task.get(field))
     ]
-    if safe_text(task.get("blue_link_status")) != "complete":
-        missing.append("补充蓝链")
+    product_links = safe_text(task.get("product_links"))
+    pinned_comment = safe_text(task.get("pinned_comment"))
+    blue_link_status = safe_text(task.get("blue_link_status"))
+    blue_links_ready = bool(pinned_comment and blue_link_status == "complete")
+    if not product_links and not blue_links_ready:
+        missing.append("链接资料（完整蓝链或普通商品链接）")
     if missing:
         raise PublishingDeliveryError(f"发布交付合同未满足：{'、'.join(missing)}未完整，不能上传压缩包")
+    link_material = (
+        {
+            "branch": "blue_links",
+            "pinned_comment_sha256": hashlib.sha256(pinned_comment.encode("utf-8")).hexdigest(),
+            "blue_link_status": blue_link_status,
+        }
+        if blue_links_ready
+        else {
+            "branch": "product_links",
+            "product_links_sha256": hashlib.sha256(product_links.encode("utf-8")).hexdigest(),
+        }
+    )
     return {
-        "version": 1,
+        "version": 2,
         "task_id": safe_text(task.get("id")),
         "title_sha256": hashlib.sha256(safe_text(task.get("title")).encode("utf-8")).hexdigest(),
         "description_sha256": hashlib.sha256(safe_text(task.get("description")).encode("utf-8")).hexdigest(),
-        "product_links_sha256": hashlib.sha256(safe_text(task.get("product_links")).encode("utf-8")).hexdigest(),
-        "blue_link_status": "complete",
+        "link_material": link_material,
         "artifacts": {
             "full_mp4": {"sha256": video_sha256, "size_bytes": video_size},
             "cover_image": {"sha256": cover_sha256, "size_bytes": cover_size},
