@@ -160,6 +160,21 @@ def _contract_hash(contract: dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _read_r2_usage(base_url: str, workspace_id: str) -> tuple[dict[str, Any] | None, str]:
+    try:
+        response = _request_json(
+            "GET",
+            f"{base_url}/api/publishing/r2-usage",
+            workspace_id=workspace_id,
+        )
+    except PublishingDeliveryError as exc:
+        return None, str(exc)
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None, "Master 未返回有效的 R2 存储用量"
+    return usage, ""
+
+
 def upload_approved_publishing_assets(
     pipeline_path: str | Path,
     *,
@@ -240,6 +255,7 @@ def upload_approved_publishing_assets(
         or final_task.get("publication_status") != "ready"
     ):
         raise PublishingDeliveryError("发布管理未确认完整交付物，拒绝推进流程")
+    r2_usage, r2_usage_error = _read_r2_usage(base_url, workspace_id)
 
     def mutate(current_pipeline: dict[str, Any]) -> None:
         current_publishing = current_pipeline.get("publishing") if isinstance(current_pipeline.get("publishing"), dict) else {}
@@ -276,4 +292,6 @@ def upload_approved_publishing_assets(
         "delivery_contract": {"contract_hash": contract_hash, "contract": contract},
         "task": final_task,
         "legacy_cleanup": cleaned.get("task"),
+        "r2_usage": r2_usage,
+        "r2_usage_error": r2_usage_error,
     }

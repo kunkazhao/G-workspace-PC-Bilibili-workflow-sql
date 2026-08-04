@@ -514,14 +514,9 @@ class ProductionHistoryService:
         })
         phases["publishing"] = publishing
         existing_backfill = phases.get("blue_link_backfill") if isinstance(phases.get("blue_link_backfill"), dict) else {}
-        if safe_text(existing_backfill.get("status")) not in {"complete", "partial"}:
-            existing_backfill = {
-                "status": "pending",
-                "production_run_id": production_run_id,
-                "matched_count": 0,
-                "unresolved_count": 0,
-            }
-        phases["blue_link_backfill"] = existing_backfill
+        backfill_status = safe_text(existing_backfill.get("status"))
+        if existing_backfill:
+            phases["blue_link_backfill"] = existing_backfill
         paths = payload.get("paths") if isinstance(payload.get("paths"), dict) else {}
         paths["final_mp4"] = str(target)
         paths["full_mp4"] = str(target)
@@ -532,16 +527,12 @@ class ProductionHistoryService:
             paths["product_mp4_relative"] = product_path.name
         payload["phases"] = phases
         payload["paths"] = paths
-        backfill_status = safe_text(existing_backfill.get("status"))
-        if backfill_status == "complete":
+        if backfill_status != "partial":
             payload["current_phase"] = "done"
-            payload["next_action"] = "视频已发布，蓝链已全部回流。"
-        elif backfill_status == "partial":
-            payload["current_phase"] = "blue_link_backfill"
-            payload["next_action"] = f"仍有 {int(existing_backfill.get('unresolved_count') or 0)} 条蓝链待浏览器补解析。"
+            payload["next_action"] = "视频已发布并归档；本期已完成。蓝链回流仅在用户明确要求时执行。"
         else:
             payload["current_phase"] = "blue_link_backfill"
-            payload["next_action"] = "视频已发布并归档；请提供 B站视频地址，提取置顶评论蓝链并回流。"
+            payload["next_action"] = f"仍有 {int(existing_backfill.get('unresolved_count') or 0)} 条已显式启动的蓝链回流待处理。"
         payload["updated_at"] = timestamp
         try:
             _validate_migrated_approvals(payload)

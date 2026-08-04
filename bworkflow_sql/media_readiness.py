@@ -7,6 +7,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
+from .asset_paths import project_asset_scan_roots
+from .settings import DEFAULT_VIDEO_ROOT
 from .utils import safe_text
 
 
@@ -19,6 +21,7 @@ def audit_product_video_media(
     asset_bindings: list[dict[str, Any]],
     *,
     video_root: str | Path | None = None,
+    project: dict[str, Any] | None = None,
     probe_video: ProbeVideo | None = None,
 ) -> dict[str, Any]:
     """Read-only local-video audit.
@@ -72,13 +75,19 @@ def audit_product_video_media(
     root = Path(root_text) if root_text else None
     if root is not None and root.is_dir():
         uid_tokens = {uid.casefold(): uid for uid in active}
-        for path in root.rglob("*"):
-            if not path.is_file() or path.suffix.casefold() not in VIDEO_SUFFIXES:
-                continue
-            name = path.name.casefold()
-            for token, uid in uid_tokens.items():
-                if token in name:
-                    add_candidate(uid, path, discovery="filesystem_scan")
+        scan_roots = (
+            project_asset_scan_roots(root, project, default_root=DEFAULT_VIDEO_ROOT)
+            if project is not None
+            else [root]
+        )
+        for scan_root in scan_roots:
+            for path in scan_root.rglob("*"):
+                if not path.is_file() or path.suffix.casefold() not in VIDEO_SUFFIXES:
+                    continue
+                name = path.name.casefold()
+                for token, uid in uid_tokens.items():
+                    if token in name:
+                        add_candidate(uid, path, discovery="filesystem_scan")
 
     probe = probe_video or probe_local_video
     items: list[dict[str, Any]] = []
@@ -188,6 +197,11 @@ def snapshot_verified_product_videos(
 
 def _evaluate_candidate(candidate: dict[str, Any], *, probe: ProbeVideo) -> dict[str, Any]:
     result = dict(candidate)
+    discoveries = set(result.get("discoveries") or [])
+    statuses = set(result.get("binding_statuses") or [])
+    if "asset_binding" in discoveries and "filesystem_scan" not in discoveries and statuses and "ready" not in statuses:
+        result.update({"usable": False, "rejection": "binding_not_ready_and_not_rediscovered"})
+        return result
     path = Path(safe_text(result.get("path")))
     if not path.is_file():
         result.update({"usable": False, "rejection": "file_missing", "size": 0})

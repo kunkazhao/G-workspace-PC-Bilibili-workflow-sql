@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .codex_tmp/
 /work/
+*.log
 .env
 .env.*
 !.env.example

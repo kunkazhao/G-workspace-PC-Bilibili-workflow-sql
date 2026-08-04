@@ -428,6 +428,86 @@ def test_run_final_video_pipeline_uses_one_adapter_call_and_preserves_cutme_resu
     assert saved_pipeline["phases"]["assembly"]["cutme_timings"]["render_ms"] == 4300
 
 
+def test_episode_product_order_lock_round_trips_and_rejects_changed_product_set(tmp_path: Path):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    pipeline_path = tmp_path / ".pipeline.json"
+    pipeline_path.write_text(
+        json.dumps(
+            {
+                "episode_id": "episode:locked-order",
+                "phases": {"assembly": {}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    locked = pipeline_module._persist_episode_product_order_lock(
+        pipeline_path,
+        episode_id="episode:locked-order",
+        product_uids=["P003", "P001", "P002"],
+        expected_product_uids=["P001", "P002", "P003"],
+        source="first_formal_render_package",
+    )
+
+    assert locked == ["P003", "P001", "P002"]
+    assert pipeline_module._read_episode_product_order_lock(
+        pipeline_path,
+        episode_id="episode:locked-order",
+        expected_product_uids=["P002", "P003", "P001"],
+    ) == ["P003", "P001", "P002"]
+
+    with pytest.raises(
+        pipeline_module.ProductOrderLockError,
+        match="product_order_reconfirmation_required",
+    ) as caught:
+        pipeline_module._read_episode_product_order_lock(
+            pipeline_path,
+            episode_id="episode:locked-order",
+            expected_product_uids=["P001", "P002", "P004"],
+        )
+
+    assert caught.value.code == "product_order_reconfirmation_required"
+
+
+def test_phase7_product_uids_are_read_from_confirmed_source_snapshot():
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    assert pipeline_module._product_uids_from_phase7_selection(
+        {
+            "selection": {"mode": "top"},
+            "source_snapshot": {"product_uids": ["P003", "P001", "P002"]},
+        }
+    ) == ["P003", "P001", "P002"]
+
+
+def test_product_order_can_be_backfilled_from_successful_run_manifest(tmp_path: Path):
+    import bworkflow_sql.final_video_pipeline as pipeline_module
+
+    manifest_path = tmp_path / "final-video.run-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "kind": "bworkflow.final_video_run",
+                "episode": {"id": "episode:locked-order"},
+                "segments": {
+                    "products": [
+                        {"position": 3, "uid": "P003"},
+                        {"position": 1, "uid": "P001"},
+                        {"position": 2, "uid": "P002"},
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert pipeline_module._product_uids_from_run_manifest(
+        manifest_path,
+        episode_id="episode:locked-order",
+    ) == ["P001", "P002", "P003"]
+
+
 def test_run_final_video_pipeline_cutme_failure_stops_before_post_processing_or_writeback(
     tmp_path: Path,
     monkeypatch,

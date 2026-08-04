@@ -19,6 +19,7 @@ from .production_delivery import resolve_pipeline_output_dir, resolve_project_de
 from .phase7_selection import validated_phase7_selection
 from .production_recipe import build_production_recipe, write_production_recipe
 from .artifact_approvals import resolve_approved_intro_video
+from .artifact_approvals import atomic_update_pipeline
 from .final_spoken_script import materialize_final_spoken_script
 from .render_gate import acquire_production_render_slot, build_render_owner
 from .media_readiness import snapshot_verified_product_videos
@@ -26,6 +27,197 @@ from .media_readiness import snapshot_verified_product_videos
 Runner = Callable[..., Any]
 ProbeVideo = Callable[[Path], dict[str, Any]]
 MeasureLoudness = Callable[[Path], dict[str, Any]]
+
+PRODUCT_ORDER_LOCK_VERSION = 1
+
+
+class ProductOrderLockError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+
+
+def _normalized_product_uids(product_uids: list[str]) -> list[str]:
+    normalized = [safe_text(uid) for uid in product_uids]
+    if not normalized or any(not uid for uid in normalized):
+        raise ProductOrderLockError(
+            "product_order_lock_invalid",
+            "product order must contain non-empty UIDs",
+        )
+    folded = [uid.casefold() for uid in normalized]
+    if len(folded) != len(set(folded)):
+        raise ProductOrderLockError(
+            "product_order_lock_invalid",
+            "product order contains duplicate UIDs",
+        )
+    return normalized
+
+
+def _product_order_hash(episode_id: str, product_uids: list[str]) -> str:
+    encoded = json.dumps(
+        {"episode_id": safe_text(episode_id), "product_uids": product_uids},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _assert_product_order_set(
+    product_uids: list[str],
+    expected_product_uids: list[str],
+) -> None:
+    actual = {uid.casefold(): uid for uid in _normalized_product_uids(product_uids)}
+    expected = {
+        uid.casefold(): uid for uid in _normalized_product_uids(expected_product_uids)
+    }
+    if actual.keys() == expected.keys():
+        return
+    added = [expected[key] for key in sorted(expected.keys() - actual.keys())]
+    removed = [actual[key] for key in sorted(actual.keys() - expected.keys())]
+    raise ProductOrderLockError(
+        "product_order_reconfirmation_required",
+        "episode product set changed; confirm Phase 7 again before rendering "
+        f"(added={added}, removed={removed})",
+    )
+
+
+def _validated_product_order_lock(
+    lock: dict[str, Any],
+    *,
+    episode_id: str,
+    expected_product_uids: list[str],
+) -> list[str]:
+    product_uids = _normalized_product_uids(list(lock.get("product_uids") or []))
+    if (
+        lock.get("version") != PRODUCT_ORDER_LOCK_VERSION
+        or safe_text(lock.get("status")) != "locked"
+        or safe_text(lock.get("episode_id")) != safe_text(episode_id)
+        or safe_text(lock.get("product_uids_hash"))
+        != _product_order_hash(episode_id, product_uids)
+    ):
+        raise ProductOrderLockError(
+            "product_order_lock_invalid",
+            "episode product order lock is missing valid identity or hash evidence",
+        )
+    _assert_product_order_set(product_uids, expected_product_uids)
+    return product_uids
+
+
+def _read_episode_product_order_lock(
+    pipeline_path: str | Path,
+    *,
+    episode_id: str,
+    expected_product_uids: list[str],
+) -> list[str] | None:
+    pipeline = Path(pipeline_path).expanduser().resolve()
+    payload = json.loads(pipeline.read_text(encoding="utf-8-sig"))
+    phases = payload.get("phases") if isinstance(payload.get("phases"), dict) else {}
+    assembly = phases.get("assembly") if isinstance(phases.get("assembly"), dict) else {}
+    lock = assembly.get("product_order_lock")
+    if not isinstance(lock, dict):
+        return None
+    return _validated_product_order_lock(
+        lock,
+        episode_id=episode_id,
+        expected_product_uids=expected_product_uids,
+    )
+
+
+def _persist_episode_product_order_lock(
+    pipeline_path: str | Path,
+    *,
+    episode_id: str,
+    product_uids: list[str],
+    expected_product_uids: list[str],
+    source: str,
+    source_run_manifest_path: str | Path | None = None,
+) -> list[str]:
+    ordered_uids = _normalized_product_uids(product_uids)
+    _assert_product_order_set(ordered_uids, expected_product_uids)
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    lock = {
+        "version": PRODUCT_ORDER_LOCK_VERSION,
+        "status": "locked",
+        "episode_id": safe_text(episode_id),
+        "product_uids": ordered_uids,
+        "product_uids_hash": _product_order_hash(episode_id, ordered_uids),
+        "source": safe_text(source),
+        "locked_at": timestamp,
+    }
+    if source_run_manifest_path:
+        lock["source_run_manifest_path"] = str(
+            Path(source_run_manifest_path).expanduser().resolve()
+        )
+
+    def update(payload: dict[str, Any]) -> None:
+        if safe_text(payload.get("episode_id")) != safe_text(episode_id):
+            raise ProductOrderLockError(
+                "product_order_lock_invalid",
+                "pipeline episode identity does not match the product order lock",
+            )
+        phases = payload.get("phases") if isinstance(payload.get("phases"), dict) else {}
+        assembly = phases.get("assembly") if isinstance(phases.get("assembly"), dict) else {}
+        existing = assembly.get("product_order_lock")
+        if isinstance(existing, dict):
+            existing_uids = _validated_product_order_lock(
+                existing,
+                episode_id=episode_id,
+                expected_product_uids=expected_product_uids,
+            )
+            if existing_uids != ordered_uids:
+                raise ProductOrderLockError(
+                    "product_order_lock_conflict",
+                    "episode already has a different locked product order",
+                )
+            return
+        assembly["product_order_lock"] = lock
+        phases["assembly"] = assembly
+        payload["phases"] = phases
+        payload["updated_at"] = timestamp
+
+    saved = atomic_update_pipeline(pipeline_path, update)
+    saved_lock = saved["phases"]["assembly"]["product_order_lock"]
+    return list(saved_lock["product_uids"])
+
+
+def _product_uids_from_package(package_path: str | Path) -> list[str]:
+    payload = json.loads(Path(package_path).read_text(encoding="utf-8-sig"))
+    product_uids = [
+        safe_text(segment.get("productUid"))
+        for segment in payload.get("segments") or []
+        if isinstance(segment, dict)
+        and safe_text(segment.get("type")) == "product_recommendation"
+    ]
+    return _normalized_product_uids(product_uids)
+
+
+def _product_uids_from_phase7_selection(selection: dict[str, Any]) -> list[str]:
+    source_snapshot = (
+        selection.get("source_snapshot")
+        if isinstance(selection.get("source_snapshot"), dict)
+        else {}
+    )
+    return list(source_snapshot.get("product_uids") or [])
+
+
+def _product_uids_from_run_manifest(
+    run_manifest_path: str | Path,
+    *,
+    episode_id: str,
+) -> list[str]:
+    payload = json.loads(Path(run_manifest_path).read_text(encoding="utf-8-sig"))
+    if safe_text(payload.get("kind")) != "bworkflow.final_video_run" or safe_text(
+        (payload.get("episode") or {}).get("id")
+    ) != safe_text(episode_id):
+        raise ProductOrderLockError(
+            "product_order_lock_invalid",
+            "run manifest does not belong to the requested episode",
+        )
+    segments = payload.get("segments") if isinstance(payload.get("segments"), dict) else {}
+    products = [item for item in segments.get("products") or [] if isinstance(item, dict)]
+    products.sort(key=lambda item: int(item.get("position") or 0))
+    return _normalized_product_uids([safe_text(item.get("uid")) for item in products])
 
 
 class _TimingCollector:
@@ -171,6 +363,8 @@ def run_final_video_pipeline(
             "media_snapshot": media_snapshot,
         }
     phase7_selection = None
+    expected_product_uids: list[str] = []
+    locked_product_uids: list[str] | None = None
     if pipeline_path:
         phase7_selection = validated_phase7_selection(
             pipeline_path,
@@ -181,6 +375,12 @@ def run_final_video_pipeline(
             product_order_strategy=product_order_strategy,
             mode=mode,
             top_uids=top_uids,
+        )
+        expected_product_uids = _product_uids_from_phase7_selection(phase7_selection)
+        locked_product_uids = _read_episode_product_order_lock(
+            pipeline_path,
+            episode_id=episode_id,
+            expected_product_uids=expected_product_uids,
         )
     timings = _TimingCollector()
 
@@ -249,25 +449,30 @@ def run_final_video_pipeline(
         elif delivery_layout:
             target_mp4 = delivery_layout["full_mp4"]
 
+    package_kwargs = {
+        "account_label": account,
+        "output_mode": "final_mp4",
+        "product_media_mode": product_media_mode,
+        "product_order_strategy": product_order_strategy,
+        "mode": mode,
+        "top_uids": top_uids,
+        "product_card_template_id": product_card_template_id,
+        "package_output_path": str(package_path),
+        "subtitle_alignment": subtitle_mode,
+        "intro_video_path": str(intro_mp4) if intro_mp4 else None,
+        "intro_video_text": resolved_intro_text,
+        "include_outro": True,
+        "closing_text": DEFAULT_CLOSING_TEXT,
+        "dynamic_product_contexts": dynamic_preflight.get("contexts"),
+        "master_snapshot_id": safe_text(dynamic_preflight.get("snapshot_id")),
+        "episode_id": episode_id,
+    }
+    if locked_product_uids is not None:
+        package_kwargs["product_uids"] = locked_product_uids
     with timings.measure("render_package_ms"):
         package_result = workflow.prepare_product_recommendation_output(
             project_id,
-            account_label=account,
-            output_mode="final_mp4",
-            product_media_mode=product_media_mode,
-            product_order_strategy=product_order_strategy,
-            mode=mode,
-            top_uids=top_uids,
-            product_card_template_id=product_card_template_id,
-            package_output_path=str(package_path),
-            subtitle_alignment=subtitle_mode,
-            intro_video_path=str(intro_mp4) if intro_mp4 else None,
-            intro_video_text=resolved_intro_text,
-            include_outro=True,
-            closing_text=DEFAULT_CLOSING_TEXT,
-            dynamic_product_contexts=dynamic_preflight.get("contexts"),
-            master_snapshot_id=safe_text(dynamic_preflight.get("snapshot_id")),
-            episode_id=episode_id,
+            **package_kwargs,
         )
     if package_result.get("ok") is not True:
         return {
@@ -277,6 +482,20 @@ def run_final_video_pipeline(
         }
 
     package_path = _absolute_path(package_result["package_path"])
+    package_product_uids: list[str] = []
+    if pipeline_path and expected_product_uids:
+        package_product_uids = _product_uids_from_package(package_path)
+        locked_product_uids = _persist_episode_product_order_lock(
+            pipeline_path,
+            episode_id=episode_id,
+            product_uids=package_product_uids,
+            expected_product_uids=expected_product_uids,
+            source=(
+                "existing_episode_product_order"
+                if locked_product_uids is not None
+                else "first_formal_render_package"
+            ),
+        )
     if not intro_mp4:
         target_mp4 = (
             _absolute_path(output_path)
@@ -388,6 +607,7 @@ def run_final_video_pipeline(
         "account": account,
         "product_media_mode": product_media_mode,
         "product_order_strategy": product_order_strategy,
+        "locked_product_uids": locked_product_uids or package_product_uids or None,
         "subtitle_alignment": subtitle_mode,
         "product_card_template_id": safe_text(product_card_template_id) or None,
         "media_readiness": media_readiness,

@@ -102,6 +102,7 @@ def diagnose_template_flow(
         active_products,
         assets,
         video_root=safe_text(project.get("video_root")),
+        project=project,
     )
     selected_video_paths = media_readiness.get("selected_paths") or {}
     product_count = 0

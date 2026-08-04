@@ -286,6 +286,46 @@ def test_intro_preflight_records_blocked_pipeline_state(tmp_path: Path):
     assert saved["phases"]["intro_video"]["updated_at"] == saved["phases"]["intro_video"]["updated_at_utc"]
 
 
+def test_intro_preflight_clears_a_missing_old_candidate_path(tmp_path: Path):
+    source_plan = tmp_path / "intro_plan.json"
+    pipeline_path = tmp_path / ".pipeline.json"
+    _write_plan(source_plan)
+    asset_root = tmp_path / "assets"
+    category_dir = asset_root / "数码-桌面音响"
+    common_dir = asset_root / "1-通用"
+    category_dir.mkdir(parents=True)
+    common_dir.mkdir(parents=True)
+    for index in range(1, 4):
+        (category_dir / f"generic-{index}.mp4").write_bytes(b"")
+    (common_dir / "引导三连1.mp4").write_bytes(b"")
+    pipeline_path.write_text(
+        json.dumps(
+            {
+                "phases": {
+                    "intro_video": {
+                        "status": "awaiting_user_review",
+                        "accepted": False,
+                        "output_mp4_path": str(tmp_path / "missing-old-candidate.mp4"),
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    cutme_intro_module.preflight_intro_plan_for_cutme(
+        source_plan_path=source_plan,
+        project={"id": 23, "name": "数码-桌面音响"},
+        asset_root=asset_root,
+        pipeline_path=pipeline_path,
+    )
+
+    saved = json.loads(pipeline_path.read_text(encoding="utf-8"))
+    assert saved["phases"]["intro_video"]["status"] == "ready"
+    assert "output_mp4_path" not in saved["phases"]["intro_video"]
+
+
 def test_intro_preflight_rejects_recovered_intro_template(tmp_path: Path):
     source_plan = tmp_path / "intro_plan.json"
     _write_plan(source_plan)
@@ -340,7 +380,7 @@ def test_intro_preflight_rejects_selected_product_demo_outside_material_pool(tmp
     assert str(outside) in result["issues"][0]["path"]
 
 
-def test_intro_preflight_uses_intro_material_manifest_when_present(tmp_path: Path):
+def test_intro_preflight_uses_every_video_in_the_fixed_category_directory(tmp_path: Path):
     source_plan = tmp_path / "intro_plan.json"
     _write_plan(source_plan)
     asset_root = tmp_path / "assets"
@@ -348,16 +388,14 @@ def test_intro_preflight_uses_intro_material_manifest_when_present(tmp_path: Pat
     common_dir = asset_root / "1-通用"
     category_dir.mkdir(parents=True)
     common_dir.mkdir(parents=True)
-    for filename in ["approved-1.mp4", "approved-2.mp4", "unregistered.mp4"]:
+    for filename in ["generic-1.mp4", "generic-2.mp4", "generic-3.mp4"]:
         (category_dir / filename).write_bytes(b"")
     (common_dir / "引导三连1.mp4").write_bytes(b"")
     (category_dir / "intro-materials.json").write_text(
         json.dumps(
             {
                 "materials": [
-                    {"file": "approved-1.mp4", "role": "product_demo", "status": "approved"},
-                    {"file": "approved-2.mp4", "role": "product_demo", "approved": True},
-                    {"file": "unregistered.mp4", "role": "product_demo", "status": "draft"},
+                    {"file": "generic-1.mp4", "role": "product_demo", "status": "draft"},
                 ]
             },
             ensure_ascii=False,
@@ -371,11 +409,47 @@ def test_intro_preflight_uses_intro_material_manifest_when_present(tmp_path: Pat
         asset_root=asset_root,
     )
 
+    assert result["ok"] is True
+    assert result["requirements"]["product_demo"]["available"] == 3
+    assert result["requirements"]["product_demo"]["files"] == [
+        str(category_dir / f"generic-{index}.mp4") for index in range(1, 4)
+    ]
+    assert result["material_manifest_path"] == ""
+
+
+def test_intro_preflight_rejects_selected_demo_below_the_fixed_directory(tmp_path: Path):
+    source_plan = tmp_path / "intro_plan.json"
+    _write_plan(source_plan)
+    asset_root = tmp_path / "assets"
+    category_dir = asset_root / "数码-桌面音响"
+    common_dir = asset_root / "1-通用"
+    category_dir.mkdir(parents=True)
+    common_dir.mkdir(parents=True)
+    fixed_pool = [category_dir / f"generic-{index}.mp4" for index in range(1, 4)]
+    nested_dir = category_dir / "single-product"
+    nested_dir.mkdir()
+    nested = nested_dir / "review.mp4"
+    for path in [*fixed_pool, nested]:
+        path.write_bytes(b"")
+    triple = common_dir / "引导三连1.mp4"
+    triple.write_bytes(b"")
+    plan = json.loads(source_plan.read_text(encoding="utf-8"))
+    plan["selected_assets"] = {
+        "product_demo": [str(fixed_pool[0]), str(fixed_pool[1]), str(nested)],
+        "triple_cta": str(triple),
+    }
+    source_plan.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
+    result = cutme_intro_module.preflight_intro_plan_for_cutme(
+        source_plan_path=source_plan,
+        project={"id": 23, "name": "数码-桌面音响"},
+        asset_root=asset_root,
+    )
+
     assert result["ok"] is False
-    assert result["status"] == "blocked_missing_intro_demo"
-    assert result["requirements"]["product_demo"]["available"] == 2
-    assert all("unregistered.mp4" not in path for path in result["requirements"]["product_demo"]["files"])
-    assert result["material_manifest_path"] == str(category_dir / "intro-materials.json")
+    assert result["status"] == "blocked_invalid_intro_demo_source"
+    assert result["issues"][0]["type"] == "selected_product_demo_outside_fixed_pool"
+    assert result["issues"][0]["path"] == str(nested)
 
 
 def test_prepare_intro_plan_rejects_script_mismatch(tmp_path: Path):

@@ -546,6 +546,50 @@ def test_video_asset_sync_matches_overlapping_uid_tokens(tmp_path: Path):
     )["uid"] == "RELY018"
 
 
+def test_video_asset_sync_rejects_same_uid_from_another_category_folder(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    repo = Repository(db)
+    video_root = tmp_path / "videos"
+    headset_dir = video_root / "数码-头戴游戏耳机"
+    gamepad_dir = video_root / "数码-游戏手柄"
+    headset_dir.mkdir(parents=True)
+    gamepad_dir.mkdir(parents=True)
+    headset_video = headset_dir / "149元-YX044-雷蛇北海巨妖标准版X.mp4"
+    gamepad_video = gamepad_dir / "80元-YX044-墨将凌云.mp4"
+    headset_video.write_bytes(b"headset")
+    gamepad_video.write_bytes(b"gamepad")
+    project_id = db.upsert_project(
+        {
+            "name": "数码-头戴游戏耳机",
+            "category_parent_name": "数码",
+            "category_name": "头戴游戏耳机",
+            "video_root": str(video_root),
+        }
+    )
+    repo.upsert_products_from_master(
+        project_id,
+        [{"uid": "YX044", "title": "雷蛇北海巨妖标准版X", "price_label": "149元"}],
+    )
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO asset_bindings
+                (project_id, uid, asset_type, account_label, path, status, source_kind, created_at, updated_at)
+            VALUES (?, 'YX044', 'video', '', ?, 'ready', 'scan', 'now', 'now')
+            """,
+            (project_id, str(gamepad_video)),
+        )
+
+    result = SyncService(db).sync_assets(project_id, asset_type="video")
+
+    assert result["video"] == 1
+    assert [item["path"] for item in result["matched_items"]] == [str(headset_video)]
+    assert db.fetchone(
+        "SELECT status FROM asset_bindings WHERE project_id=? AND path=?",
+        (project_id, str(gamepad_video)),
+    )["status"] == "stale"
+
+
 def test_video_asset_sync_rejects_substring_uid_without_token_boundaries(tmp_path: Path):
     db = Database(tmp_path / "test.db")
     repo = Repository(db)

@@ -695,6 +695,7 @@ def build_product_recommendation_package(
 
     account = safe_text(account_label)
     frozen_products = repo.episode_products(project_id, episode_id)
+    explicit_product_order = bool(product_uids)
     products = _ordered_products(
         frozen_products if frozen_products is not None else repo.products(project_id, include_removed=False),
         mode=safe_text(mode) or "standard",
@@ -854,7 +855,7 @@ def build_product_recommendation_package(
         product_segments=product_segments,
         mode=safe_text(mode) or "standard",
         top_uids=top_uids or [],
-        product_order_strategy=order_strategy,
+        product_order_strategy="stable" if explicit_product_order else order_strategy,
     )
 
     if output_mode == "final_mp4" and intro_video_path:
@@ -1287,9 +1288,16 @@ def _ordered_products(
     top_uids: list[str],
     product_uids: list[str],
 ) -> list[dict[str, Any]]:
-    selected = {uid.casefold() for uid in product_uids}
-    if selected:
-        products = [product for product in products if safe_text(product.get("uid")).casefold() in selected]
+    explicit_rank = {uid.casefold(): index for index, uid in enumerate(product_uids)}
+    if explicit_rank:
+        return sorted(
+            (
+                product
+                for product in products
+                if safe_text(product.get("uid")).casefold() in explicit_rank
+            ),
+            key=lambda product: explicit_rank[safe_text(product.get("uid")).casefold()],
+        )
     if mode != "top" or not top_uids:
         return products
     rank = {uid.casefold(): index for index, uid in enumerate(top_uids)}

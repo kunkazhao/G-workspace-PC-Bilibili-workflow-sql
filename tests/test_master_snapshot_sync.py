@@ -251,7 +251,8 @@ def test_unchanged_and_already_removed_rows_produce_no_writes():
 
     assert not plan.has_changes
     assert plan.change_count == 0
-    assert [change.uid for change in plan.unchanged] == ["SP001", "SP999"]
+    assert [change.uid for change in plan.unchanged] == ["SP001"]
+    assert [change.uid for change in plan.historical_unchanged] == ["SP999"]
 
 
 def test_empty_snapshot_soft_removes_only_rows_that_are_currently_active():
@@ -268,7 +269,8 @@ def test_empty_snapshot_soft_removes_only_rows_that_are_currently_active():
     )
 
     assert [change.uid for change in plan.removed] == ["SP001"]
-    assert [change.uid for change in plan.unchanged] == ["SP999"]
+    assert plan.unchanged == ()
+    assert [change.uid for change in plan.historical_unchanged] == ["SP999"]
 
 
 @pytest.mark.parametrize(

@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .asset_paths import legacy_voice_user_dir, path_is_under, voice_user_dir
+from .asset_paths import legacy_voice_user_dir, path_is_under, project_asset_scan_roots, voice_user_dir
 from .db import Database, _script_id_slug
 from .master_contracts import MasterContractAdapter
 from .master_snapshot_sync import (
@@ -103,8 +103,10 @@ def _master_change_item(change: ProductChange) -> dict[str, Any]:
 def _master_plan_result(plan: MasterSnapshotSyncPlan) -> dict[str, Any]:
     return {
         "snapshot_id": plan.snapshot_id,
+        "current_product_count": len(plan.records),
         "change_count": plan.change_count,
         "unchanged_count": len(plan.unchanged),
+        "historical_unchanged_count": len(plan.historical_unchanged),
         "added": [_master_change_item(change) for change in plan.added],
         "updated": [_master_change_item(change) for change in plan.updated],
         "removed": [_master_change_item(change) for change in plan.removed],
@@ -568,7 +570,13 @@ class SyncService:
             if requested_type and current_type != requested_type:
                 continue
             scanned_roots[current_type] = str(root)
-            for path in self._scan_files(root, suffixes):
+            scan_roots = self._asset_scan_roots(
+                asset_type=current_type,
+                root=root,
+                project=project,
+                explicitly_overridden=bool(root_override and requested_type == current_type),
+            )
+            for path in [candidate for scan_root in scan_roots for candidate in self._scan_files(scan_root, suffixes)]:
                 uid = self._uid_from_path(path, products, uid_patterns)
                 account = {} if current_type == "video" else self._account_from_path(path, accounts)
                 if current_type == "voice" and not self._voice_path_in_project_scope(path, project, account):
@@ -1124,6 +1132,19 @@ class SyncService:
         if not root.exists():
             return []
         return [path for path in root.rglob("*") if path.is_file() and path.suffix.casefold() in suffixes]
+
+    def _asset_scan_roots(
+        self,
+        *,
+        asset_type: str,
+        root: Path,
+        project: dict[str, Any],
+        explicitly_overridden: bool,
+    ) -> list[Path]:
+        if asset_type not in {"image", "video"} or explicitly_overridden:
+            return [root]
+        default_root = DEFAULT_IMAGE_ROOT if asset_type == "image" else DEFAULT_VIDEO_ROOT
+        return project_asset_scan_roots(root, project, default_root=default_root)
 
     def _build_uid_patterns(self, products: dict[str, dict[str, Any]]) -> list[tuple[str, re.Pattern[str]]]:
         entries = []

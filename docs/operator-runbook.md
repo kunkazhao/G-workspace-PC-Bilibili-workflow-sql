@@ -59,13 +59,27 @@ featured 清单；缺少该来源、选择哈希损坏或参数不一致都会�
 
 - 新建项目自动建立所有启用账号的配音目录、实际配置模板的商品图目录、品类 Roll-B 目录和引言展示视频目录。
 - 旧项目或外部盘恢复后运行 `python -m bworkflow_sql scaffold <project_id>` 幂等补齐。
+- `assets-check` 会写 `asset_bindings`。默认共享图片/视频根目录必须先按项目的精确品类子目录隔离，再匹配 UID；UID 不能作为跨品类唯一键。重扫时，目录不属于当前品类的旧自动绑定应标记为 `stale`，不得删除源文件。显式 `root_override` 仅用于调用方已确认的项目专用目录。商品视频预检必须沿用同一品类扫描边界；仅由 `stale`、`missing` 等非 `ready` 绑定发现、且未在当前允许扫描目录重新发现的文件，只能留作诊断候选，必须标记为不可用，不能进入 RenderPackage。
 - `render-final-video` 只写生成证据。用户确认完整 MP4 是实际成品后，运行 `python -m bworkflow_sql confirm-production <project_id> --run-manifest <path> --pipeline <path>`。
 - 如果实际上传的是后续剪辑导出的版本，加 `--final-path <最终发布版.mp4>`；run manifest 继续提供模板和生成来源，履历哈希与当前路径记录最终发布版。
 - 测试、预览、模板校准和未采纳成片不得执行确认命令。
 - 下次选模板前运行 `python -m bworkflow_sql production-history <project_id> --account <账号>`，优先使用 `recommended_template`。
-- 发布后自动归档：`python -m bworkflow_sql complete-publishing <production_run_id> --pipeline <path>`。归档单元是完整交付目录，不是单个 MP4；默认目标为 `G:\2026项目-b站\已发布视频\<已存在月份目录>\<原项目目录名>`。月份目录不存在时使用已发布视频根目录，但仍保留原项目目录名。
+- 发布后自动归档：Master 的 `published`/B站链接只证明远端发布，仍须运行 `python -m bworkflow_sql complete-publishing <production_run_id> --pipeline <path>`。归档单元是完整交付目录，不是单个 MP4；默认目标为 `G:\2026项目-b站\已发布视频\<已存在月份目录>\<原项目目录名>`。月份目录不存在时使用已发布视频根目录，但仍保留原项目目录名。
 - 归档会递归重写 pipeline 中属于原交付目录的绝对路径，包括 `output_dir`、引言、成片、封面和 `artifact_approvals`，随后重新校验审批文件的大小和 SHA-256，再更新 SQLite。目标项目目录已存在时拒绝合并覆盖。
 - 已手工整体移动项目目录：改用 `--current-path <新项目目录内的正式成片路径>`；若原交付目录仍存在则拒绝只重绑单个文件。run manifest 作为历史生成证据不修改。
+- 发布归档成功后默认将本期标记为 `done`。发布后蓝链回流不再是完成门槛；只有用户明确要求时才启动，已经启动且为 `partial` 的回流仍需按其持久化结果继续处理。
+
+## 发布素材上传与 R2 用量
+
+标题、简介、一种完整链接资料分支、已验收成片和已验收封面齐全后，必须再次取得用户对本次上传的明确许可，再运行：
+
+```powershell
+python -m bworkflow_sql upload-publishing-assets --pipeline <.pipeline.json> --confirm-upload-archive
+```
+
+该命令只把成片和封面打成一个保留在本地的 ZIP，并仅上传这一份 `archive` 对象。成功结果必须同时核对 `task.archive_ready=true`、`task.delivery_ready=true`、下载文件名和 `r2_usage`。通知用户时使用 `r2_usage.free_storage_gb_month`、`used_gb`、`remaining_snapshot_gb` 和 `egress_free`；其中 `remaining_snapshot_gb` 只是 Standard 免费额度与当前 Standard 对象存量的差，不是月度账单余额。
+
+命令会在清理旧兼容对象后调用 Master 固定只读接口 `GET /api/publishing/r2-usage`。用量查询失败不会回滚已成功上传，而是返回 `r2_usage=null` 与非空 `r2_usage_error`；此时只报告查询失败，不得根据发布任务行、旧结果或临时 R2 探针估算。接口返回 404 表示运行中的 Master 版本过旧，应重启或部署当前 Master 后重试。
 
 ## 冻结配方重渲染与修订
 
@@ -206,8 +220,19 @@ Remotion-first 商品卡模板从 CutMe 元数据进入账号模板列表，显�
 
 `render-package` 和 `render-final-video` 默认使用
 `--product-order-strategy price_segment_shuffle`。B-Workflow 仍然把价格过渡段放在
-对应价格段商品前面，但只随机该价格段内部的商品；生成后的 RenderPackage 会写入
-`output.productOrderStrategy`，使缓存、重渲染和正式成片顺序一致、可复现。
+对应价格段商品前面，但只随机该价格段内部的商品。某一期第一次成功生成正式
+RenderPackage 后，B-Workflow 会把实际商品 UID 顺序原子写入该 episode 的
+`phases.assembly.product_order_lock`；同一期后续重渲染直接复用这个精确顺序，不再
+重新随机。新 episode 使用独立顺序锁，第一次仍可重新随机。
+
+如果 Phase 7 确认的商品 UID 集合与已有顺序锁不一致，正式渲染必须直接报错
+`product_order_reconfirmation_required`，不得猜测新增、删除商品的位置。用户人工确认
+新商品集合并重新执行 Phase 7 确认后，旧锁才会清除；下一次正式 RenderPackage 再建立
+新锁。同一 UID 集合仅调整输入排列时不清锁。
+
+CutMe 商品片段缓存按商品与真实渲染输入寻址，不把商品在整期中的位置作为失效条件。
+因此新一期只改变商品顺序时可以复用片段缓存；商品素材、文案、模板或渲染器身份等
+真实输入变化时仍会正常失效。
 
 只有用户明确要求旧顺序或稳定复现时，才加 `--product-order-strategy stable`。如果使用
 `--mode top --top-uids UID1,UID2`，置顶 UID 必须保持用户给定顺序排在最前面；只有剩余商品
@@ -408,7 +433,24 @@ python -m bworkflow_sql copy-audit <project_id> --voice-profile zhaoer
 
 第一阶段“写引言文案”不再直接让 AI 自由写完整开头，而是先写模板槽位 JSON，再由仓库把槽位渲染成固定结构的引言文案和 CutMe `intro_plan`。
 
-默认模板是 `pain_avoidance_priority_v1`。槽位 JSON 至少包含这些字段：
+Phase 3 的写作顺序固定且不可并行：
+
+1. `next.action=choose_intro_template`：展示当前正式模板并等待用户选择。
+2. 模板选定后读取其 slots schema，运行不带 `--sync` 的 `intro-plan`，生成
+   结构化引言及同标签 source plan，然后重跑 `script-doctor`。
+3. 只有 `next.action=write_product_copy_and_price_transitions` 才允许生成商品
+   正文和结构化价格过渡；两者必须同批完成。
+
+`phase3_sequence_step` 标明当前顺序。商品骨架、资料采集包或旧商品文案都不能
+授权跳过引言步骤；商品写作 Owner 必须在 action 不匹配时失败关闭。
+
+`script-doctor` 只把同标签 `source-intro-plan-{label}.json` 且
+`full_script` 与 Markdown 正文匹配的引言计为正式候选。Markdown 里只有旧
+自由引言时返回 `next.action=choose_intro_template`，不得把旧标签交给用户选；
+只有一个正式候选时自动选中，多个正式候选时才使用 `--intro-label`。
+
+低层 CLI 为历史兼容仍保留 `pain_avoidance_priority_v1` 默认值；正式工作流
+必须先选择当前模板并显式传 `--template`。以下是该兼容模板的槽位示例：
 
 ```json
 {
@@ -437,7 +479,7 @@ python -m bworkflow_sql copy-audit <project_id> --voice-profile zhaoer
 生成命令：
 
 ```powershell
-python -m bworkflow_sql intro-plan <project_id> --slots <slots.json> --label 引言1
+python -m bworkflow_sql intro-plan <project_id> --template <template-id> --slots <slots.json> --label 引言1
 ```
 
 输出位置：

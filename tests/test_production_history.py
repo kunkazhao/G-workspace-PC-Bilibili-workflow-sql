@@ -255,9 +255,9 @@ def test_complete_publishing_moves_file_and_updates_existing_pipeline_phase(tmp_
     assert target.is_file()
     assert result["production"]["publish_status"] == "archived"
     assert result["production"]["full_mp4_path"] == str(target.resolve())
-    assert payload["current_phase"] == "blue_link_backfill"
+    assert payload["current_phase"] == "done"
     assert payload["phases"]["publishing"]["status"] == "done"
-    assert payload["phases"]["blue_link_backfill"]["status"] == "pending"
+    assert "blue_link_backfill" not in payload["phases"]
     assert payload["paths"]["final_mp4"] == str(target.resolve())
 
     again = service.complete_publishing(
@@ -266,6 +266,33 @@ def test_complete_publishing_moves_file_and_updates_existing_pipeline_phase(tmp_
         archive_dir=archive_dir,
     )
     assert again["moved"] is False
+    db.close()
+
+
+def test_complete_publishing_preserves_explicit_partial_backfill(tmp_path: Path):
+    db, project_id, service = _service(tmp_path)
+    confirmed = service.confirm(project_id, run_manifest_path=_manifest(tmp_path, project_id))
+    pipeline = tmp_path / ".pipeline.json"
+    pipeline.write_text(json.dumps({
+        "current_phase": "publishing",
+        "phases": {
+            "assembly": {},
+            "publishing": {"status": "pending"},
+            "blue_link_backfill": {"status": "partial", "unresolved_count": 2},
+        },
+        "paths": {},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    service.complete_publishing(
+        confirmed["production"]["id"],
+        pipeline_path=pipeline,
+        archive_dir=tmp_path / "published" / "episode",
+    )
+
+    payload = json.loads(pipeline.read_text(encoding="utf-8"))
+    assert payload["current_phase"] == "blue_link_backfill"
+    assert payload["phases"]["blue_link_backfill"]["status"] == "partial"
+    assert payload["phases"]["blue_link_backfill"]["unresolved_count"] == 2
     db.close()
 
 

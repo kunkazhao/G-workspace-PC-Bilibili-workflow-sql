@@ -1162,6 +1162,39 @@ def test_build_product_recommendation_package_can_keep_stable_price_group_order(
     assert result.package["output"]["productOrderStrategy"] == "stable"
 
 
+def test_explicit_product_uids_preserve_locked_order_without_reshuffling(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_price_group_package_data(tmp_path)
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    monkeypatch.setattr(
+        builder,
+        "_shuffle_products",
+        lambda _products: (_ for _ in ()).throw(
+            AssertionError("a locked episode order must not be shuffled again")
+        ),
+    )
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小燃",
+        output_mode="final_mp4",
+        product_order_strategy="price_segment_shuffle",
+        product_uids=["P002", "P001", "P004", "P003"],
+    )
+
+    assert [
+        segment["productUid"]
+        for segment in result.package["segments"]
+        if segment["type"] == "product_recommendation"
+    ] == ["P002", "P001", "P004", "P003"]
+    assert result.package["output"]["productOrderStrategy"] == "price_segment_shuffle"
+
+
 def test_build_product_recommendation_package_keeps_top_products_order_before_shuffle(
     tmp_path: Path,
     monkeypatch,

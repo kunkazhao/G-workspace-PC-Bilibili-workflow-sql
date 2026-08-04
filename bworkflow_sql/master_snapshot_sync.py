@@ -66,6 +66,7 @@ class MasterSnapshotSyncPlan:
     removed: tuple[ProductChange, ...]
     reactivated: tuple[ProductChange, ...]
     unchanged: tuple[ProductChange, ...]
+    historical_unchanged: tuple[ProductChange, ...]
 
     @property
     def changes(self) -> tuple[ProductChange, ...]:
@@ -206,6 +207,7 @@ def plan_master_snapshot_sync(
     removed: list[ProductChange] = []
     reactivated: list[ProductChange] = []
     unchanged: list[ProductChange] = []
+    historical_unchanged: list[ProductChange] = []
 
     for after in records:
         before = local_by_uid.get(after.uid)
@@ -260,9 +262,10 @@ def plan_master_snapshot_sync(
                 )
             )
         else:
-            unchanged.append(_unchanged(before))
+            historical_unchanged.append(_unchanged(before))
 
     unchanged.sort(key=lambda change: (change.after.sort_order, change.uid))
+    historical_unchanged.sort(key=lambda change: (change.after.sort_order, change.uid))
     return MasterSnapshotSyncPlan(
         project_id=project_id,
         snapshot_id=snapshot_id,
@@ -275,6 +278,7 @@ def plan_master_snapshot_sync(
         removed=tuple(removed),
         reactivated=tuple(reactivated),
         unchanged=tuple(unchanged),
+        historical_unchanged=tuple(historical_unchanged),
     )
 
 

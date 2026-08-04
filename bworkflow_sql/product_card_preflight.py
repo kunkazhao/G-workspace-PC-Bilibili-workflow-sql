@@ -179,6 +179,7 @@ def dynamic_product_card_preflight(
         products,
         assets,
         video_root=safe_text(project.get("video_root")),
+        project=project,
         probe_video=probe_video,
     )
     blocks = repo.script_blocks(project_id)

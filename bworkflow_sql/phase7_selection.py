@@ -122,6 +122,24 @@ def confirm_phase7_selection(
     def update(payload: dict[str, Any]) -> None:
         phases = payload.get("phases") if isinstance(payload.get("phases"), dict) else {}
         assembly = phases.get("assembly") if isinstance(phases.get("assembly"), dict) else {}
+        existing_order_lock = (
+            assembly.get("product_order_lock")
+            if isinstance(assembly.get("product_order_lock"), dict)
+            else None
+        )
+        if existing_order_lock is not None and normalized_source is not None:
+            locked_uids = {
+                safe_text(uid).casefold()
+                for uid in existing_order_lock.get("product_uids") or []
+                if safe_text(uid)
+            }
+            confirmed_uids = {
+                safe_text(uid).casefold()
+                for uid in normalized_source.get("product_uids") or []
+                if safe_text(uid)
+            }
+            if locked_uids != confirmed_uids:
+                assembly.pop("product_order_lock", None)
         assembly.update(selection)
         assembly.pop("generate_jianying_draft", None)
         assembly["selection_confirmation"] = {

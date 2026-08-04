@@ -58,10 +58,16 @@ def _seed_project_with_category(tmp_path: Path) -> tuple[Database, int, Path]:
     return db, project_id, md_path
 
 
-def _write_matching_intro_plan(tmp_path: Path, project_id: int, intro_text: str) -> None:
+def _write_matching_intro_plan(
+    tmp_path: Path,
+    project_id: int,
+    intro_text: str,
+    *,
+    label: str = "引言1",
+) -> None:
     workspace = tmp_path / "workspace" / f"project-{project_id}" / "intro"
     workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "source-intro-plan-引言1.json").write_text(
+    (workspace / f"source-intro-plan-{label}.json").write_text(
         json.dumps(
             {
                 "template_id": "pain_avoidance_priority_v1",
@@ -131,12 +137,63 @@ Alpha 的单品文案。
     assert "missing_intro_content" in issue_codes
     assert result["summary"]["price_transition_sections"] == 0
     assert result["summary"]["price_transition_ready"] == 0
-    assert result["next"]["action"] == "fill_content_units"
-    assert result["next"]["task"] == "写文案草稿"
+    assert result["next"]["action"] == "choose_intro_template"
+    assert result["next"]["task"] == "选择引言模板"
+    assert result["next"]["phase3_sequence_step"] == 1
+    assert result["next"]["requires_user_template_selection"] is True
+    assert result["next"]["requires_user_final_approval"] is False
+
+
+def test_script_doctor_routes_to_product_and_price_only_after_structured_intro(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.cutme_intro as cutme_intro_module
+    import bworkflow_sql.markdown_paths as markdown_paths_module
+
+    monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    monkeypatch.setattr(markdown_paths_module, "DEFAULT_MARKDOWN_ROOT", tmp_path / "empty-copy-library")
+    db, project_id, md_path = _seed_project(tmp_path)
+    intro_text = "先确定使用场景，再按预算看连接、听声和麦克风。"
+    _write_matching_intro_plan(tmp_path, project_id, intro_text)
+    md_path.write_text(
+        f"""
+## 引言文案
+
+### 引言1
+
+{intro_text}
+
+## 商品文案
+
+### 299元-P001-Alpha Keyboard
+
+#### 正文
+
+
+### 399元-P002-Beta Keyboard
+
+#### 正文
+
+
+## 价格过渡文案
+
+### 300-500元
+
+#### 正文
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = diagnose_script_flow(db, project_id=project_id)
+
+    assert result["status"] == "content_incomplete"
+    assert result["summary"]["intro_ready"] == 1
+    assert result["next"]["action"] == "write_product_copy_and_price_transitions"
+    assert result["next"]["task"] == "写商品正文和结构化价格过渡"
+    assert result["next"]["phase3_sequence_step"] == 3
+    assert "intro_plan_command" not in result["next"]
     assert result["next"]["command"] == f"python -m bworkflow_sql research-pack {project_id}"
-    assert result["next"]["outline_command"] == f"python -m bworkflow_sql outline {project_id}"
-    assert result["next"]["research_pack_path"].endswith("数码-键盘\\主方案.md")
-    assert result["next"]["requires_user_final_approval"] is True
+    assert result["next"]["price_transition_plan_command"] == (
+        f"python -m bworkflow_sql price-transition-plan {project_id} --plan <price-transition-plan.json>"
+    )
 
 
 def test_script_doctor_reports_empty_price_transition_body(tmp_path: Path):
@@ -180,10 +237,21 @@ Beta 的单品文案。
     assert any(issue["code"] == "missing_price_transition_copy" for issue in result["issues"])
 
 
-def test_script_doctor_blocks_product_copy_lint_failures(tmp_path: Path):
+def test_script_doctor_blocks_product_copy_lint_failures(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.cutme_intro as cutme_intro_module
+
+    monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
     db, project_id, md_path = _seed_project(tmp_path)
+    intro_text = "先看使用场景，再按预算选连接和手感。"
+    _write_matching_intro_plan(tmp_path, project_id, intro_text)
     md_path.write_text(
-        """
+        f"""
+## 引言文案
+
+### 引言1
+
+{intro_text}
+
 ## 商品文案
 
 ### 299元-P001-Alpha Keyboard
@@ -252,9 +320,23 @@ Beta Keyboard 支持三模连接。桌面设备多，这件很实在。
 
 
 def test_script_doctor_reports_reusable_library_copy_when_episode_is_missing(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.cutme_intro as cutme_intro_module
     import bworkflow_sql.markdown_paths as markdown_paths_module
 
-    db, project_id, _md_path = _seed_project(tmp_path)
+    monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    db, project_id, md_path = _seed_project(tmp_path)
+    intro_text = "先看使用场景，再按预算选连接和手感。"
+    _write_matching_intro_plan(tmp_path, project_id, intro_text)
+    md_path.write_text(
+        f"""
+## 引言文案
+
+### 引言1
+
+{intro_text}
+""".strip(),
+        encoding="utf-8",
+    )
     library_root = tmp_path / "copy-library"
     library_path = library_root / "数码-键盘.md"
     library_path.parent.mkdir(parents=True)
@@ -650,7 +732,7 @@ Beta 的单品文案。
     assert result["next"]["requires_user_final_approval"] is True
 
 
-def test_script_doctor_prioritizes_missing_intro_plan_next_hint(tmp_path: Path, monkeypatch):
+def test_script_doctor_routes_unplanned_intro_to_template_authoring(tmp_path: Path, monkeypatch):
     import bworkflow_sql.cutme_intro as cutme_intro_module
 
     monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
@@ -692,10 +774,15 @@ Beta 的单品文案。
     result = diagnose_script_flow(db, project_id=project_id, intro_label="引言1")
 
     assert result["status"] == "content_incomplete"
-    assert any(issue["code"] == "missing_matching_intro_plan" for issue in result["issues"])
-    assert result["next"]["action"] == "create_intro_plan"
-    assert result["next"]["task"] == "补引言剪辑计划"
-    assert result["next"]["command"] == f"python -m bworkflow_sql intro-plan {project_id} --slots <slots.json> --label 引言1"
+    assert any(issue["code"] == "intro_template_required" for issue in result["issues"])
+    assert result["summary"]["intro_ready"] == 0
+    assert result["summary"]["intro_markdown_entries"] == 1
+    assert result["next"]["action"] == "choose_intro_template"
+    assert result["next"]["task"] == "选择引言模板"
+    assert result["next"]["intro_plan_command"] == (
+        f"python -m bworkflow_sql intro-plan {project_id} --template <template-id> "
+        "--slots <slots.json> --label 引言1"
+    )
     assert result["next"]["requires_user_final_approval"] is False
 
 
@@ -830,7 +917,7 @@ Beta 的单品文案。
     assert any(issue["code"] == "extra_markdown_product" for issue in result["issues"])
 
 
-def test_script_doctor_requires_selected_intro_when_multiple_versions(tmp_path: Path, monkeypatch):
+def test_script_doctor_routes_multiple_unplanned_intros_to_template_authoring(tmp_path: Path, monkeypatch):
     import bworkflow_sql.cutme_intro as cutme_intro_module
 
     monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
@@ -868,5 +955,75 @@ Beta 的单品文案。
 
     assert result["ok"] is False
     assert result["status"] == "content_incomplete"
-    assert any(issue["code"] == "intro_version_not_selected" for issue in result["issues"])
+    issue = next(issue for issue in result["issues"] if issue["code"] == "intro_template_required")
+    assert issue["historical_labels"] == ["引言1", "引言2"]
+    assert not any(issue["code"] == "intro_version_not_selected" for issue in result["issues"])
+    assert result["summary"]["intro_ready"] == 0
+    assert result["summary"]["intro_markdown_entries"] == 2
+    assert result["next"]["action"] == "choose_intro_template"
+
+
+def test_script_doctor_auto_selects_only_plan_backed_intro(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.cutme_intro as cutme_intro_module
+
+    monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    db, project_id, md_path = _seed_project(tmp_path)
+    planned_text = "这是模板生成的正式引言。"
+    _write_matching_intro_plan(tmp_path, project_id, planned_text, label="引言2")
+    md_path.write_text(
+        f"""
+## 引言文案
+
+### 旧版本
+
+这是历史自由引言。
+
+### 引言2
+
+{planned_text}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = diagnose_script_flow(db, project_id=project_id)
+
+    assert result["selected_intro"]["label"] == "引言2"
+    assert result["selected_intro"]["source_intro_plan_path"].endswith("source-intro-plan-引言2.json")
+    assert result["summary"]["intro_ready"] == 1
+    assert not any(issue["code"] == "intro_version_not_selected" for issue in result["issues"])
+
+
+def test_script_doctor_selects_only_between_plan_backed_intros(tmp_path: Path, monkeypatch):
+    import bworkflow_sql.cutme_intro as cutme_intro_module
+    import bworkflow_sql.markdown_paths as markdown_paths_module
+
+    monkeypatch.setattr(cutme_intro_module, "INTERNAL_WORKSPACE_ROOT", tmp_path / "workspace")
+    monkeypatch.setattr(markdown_paths_module, "DEFAULT_MARKDOWN_ROOT", tmp_path / "empty-copy-library")
+    db, project_id, md_path = _seed_project(tmp_path)
+    _write_matching_intro_plan(tmp_path, project_id, "模板引言一。", label="引言1")
+    _write_matching_intro_plan(tmp_path, project_id, "模板引言二。", label="引言2")
+    md_path.write_text(
+        """
+## 引言文案
+
+### 旧版本
+
+这是历史自由引言。
+
+### 引言1
+
+模板引言一。
+
+### 引言2
+
+模板引言二。
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = diagnose_script_flow(db, project_id=project_id)
+
+    issue = next(issue for issue in result["issues"] if issue["code"] == "intro_version_not_selected")
+    assert issue["available"] == ["引言1", "引言2"]
+    assert result["summary"]["intro_ready"] == 2
     assert result["next"]["action"] == "select_intro_version"

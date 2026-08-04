@@ -20,6 +20,35 @@ def project_category_folder(project: dict[str, Any]) -> str:
     return category or parent
 
 
+def project_asset_scan_roots(
+    root: str | Path,
+    project: dict[str, Any],
+    *,
+    default_root: str | Path,
+) -> list[Path]:
+    root_path = Path(root)
+    try:
+        is_shared_root = root_path.resolve() == Path(default_root).resolve()
+    except OSError:
+        is_shared_root = str(root_path.absolute()).casefold() == str(Path(default_root).absolute()).casefold()
+    parent = safe_text(project.get("category_parent_name"))
+    category = safe_text(project.get("category_name"))
+    names = [project_category_folder(project), category, f"{parent}-{category}" if parent and category else ""]
+    result: list[Path] = []
+    seen: set[str] = set()
+    for name in names:
+        candidate = root_path / name if name else None
+        if not candidate or not candidate.is_dir():
+            continue
+        key = str(candidate.resolve()).casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(candidate)
+    if result:
+        return result
+    return [] if is_shared_root else [root_path]
+
+
 def voice_user_dir(voice_root: str | Path, project: dict[str, Any], account_label: str) -> Path:
     label = safe_text(account_label)
     category = project_category_folder(project)

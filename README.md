@@ -35,6 +35,28 @@ render to finish and rerun the command; there is no automatic queue or
 concurrent formal rendering. Preflight, copy, voice and package preparation are
 not locked.
 
+## New-Episode Source Preflight
+
+`python -m bworkflow_sql episode-source-binding <project_id>` force-fetches the
+current Master scheme snapshot and returns `EpisodeSourceBinding` envelope
+schema 2. The envelope deliberately separates:
+
+- `source`: authoritative Master identity, generation time and
+  `current_product_count`;
+- `sync_diff.current`: current projection changes only;
+- `sync_diff.history`: already removed local rows retained for audit only.
+
+Never add history to the current product count. The current-source invariant is
+`unchanged + added + updated + reactivated = current_product_count`;
+`removed_count` describes rows leaving the local current projection. Change
+items expose semantic paths such as `product_card.featured`.
+
+The public orchestration entry is TotalControl `workflow.ps1 start` without a
+snapshot ID. It creates immediately when the local projection already matches
+Master. When synchronization is required, it returns a read-only confirmation
+envelope and creates nothing; resubmit the exact returned snapshot ID only after
+the user confirms the current changes.
+
 ## Cover Workflow
 
 After `confirm-production`, new run manifests with a bound final spoken-script
@@ -159,13 +181,15 @@ rewrites delivery-root paths in the pipeline, including artifact approvals, and
 revalidates bound hashes before updating `production_runs`. It reuses
 `production_runs` and the existing pipeline
 publishing phase; it does not create a second publishing-status store.
-Publishing now enters `blue_link_backfill` instead of ending the workflow.
+Publishing ends the workflow at `done` by default. Post-publish blue-link
+backfill is an explicit opt-in operation; once started, a `partial` result stays
+actionable until completed or stopped.
 `publishing-context` exposes the production's fixed Master account UUID,
 Bilibili MID and scheme ID. `record-blue-link-backfill` fetches the authoritative
 Master snapshot, verifies account/scheme/MID/production identity, and records the
 job result in the same `production_runs` row. It does not trust manually supplied
-status or counts. Only `complete` returns the pipeline to `done`; `partial` keeps
-browser-pending, deferred, suspended, and Master-data counts separate.
+status or counts. Backfill `complete` returns the optional branch to `done`;
+`partial` keeps browser-pending, deferred, suspended, and Master-data counts separate.
 `resolve-blue-links` connects to the configured local CDP HTTP proxy, opens only
 its own tabs, attempts each link once by default, and returns only
 `source_link + resolved_url`. It accepts standard JD/Taobao/Tmall product pages,
@@ -301,6 +325,12 @@ Output rules:
   scheme price range, current voice, and video-or-cover media are hard gates.
   Product clips render directly with Remotion; formal output does not read or
   generate whole-card PNGs.
+- The first successful formal RenderPackage preparation for an episode stores
+  its exact product UID order in `phases.assembly.product_order_lock`. Later
+  renders of the same episode reuse that order without reshuffling. If the
+  confirmed Phase-7 product UID set changes, rendering fails closed with
+  `product_order_reconfirmation_required`; explicitly reconfirm Phase 7 before
+  establishing a new order. New episodes own independent locks.
 - The project-local clip cache stays under
   `data/workspace/project-<id>/render/final-video-cache`, is not shared between
   projects, and is not automatically cleaned.

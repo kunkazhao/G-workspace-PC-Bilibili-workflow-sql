@@ -84,6 +84,58 @@ def test_schema_v3_phase7_confirmation_binds_current_master_source(tmp_path: Pat
     assert validated["source_snapshot"]["featured_products"] == [{"uid": "FSY032", "title": "Featured item"}]
 
 
+def test_reconfirming_changed_product_set_clears_existing_order_lock(tmp_path: Path) -> None:
+    pipeline = _pipeline(tmp_path)
+    payload = json.loads(pipeline.read_text(encoding="utf-8"))
+    payload["schema_version"] = 3
+    payload["episode_id"] = "episode:locked-order"
+    payload["phases"]["assembly"]["product_order_lock"] = {
+        "version": 1,
+        "status": "locked",
+        "episode_id": "episode:locked-order",
+        "product_uids": ["FSY032", "FSY033"],
+        "product_uids_hash": "sha256:placeholder",
+    }
+    pipeline.write_text(json.dumps(payload), encoding="utf-8")
+
+    same_source = _live_source()
+    same_source["product_uids"] = ["FSY033", "FSY032"]
+    confirm_phase7_selection(
+        pipeline,
+        output_branch="final_mp4",
+        account="xiaobo",
+        product_card_template_id="muban-xiaobo-1",
+        product_media_mode="video_preferred",
+        product_order_strategy="price_segment_shuffle",
+        mode="top",
+        top_uids="FSY032",
+        source_snapshot=same_source,
+    )
+    same_saved = json.loads(pipeline.read_text(encoding="utf-8"))
+    assert same_saved["phases"]["assembly"]["product_order_lock"]["product_uids"] == [
+        "FSY032",
+        "FSY033",
+    ]
+
+    changed_source = _live_source()
+    changed_source["product_uids"] = ["FSY032", "FSY034"]
+
+    confirm_phase7_selection(
+        pipeline,
+        output_branch="final_mp4",
+        account="xiaobo",
+        product_card_template_id="muban-xiaobo-1",
+        product_media_mode="video_preferred",
+        product_order_strategy="price_segment_shuffle",
+        mode="top",
+        top_uids="FSY032",
+        source_snapshot=changed_source,
+    )
+
+    saved = json.loads(pipeline.read_text(encoding="utf-8"))
+    assert "product_order_lock" not in saved["phases"]["assembly"]
+
+
 def test_schema_v3_phase7_confirmation_without_live_source_cannot_render(tmp_path: Path) -> None:
     pipeline = _pipeline(tmp_path)
     payload = json.loads(pipeline.read_text(encoding="utf-8"))

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
-from .cutme_intro import find_intro_plan_for_text
+from .cutme_intro import default_intro_plan_workspace
 from .db import Database
 from .md_parser import ParsedMarkdown, ScriptVariant, parse_markdown_file
 from .markdown_paths import product_copy_library_path, project_asset_markdown_path
@@ -16,6 +17,7 @@ from .product_copy_audit import audit_parsed_product_copy
 from .product_copy_lint import group_findings_by_uid, lint_parsed_product_copy
 from .research_pack_service import ResearchPackService
 from .repositories import Repository
+from .subtitle_helpers import normalize_subtitle_alignment_text
 from .utils import safe_text, text_hash
 
 
@@ -85,49 +87,62 @@ def diagnose_script_flow(
     library_products = {product.uid: product for product in library_parsed.products} if library_parsed else {}
 
     intro_scripts = parsed.intro_scripts if parsed else []
-    selected_intro = _selected_intro(intro_scripts, intro_label)
+    intro_plan_paths = {
+        item.label: plan_path
+        for item in intro_scripts
+        if (plan_path := _matching_intro_plan(project_id, item)) is not None
+    }
+    eligible_intro_scripts = [item for item in intro_scripts if item.label in intro_plan_paths]
+    selected_intro = _selected_intro(eligible_intro_scripts, intro_label)
+    requested_intro = _selected_intro(intro_scripts, intro_label) if intro_label else None
     if not intro_scripts:
         issues.append(
             {
                 "level": "warning",
                 "code": "missing_intro_content",
-                "message": "intro copy unit is missing; fill or select an intro version before intro video production.",
+                "message": "intro copy unit is missing; choose a current template and generate it from slots.",
             }
         )
-    elif not selected_intro and len(intro_scripts) > 1 and not intro_label:
-        issues.append(
-            {
-                "level": "error",
-                "code": "intro_version_not_selected",
-                "message": "multiple intro versions exist; select one with --intro-label before downstream production.",
-                "available": [item.label for item in intro_scripts],
-            }
-        )
-    elif not selected_intro and intro_label:
+    elif intro_label and requested_intro is None:
         issues.append(
             {
                 "level": "error",
                 "code": "intro_version_not_found",
                 "message": f"selected intro version does not exist: {intro_label}",
-                "available": [item.label for item in intro_scripts],
+                "available": [item.label for item in eligible_intro_scripts],
+            }
+        )
+    elif intro_label and selected_intro is None:
+        issues.append(
+            {
+                "level": "error",
+                "code": "intro_template_required",
+                "message": "selected Markdown intro is historical text without a matching template source plan.",
+                "historical_labels": [requested_intro.label],
+            }
+        )
+    elif not intro_label and not eligible_intro_scripts:
+        issues.append(
+            {
+                "level": "error",
+                "code": "intro_template_required",
+                "message": "Markdown contains no template-generated intro with a matching source plan.",
+                "historical_labels": [item.label for item in intro_scripts],
+            }
+        )
+    elif not selected_intro and len(eligible_intro_scripts) > 1 and not intro_label:
+        issues.append(
+            {
+                "level": "error",
+                "code": "intro_version_not_selected",
+                "message": "multiple template-generated intro versions exist; select one with --intro-label.",
+                "available": [item.label for item in eligible_intro_scripts],
             }
         )
 
     source_intro_plan_path = ""
     if selected_intro:
-        matched_plan = find_intro_plan_for_text(project_id, selected_intro.body)
-        if matched_plan:
-            source_intro_plan_path = str(matched_plan)
-        else:
-            issues.append(
-                {
-                    "level": "warning",
-                    "code": "missing_matching_intro_plan",
-                    "message": "selected intro text has no matching source-intro-plan JSON; run intro-plan from slots or select a matching intro.",
-                    "intro_label": selected_intro.label,
-                    "command": f"python -m bworkflow_sql intro-plan {project_id} --slots <slots.json> --label {selected_intro.label}",
-                }
-            )
+        source_intro_plan_path = str(intro_plan_paths[selected_intro.label])
 
     md_products = {product.uid: product for product in parsed.products} if parsed else {}
     product_copy_ready = 0
@@ -302,7 +317,8 @@ def diagnose_script_flow(
         },
         "summary": {
             "products_total": len(products),
-            "intro_ready": len(intro_scripts),
+            "intro_ready": len(eligible_intro_scripts),
+            "intro_markdown_entries": len(intro_scripts),
             "product_copy_ready": product_copy_ready,
             "product_copy_library_ready": product_copy_library_ready,
             "product_copy_lint_failed_products": len(product_copy_lint_failed_uids),
@@ -336,6 +352,27 @@ def _selected_intro(intro_scripts: list[ScriptVariant], intro_label: str) -> Scr
     return None
 
 
+def _matching_intro_plan(project_id: int, intro: ScriptVariant) -> Path | None:
+    safe_label = safe_text(intro.label)
+    for char in '<>:"/\\|?*':
+        safe_label = safe_label.replace(char, "_")
+    safe_label = safe_label.strip(" .")
+    if not safe_label:
+        return None
+    path = default_intro_plan_workspace(project_id) / f"source-intro-plan-{safe_label}.json"
+    if not path.is_file():
+        return None
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(plan, dict):
+        return None
+    planned_text = normalize_subtitle_alignment_text(safe_text(plan.get("full_script")))
+    intro_text = normalize_subtitle_alignment_text(intro.body)
+    return path if planned_text and planned_text == intro_text else None
+
+
 def _markdown_sync_status(
     *,
     parsed: ParsedMarkdown | None,
@@ -350,9 +387,6 @@ def _markdown_sync_status(
     expected: list[tuple[str, str, str, str, str]] = []
     if selected_intro:
         expected.append(("intro", "", "", selected_intro.label, selected_intro.body))
-    elif len(parsed.intro_scripts) == 1:
-        item = parsed.intro_scripts[0]
-        expected.append(("intro", "", "", item.label, item.body))
     for product in parsed.products:
         if product.uid not in active_product_uids:
             continue
@@ -412,12 +446,14 @@ def _status(issues: list[dict[str, Any]], synced: bool) -> str:
         {
             "missing_episode_markdown",
             "missing_intro_content",
+            "intro_template_required",
             "intro_version_not_selected",
             "intro_version_not_found",
             "missing_matching_intro_plan",
             "invalid_price_transition_plan_set",
             "missing_price_transition_plan_set",
             "missing_matching_price_transition_plan",
+            "missing_price_transition_copy",
             "missing_product_copy",
             "product_copy_lint_failed",
         }
@@ -431,6 +467,44 @@ def _status(issues: list[dict[str, Any]], synced: bool) -> str:
 def _next_hint(db: Database, project_id: int, issues: list[dict[str, Any]], synced: bool) -> dict[str, Any]:
     codes = {safe_text(issue.get("code")) for issue in issues}
     research_pack_path = str(ResearchPackService(db).default_pack_path(project_id))
+    if codes.intersection({"missing_intro_content", "intro_template_required"}):
+        return {
+            "action": "choose_intro_template",
+            "task": "选择引言模板",
+            "phase3_sequence_step": 1,
+            "intro_plan_command": (
+                f"python -m bworkflow_sql intro-plan {project_id} --template <template-id> "
+                "--slots <slots.json> --label 引言1"
+            ),
+            "requires_user_template_selection": True,
+            "requires_user_final_approval": False,
+            "note": "先展示当前 CutMe 正式模板并等待用户选定；选定后生成结构化引言并重新运行 script-doctor。结构化引言完成前禁止写商品正文或价格过渡。",
+        }
+    if codes.intersection({"intro_version_not_selected", "intro_version_not_found"}):
+        return {
+            "action": "select_intro_version",
+            "task": "选择引言版本",
+            "phase3_sequence_step": 2,
+            "command": f"python -m bworkflow_sql script-doctor {project_id} --intro-label 引言1",
+            "requires_user_final_approval": False,
+        }
+    if "missing_matching_intro_plan" in codes:
+        intro_issue = next(
+            (issue for issue in issues if safe_text(issue.get("code")) == "missing_matching_intro_plan"),
+            {},
+        )
+        command = safe_text(intro_issue.get("command")) or (
+            f"python -m bworkflow_sql intro-plan {project_id} --template <template-id> "
+            "--slots <slots.json> --label 引言1"
+        )
+        return {
+            "action": "write_structured_intro",
+            "task": "生成结构化引言",
+            "phase3_sequence_step": 2,
+            "command": command,
+            "requires_user_final_approval": False,
+            "note": "从已选择模板的 slots JSON 同源生成正式 Markdown 和 source-intro-plan；完成后重新运行 script-doctor。商品正文和价格过渡仍禁止抢跑。",
+        }
     if "product_copy_lint_failed" in codes:
         return {
             "action": "fix_product_copy_language",
@@ -451,27 +525,17 @@ def _next_hint(db: Database, project_id: int, issues: list[dict[str, Any]], sync
             "source_path": safe_text(materialize_issue.get("source_path")),
             "requires_user_final_approval": True,
         }
-    if "intro_version_not_selected" in codes:
+    if codes.intersection({"missing_episode_markdown", "missing_product_copy", "missing_price_transition_copy"}):
         return {
-            "action": "select_intro_version",
-            "task": "选择引言版本",
-            "command": f"python -m bworkflow_sql script-doctor {project_id} --intro-label 引言1",
-            "requires_user_final_approval": False,
-        }
-    if "missing_matching_intro_plan" in codes:
-        intro_issue = next(
-            (issue for issue in issues if safe_text(issue.get("code")) == "missing_matching_intro_plan"),
-            {},
-        )
-        command = safe_text(intro_issue.get("command")) or (
-            f"python -m bworkflow_sql intro-plan {project_id} --slots <slots.json> --label 引言1"
-        )
-        return {
-            "action": "create_intro_plan",
-            "task": "补引言剪辑计划",
-            "command": command,
-            "requires_user_final_approval": False,
-            "note": "先从 slots JSON 同源生成正式 Markdown 和 source-intro-plan；用户定稿前不要加 --sync，也不要配音和组装。",
+            "action": "write_product_copy_and_price_transitions",
+            "task": "写商品正文和结构化价格过渡",
+            "phase3_sequence_step": 3,
+            "command": f"python -m bworkflow_sql research-pack {project_id}",
+            "outline_command": f"python -m bworkflow_sql outline {project_id}",
+            "price_transition_plan_command": f"python -m bworkflow_sql price-transition-plan {project_id} --plan <price-transition-plan.json>",
+            "research_pack_path": research_pack_path,
+            "requires_user_final_approval": True,
+            "note": "仅在结构化引言已就绪后执行。先联网补证据并写全部商品正文，再同源生成价格过渡正文与机器计划；两者完成后统一校验并等待用户定稿。",
         }
     if codes.intersection(
         {
@@ -486,25 +550,6 @@ def _next_hint(db: Database, project_id: int, issues: list[dict[str, Any]], sync
             "command": f"python -m bworkflow_sql price-transition-plan {project_id} --plan <price-transition-plan.json>",
             "requires_user_final_approval": False,
             "note": "命令同源更新正式 Markdown 和机器计划；定稿前不要加 --sync。",
-        }
-    if codes.intersection(
-        {
-            "missing_episode_markdown",
-            "missing_intro_content",
-            "intro_version_not_found",
-            "missing_product_copy",
-        }
-    ):
-        return {
-            "action": "fill_content_units",
-            "task": "写文案草稿",
-            "command": f"python -m bworkflow_sql research-pack {project_id}",
-            "outline_command": f"python -m bworkflow_sql outline {project_id}",
-            "intro_plan_command": f"python -m bworkflow_sql intro-plan {project_id} --slots <slots.json> --label 引言1",
-            "price_transition_plan_command": f"python -m bworkflow_sql price-transition-plan {project_id} --plan <price-transition-plan.json>",
-            "research_pack_path": research_pack_path,
-            "requires_user_final_approval": True,
-            "note": "先建/补资料采集包并联网填证据，再写单品文案；引言和价格过渡分别通过结构化命令同源写入正式 Markdown 与机器计划。用户定稿前不入库、不配音、不组口播稿。",
         }
     if "markdown_not_synced" in codes or not synced:
         return {

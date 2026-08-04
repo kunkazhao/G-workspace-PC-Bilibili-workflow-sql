@@ -376,7 +376,7 @@ def test_xiaoran_remotion_template_1_video_slot_is_projected_from_metadata() -> 
         "sourceHeight": 1080,
         "coordinate_mode": "canvas_rect",
         "templateId": "muban-xiaoran-1",
-        "templateVersion": "1.1.1",
+        "templateVersion": "1.1.2",
     }
 
 

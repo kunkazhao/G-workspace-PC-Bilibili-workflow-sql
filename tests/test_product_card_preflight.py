@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import bworkflow_sql.media_readiness as media_readiness_module
 import bworkflow_sql.product_card_preflight as preflight_module
 import bworkflow_sql.workflow_service as workflow_service_module
 from bworkflow_sql.db import Database
@@ -26,7 +27,7 @@ from bworkflow_sql.master_contracts import (
     MasterWorkspace,
 )
 from bworkflow_sql.product_card_preflight import dynamic_product_card_preflight
-from bworkflow_sql.media_readiness import snapshot_verified_product_videos
+from bworkflow_sql.media_readiness import audit_product_video_media, snapshot_verified_product_videos
 from bworkflow_sql.repositories import Repository
 from bworkflow_sql.utils import now_iso, text_hash
 from bworkflow_sql.workflow_service import WorkflowService
@@ -432,6 +433,60 @@ def test_video_uses_verified_disk_file_even_when_binding_is_stale(
     result = _run(db, project_id, _snapshot((_snapshot_product("P001"),)))
     assert result["contexts"][0]["media_kind"] == "cover"
     assert result["contexts"][0]["media_asset"] == "https://example.test/cover.jpg"
+
+
+def test_video_audit_rejects_nonready_binding_not_rediscovered_in_scan_root(tmp_path: Path):
+    video_root = tmp_path / "project-videos"
+    video_root.mkdir()
+    unrelated_video = tmp_path / "other-category" / "YX044.mp4"
+    unrelated_video.parent.mkdir()
+    unrelated_video.write_bytes(b"video")
+
+    result = audit_product_video_media(
+        [{"uid": "YX044", "title": "Headset"}],
+        [
+            {
+                "uid": "YX044",
+                "asset_type": "video",
+                "path": str(unrelated_video),
+                "status": "stale",
+            }
+        ],
+        video_root=video_root,
+        probe_video=lambda _path: {"ok": True, "duration": 1.0, "has_video": True},
+    )
+
+    assert result["selected_paths"] == {}
+    assert result["items"][0]["candidates"][0]["rejection"] == "binding_not_ready_and_not_rediscovered"
+
+
+def test_video_audit_scopes_shared_root_to_project_category(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    video_root = tmp_path / "shared-videos"
+    headset_video = video_root / "数码-头戴游戏耳机" / "149元-YX044-雷蛇北海巨妖标准版X.mp4"
+    gamepad_video = video_root / "数码-游戏手柄" / "80元-YX044-墨将凌云.mp4"
+    headset_video.parent.mkdir(parents=True)
+    gamepad_video.parent.mkdir(parents=True)
+    headset_video.write_bytes(b"headset")
+    gamepad_video.write_bytes(b"gamepad")
+    monkeypatch.setattr(media_readiness_module, "DEFAULT_VIDEO_ROOT", video_root, raising=False)
+
+    result = audit_product_video_media(
+        [{"uid": "YX044", "title": "雷蛇北海巨妖标准版X"}],
+        [],
+        video_root=video_root,
+        project={
+            "name": "数码-头戴游戏耳机",
+            "category_parent_name": "数码",
+            "category_name": "头戴游戏耳机",
+        },
+        probe_video=lambda _path: {"ok": True, "duration": 1.0, "has_video": True},
+    )
+
+    assert result["selected_paths"] == {"YX044": str(headset_video.resolve())}
+    assert [item["path"] for item in result["items"][0]["candidates"]] == [str(headset_video.resolve())]
 
 
 @pytest.mark.parametrize(

@@ -25,7 +25,6 @@ BLOCKED_INTRO_TEMPLATE_IDS = {"recovered_markdown_intro_v1"}
 INTRO_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
 INTRO_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 INTRO_CATEGORY_IMAGE_ROLES = ("category_hero", "category_elements")
-INTRO_MATERIAL_MANIFEST_NAME = "intro-materials.json"
 
 
 def allowed_intro_template_ids() -> set[str]:
@@ -453,6 +452,7 @@ def preflight_intro_plan_for_cutme(
         category_dir=category_dir,
         common_dir=common_dir,
         required_product_count=required_product_count,
+        allowed_product_videos=product_videos,
     )
     if issues:
         return _record_intro_preflight_pipeline(
@@ -604,6 +604,23 @@ def _ensure_selected_assets(
         ]
     product_count = int(needed.get("product_demo") or 0)
     triple_count = int(needed.get("triple_cta") or 0)
+    if product_count:
+        product_pool, _ = _intro_product_demo_files(category_dir)
+        selected_products = _selected_asset_list(selected.get("product_demo"))
+        allowed_paths = {path.resolve() for path in product_pool}
+        selected_are_allowed = (
+            len(selected_products) >= product_count
+            and all(Path(path).resolve() in allowed_paths for path in selected_products)
+        )
+        if not selected_are_allowed and len(product_pool) >= product_count:
+            selected["product_demo"] = [
+                str(path)
+                for path in _stable_asset_sample(
+                    product_pool,
+                    count=product_count,
+                    seed=f"{seed or account_label}:product_demo",
+                )
+            ]
     has_products = len(selected.get("product_demo") or []) >= product_count
     has_triple = not triple_count or bool(selected.get("triple_cta"))
     sfx_contract = plan.get("sfx_contract")
@@ -632,8 +649,8 @@ def _ensure_selected_assets(
 
     result = dict(plan)
     asset_selection["selected_assets"] = {
-        **selected,
         **dict(asset_selection.get("selected_assets") or {}),
+        **selected,
     }
     result.update(asset_selection)
     return result
@@ -807,33 +824,7 @@ def _stable_asset_sample(paths: list[Path], *, count: int, seed: str) -> list[Pa
 
 
 def _intro_product_demo_files(folder: Path) -> tuple[list[Path], Path | None]:
-    manifest_path = folder / INTRO_MATERIAL_MANIFEST_NAME
-    if not manifest_path.is_file():
-        return _list_intro_video_files(folder), None
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError):
-        return [], manifest_path
-    items = manifest.get("materials") if isinstance(manifest, dict) else []
-    result: list[Path] = []
-    for item in items or []:
-        if not isinstance(item, dict):
-            continue
-        if safe_text(item.get("role")) != "product_demo":
-            continue
-        status = safe_text(item.get("status")).casefold()
-        approved = bool(item.get("approved")) or status == "approved"
-        if not approved:
-            continue
-        file_value = safe_text(item.get("file") or item.get("path"))
-        if not file_value:
-            continue
-        path = Path(file_value)
-        if not path.is_absolute():
-            path = folder / path
-        if path.is_file() and path.suffix.lower() in INTRO_VIDEO_EXTS and _path_is_under(path, folder):
-            result.append(path)
-    return sorted(dict.fromkeys(result)), manifest_path
+    return _list_intro_video_files(folder), None
 
 
 def _matching_triple_cta_files(common_dir: Path, plan: dict[str, Any]) -> list[Path]:
@@ -862,6 +853,7 @@ def _selected_intro_asset_issues(
     category_dir: Path,
     common_dir: Path,
     required_product_count: int,
+    allowed_product_videos: list[Path],
 ) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     selected_products = list(selected.get("product_demo") or [])
@@ -874,11 +866,12 @@ def _selected_intro_asset_issues(
                     "selected": len(selected_products),
                 }
             )
+        allowed_paths = {path.resolve() for path in allowed_product_videos}
         for path in selected_products:
-            if not _path_is_under(path, category_dir):
+            if Path(path).resolve() not in allowed_paths:
                 issues.append(
                     {
-                        "type": "selected_product_demo_outside_material_pool",
+                        "type": "selected_product_demo_outside_fixed_pool",
                         "path": str(path),
                         "expected_folder": str(category_dir),
                     }
@@ -981,6 +974,9 @@ def _record_intro_preflight_pipeline(
             "updated_at_local": updated_at_local,
         }
     )
+    old_candidate = safe_text(intro_phase.get("output_mp4_path"))
+    if old_candidate and not intro_phase.get("accepted") and not Path(old_candidate).is_file():
+        intro_phase.pop("output_mp4_path", None)
     if result.get("ok"):
         intro_phase.pop("last_error", None)
     else:
