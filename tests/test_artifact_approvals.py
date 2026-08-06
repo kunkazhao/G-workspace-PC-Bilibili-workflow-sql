@@ -70,6 +70,9 @@ def test_production_confirmation_binds_mp4_to_manifest_revision(tmp_path: Path) 
     assert approval["source_revision"].startswith("sha256:")
     assert payload["production_confirmation"]["production_run_id"] == 7
     assert payload["artifact_approvals"]["full_mp4"] == approval
+    assert payload["phases"]["assembly"]["final_mp4_path"] == str(video.resolve())
+    assert payload["phases"]["assembly"]["product_mp4_path"] == str(video.resolve())
+    assert payload["paths"]["full_mp4"] == str(video.resolve())
     assert "pending_candidate" not in payload["phases"]["assembly"]
 
 

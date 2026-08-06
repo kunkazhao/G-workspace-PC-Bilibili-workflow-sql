@@ -62,6 +62,7 @@ featured 清单；缺少该来源、选择哈希损坏或参数不一致都会�
 - `assets-check` 会写 `asset_bindings`。默认共享图片/视频根目录必须先按项目的精确品类子目录隔离，再匹配 UID；UID 不能作为跨品类唯一键。重扫时，目录不属于当前品类的旧自动绑定应标记为 `stale`，不得删除源文件。显式 `root_override` 仅用于调用方已确认的项目专用目录。商品视频预检必须沿用同一品类扫描边界；仅由 `stale`、`missing` 等非 `ready` 绑定发现、且未在当前允许扫描目录重新发现的文件，只能留作诊断候选，必须标记为不可用，不能进入 RenderPackage。
 - `render-final-video` 只写生成证据。用户确认完整 MP4 是实际成品后，运行 `python -m bworkflow_sql confirm-production <project_id> --run-manifest <path> --pipeline <path>`。
 - 如果实际上传的是后续剪辑导出的版本，加 `--final-path <最终发布版.mp4>`；run manifest 继续提供模板和生成来源，履历哈希与当前路径记录最终发布版。
+- 如果原生成记录已经确认过，后续又替换了剪辑版，禁止再次用同一 run manifest 覆盖。运行 `python -m bworkflow_sql confirm-external-edit-revision <当前 production_run_id> --final-path <新最终发布版.mp4> --pipeline <path>`；命令验证当前 episode、当前正式记录和新视频流，保留旧履历并创建 `external_edit` 修订。
 - 测试、预览、模板校准和未采纳成片不得执行确认命令。
 - 下次选模板前运行 `python -m bworkflow_sql production-history <project_id> --account <账号>`，优先使用 `recommended_template`。
 - 发布后自动归档：Master 的 `published`/B站链接只证明远端发布，仍须运行 `python -m bworkflow_sql complete-publishing <production_run_id> --pipeline <path>`。归档单元是完整交付目录，不是单个 MP4；默认目标为 `G:\2026项目-b站\已发布视频\<已存在月份目录>\<原项目目录名>`。月份目录不存在时使用已发布视频根目录，但仍保留原项目目录名。
@@ -427,7 +428,7 @@ python -m bworkflow_sql copy-lint <project_id>
 python -m bworkflow_sql copy-audit <project_id> --voice-profile zhaoer
 ```
 
-`copy-audit` 检查赵二口吻中已经排除的抽象收尾，并从全文视角报告重复的“商品主体 + 抽象判断”结构。它返回具体 UID、正文版本、文件行号和原句；`script-doctor` 也会把同一结果列为 `product_copy_style_warning`。这些警告不降低 `product_copy_ready`、不拦截 Markdown 同步，也不会自动改写正文。审稿阶段应逐条做删除测试：前文已经能帮助选择时直接删掉尾句，需要保留判断时改成具体条件、取舍或使用后果。
+`copy-audit` 是商品正文的整篇风格软审计。除赵二口吻中已经排除的抽象收尾和重复的“商品主体 + 抽象判断”结构外，它还提示机械式“不是……而是……”转折、`简单说` / `总结来说` 等总结路标、未经确认的第一人称实测措辞，以及全文至少三次重复的“最核心的点 / 最大的亮点”起手。它返回具体 UID、正文版本、文件行号和原句；`script-doctor` 也会把同一结果列为 `product_copy_style_warning`。这些警告不降低 `product_copy_ready`、不拦截 Markdown 同步，也不会自动改写正文。审稿阶段只改命中位置：假体验必须确认真实证据，否则改成“我会选 / 我更看重”这类作者判断；抽象尾句先做删除测试，需要保留时再改成具体条件、取舍或使用后果。
 
 ## CutMe 引言写作链路
 

@@ -37,7 +37,7 @@ def _default_jianying_engine_dir() -> Path:
 JIANYING_ENGINE_DIR = _default_jianying_engine_dir()
 DEFAULT_INDEXTTS_DIR = Path(r"G:\Tools\IndexTTS2.0")
 DEFAULT_TTS_API_BASE_URL = "http://127.0.0.1:7861"
-DEFAULT_MASTER_API_BASE_URL = "http://127.0.0.1:8000"
+DEFAULT_MASTER_API_BASE_URL = "http://127.0.0.1:8012"
 DEFAULT_MASTER_SERVICE_ROOT = Path(r"G:\workspace\bilibili-newTools-next-master")
 
 DEFAULT_MARKDOWN_ROOT = Path(r"G:\WriteSpace\B站-文案脚本\10_b站文案\3.商品文案")

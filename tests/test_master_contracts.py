@@ -8,6 +8,12 @@ import pytest
 import requests
 
 
+def test_default_master_api_uses_canonical_local_port():
+    from bworkflow_sql.settings import DEFAULT_MASTER_API_BASE_URL
+
+    assert DEFAULT_MASTER_API_BASE_URL == "http://127.0.0.1:8012"
+
+
 def _module():
     try:
         return importlib.import_module("bworkflow_sql.master_contracts")

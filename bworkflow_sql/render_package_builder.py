@@ -762,6 +762,15 @@ def build_product_recommendation_package(
             text_hash=safe_text(block.get("text_hash")),
         )
         if not voice:
+            voice = _ready_asset(
+                assets,
+                asset_type="voice",
+                uid="PRICE_TRANSITION",
+                account_label=account,
+                text_hash=safe_text(block.get("text_hash")),
+                block_label=label,
+            )
+        if not voice:
             missing.append(
                 {
                     "kind": "price_voice",
@@ -1228,6 +1237,7 @@ def _ready_asset(
     text_hash: str = "",
     allow_unscoped_account: bool = False,
     preferred_image_set: str = "",
+    block_label: str = "",
 ) -> dict[str, Any] | None:
     preferred_set = safe_text(preferred_image_set)
     candidates: list[dict[str, Any]] = []
@@ -1245,6 +1255,8 @@ def _ready_asset(
         if script_block_id is not None and int(asset.get("script_block_id") or 0) != script_block_id:
             continue
         if text_hash and safe_text(asset.get("text_hash")) != text_hash:
+            continue
+        if block_label and safe_text(asset.get("block_label")) != block_label:
             continue
         path_text = safe_text(asset.get("path"))
         if not path_text or not Path(path_text).is_file():

@@ -22,6 +22,10 @@ python -m bworkflow_sql confirm-intro-video --pipeline <.pipeline.json> --intro-
 python -m bworkflow_sql confirm-production <project_id> --run-manifest <run-manifest.json> --pipeline <.pipeline.json>
 ```
 
+同一生成记录已经确认后，如用户又提供了新的后期剪辑最终版，使用
+`confirm-external-edit-revision <当前 production_run_id> --final-path <新成片.mp4> --pipeline <.pipeline.json>`
+创建不可变修订；禁止改写旧 `production_runs` 或复用原 manifest 静默覆盖。
+
 These commands write hash-bound approval evidence for the explicit schema-v2
 episode pipeline. Replacing an approved file invalidates the bound approval in
 TotalControl.

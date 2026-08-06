@@ -1760,6 +1760,33 @@ def test_build_product_recommendation_package_reports_missing_price_voice(
     assert {item["kind"] for item in result.missing} == {"price_voice"}
 
 
+def test_build_product_recommendation_package_reuses_price_voice_for_duplicate_script(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import bworkflow_sql.render_package_builder as builder
+
+    db, project_id = _seed_ready_package_data(tmp_path)
+    monkeypatch.setattr(builder, "get_audio_duration_seconds", lambda _path: 5.0)
+    _insert_script(
+        db,
+        project_id,
+        script_type="price_transition",
+        price_range_label="200-300",
+        body="Two to three hundred yuan focuses on brand maturity.",
+        block_label="正文1",
+    )
+
+    result = build_product_recommendation_package(
+        db,
+        project_id=project_id,
+        account_label="小博",
+        output_mode="final_mp4",
+    )
+
+    assert not [item for item in result.missing if item["kind"] == "price_voice"]
+
+
 def test_build_product_recommendation_package_skips_missing_price_script(
     tmp_path: Path,
     monkeypatch,

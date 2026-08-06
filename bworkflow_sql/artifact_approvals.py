@@ -206,12 +206,20 @@ def write_production_confirmation(
         phases = payload.get("phases") if isinstance(payload.get("phases"), dict) else {}
         assembly = phases.get("assembly") if isinstance(phases.get("assembly"), dict) else {}
         assembly["run_manifest_path"] = str(manifest_path)
+        assembly["final_mp4_path"] = str(full_mp4_path)
         assembly["full_mp4_path"] = str(full_mp4_path)
+        assembly["product_mp4_path"] = str(full_mp4_path)
         pending = assembly.get("pending_candidate") if isinstance(assembly.get("pending_candidate"), dict) else {}
         if str(pending.get("run_manifest_path") or "") == str(manifest_path):
             assembly.pop("pending_candidate", None)
         phases["assembly"] = assembly
         payload["phases"] = phases
+        paths = payload.get("paths") if isinstance(payload.get("paths"), dict) else {}
+        paths["manifest"] = str(manifest_path)
+        paths["final_mp4"] = str(full_mp4_path)
+        paths["full_mp4"] = str(full_mp4_path)
+        paths["product_mp4"] = str(full_mp4_path)
+        payload["paths"] = paths
 
     atomic_update_pipeline(pipeline_path, update)
     return approval

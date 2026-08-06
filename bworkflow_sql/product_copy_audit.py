@@ -23,6 +23,14 @@ CONCRETE_BOUNDARY_RE = re.compile(
     r"不必|不用|不需要|少花|多花|加预算|选小一码|按.+选|"
     r"能|不会|减少|更快|更少|覆盖|散热|排出|挡住|遮住|收纳|收进|不占|卡住|多护住"
 )
+MECHANICAL_REVERSAL_RE = re.compile(
+    r"(?:不是|并非|不在于)[^。！？!?\n]{0,64}(?:而是|而在于)"
+)
+SYNTHETIC_SUMMARY_RE = re.compile(r"简单说|总结来说|总的来说|综上所述")
+UNVERIFIED_EXPERIENCE_RE = re.compile(
+    r"我(?:用下来|实测|亲测|买回来|入手后|拿到手|试下来|敲下来)"
+)
+REPEATED_FEATURE_LEAD_RE = re.compile(r"最核心的(?:点|亮点)|最大的亮点")
 
 
 @dataclass(frozen=True)
@@ -56,6 +64,15 @@ class ClosingSample:
         }
 
 
+@dataclass(frozen=True)
+class BodySample:
+    uid: str
+    title: str
+    block_label: str
+    body: str
+    body_offset: int
+
+
 def load_voice_profile(profile_id: str = "zhaoer") -> ProductCopyVoiceProfile:
     normalized = safe_text(profile_id) or "zhaoer"
     if not re.fullmatch(r"[A-Za-z0-9_-]+", normalized):
@@ -82,8 +99,9 @@ def audit_parsed_product_copy(
     voice_profile: str = "zhaoer",
 ) -> list[dict[str, Any]]:
     profile = load_voice_profile(voice_profile)
+    body_samples = _body_samples(parsed, source_text)
     samples = _closing_samples(parsed, source_text)
-    findings: list[dict[str, Any]] = []
+    findings = _human_writing_findings(body_samples, source_text, source_path)
     abstract_samples: list[ClosingSample] = []
 
     for sample in samples:
@@ -146,6 +164,79 @@ def audit_parsed_product_copy(
     return findings
 
 
+def _human_writing_findings(
+    samples: list[BodySample],
+    source_text: str,
+    source_path: str | Path,
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    rules = (
+        (
+            "mechanical_reversal",
+            MECHANICAL_REVERSAL_RE,
+            "正文使用了机械翻案句，容易形成可预测的模型腔。",
+            "拆回两句普通事实或判断，保留原来的事实强度，不另造漂亮反转。",
+        ),
+        (
+            "synthetic_summary_marker",
+            SYNTHETIC_SUMMARY_RE,
+            "正文使用了总结路标，前文已经成立的信息被再次概括。",
+            "删除路标并做整句删除测试；需要保留时，落到具体条件或使用后果。",
+        ),
+        (
+            "unverified_first_person_experience",
+            UNVERIFIED_EXPERIENCE_RE,
+            "正文使用了需要真实亲测证据的第一人称经历表达。",
+            "确认确有亲测证据；否则改为“我会选”“我更看重”等作者判断或直接写产品事实。",
+        ),
+    )
+    feature_leads: list[dict[str, Any]] = []
+
+    for sample in samples:
+        for rule_id, pattern, message, suggestion in rules:
+            match = pattern.search(sample.body)
+            if match:
+                findings.append(
+                    _body_sample_finding(
+                        sample,
+                        match=match,
+                        source_text=source_text,
+                        source_path=source_path,
+                        rule_id=rule_id,
+                        category="human_writing",
+                        message=message,
+                        suggestion=suggestion,
+                    )
+                )
+        feature_match = REPEATED_FEATURE_LEAD_RE.search(sample.body)
+        if feature_match:
+            feature_leads.append(
+                _body_location(sample, feature_match, source_text=source_text)
+            )
+
+    if len(feature_leads) >= 3:
+        first = feature_leads[0]
+        findings.append(
+            {
+                "rule_id": "repeated_feature_lead_form",
+                "category": "document_structure",
+                "severity": "warning",
+                "match": first["match"],
+                "message": "整篇有多个商品重复使用“最核心的点/最大的亮点”起手，形成统一模板。",
+                "suggestion": "让每款从自己的场景、动作或差异进入，不要求所有商品先声明核心卖点。",
+                "uid": first["uid"],
+                "title": first["title"],
+                "block_label": first["block_label"],
+                "path": str(source_path) if source_path else "",
+                "line": first["line"],
+                "column": first["column"],
+                "excerpt": first["excerpt"],
+                "locations": feature_leads,
+            }
+        )
+    return findings
+
+
 def diagnose_product_copy_audit(
     db: Database,
     *,
@@ -192,7 +283,9 @@ def diagnose_product_copy_audit(
                 {
                     (safe_text(item.get("uid")), safe_text(item.get("block_label")))
                     for item in findings
-                    if safe_text(item.get("uid")) and item.get("rule_id") != "repeated_abstract_closing_form"
+                    if safe_text(item.get("uid"))
+                    and item.get("rule_id")
+                    not in {"repeated_abstract_closing_form", "repeated_feature_lead_form"}
                 }
             ),
             "findings": len(findings),
@@ -225,6 +318,26 @@ def _closing_samples(parsed: ParsedMarkdown, source_text: str) -> list[ClosingSa
                     sentence_offset=sentence_offset,
                     line=source_text.count("\n", 0, absolute_offset) + 1 if source_text else 1,
                     column=absolute_offset - line_start + 1 if source_text else sentence_offset + 1,
+                )
+            )
+    return samples
+
+
+def _body_samples(parsed: ParsedMarkdown, source_text: str) -> list[BodySample]:
+    samples: list[BodySample] = []
+    search_cursor = 0
+    for product in parsed.products:
+        for script in product.scripts:
+            body_offset = _find_body_offset(source_text, script.body, search_cursor)
+            if body_offset >= 0:
+                search_cursor = body_offset + len(script.body)
+            samples.append(
+                BodySample(
+                    uid=product.uid,
+                    title=product.title,
+                    block_label=script.label or "正文",
+                    body=script.body,
+                    body_offset=body_offset,
                 )
             )
     return samples
@@ -281,6 +394,65 @@ def _sample_finding(
         "column": sample.column,
         "excerpt": sample.sentence,
     }
+
+
+def _body_sample_finding(
+    sample: BodySample,
+    *,
+    match: re.Match[str],
+    source_text: str,
+    source_path: str | Path,
+    rule_id: str,
+    category: str,
+    message: str,
+    suggestion: str,
+) -> dict[str, Any]:
+    location = _body_location(sample, match, source_text=source_text)
+    return {
+        "rule_id": rule_id,
+        "category": category,
+        "severity": "warning",
+        "match": match.group(0),
+        "message": message,
+        "suggestion": suggestion,
+        "uid": sample.uid,
+        "title": sample.title,
+        "block_label": sample.block_label,
+        "path": str(source_path) if source_path else "",
+        "line": location["line"],
+        "column": location["column"],
+        "excerpt": location["excerpt"],
+    }
+
+
+def _body_location(
+    sample: BodySample,
+    match: re.Match[str],
+    *,
+    source_text: str,
+) -> dict[str, Any]:
+    excerpt, excerpt_offset = _sentence_containing(sample.body, match.start())
+    relative_offset = excerpt_offset if excerpt_offset >= 0 else match.start()
+    absolute_offset = sample.body_offset + relative_offset if sample.body_offset >= 0 else relative_offset
+    line_start = source_text.rfind("\n", 0, absolute_offset) + 1 if source_text else 0
+    return {
+        "uid": sample.uid,
+        "title": sample.title,
+        "block_label": sample.block_label,
+        "line": source_text.count("\n", 0, absolute_offset) + 1 if source_text else 1,
+        "column": absolute_offset - line_start + 1 if source_text else relative_offset + 1,
+        "excerpt": excerpt or match.group(0),
+        "match": match.group(0),
+    }
+
+
+def _sentence_containing(body: str, offset: int) -> tuple[str, int]:
+    for match in SENTENCE_RE.finditer(safe_text(body)):
+        if match.start() <= offset < match.end():
+            raw = match.group(0)
+            leading = len(raw) - len(raw.lstrip())
+            return raw.strip(), match.start() + leading
+    return "", -1
 
 
 def _find_body_offset(source_text: str, body: str, cursor: int) -> int:

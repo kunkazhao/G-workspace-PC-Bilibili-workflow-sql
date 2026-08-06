@@ -269,6 +269,76 @@ def test_complete_publishing_moves_file_and_updates_existing_pipeline_phase(tmp_
     db.close()
 
 
+def test_external_edit_revision_preserves_history_and_creates_new_manifest(tmp_path: Path, monkeypatch):
+    db, project_id, service = _service(tmp_path)
+    manifest = _manifest(tmp_path, project_id)
+    previous = service.confirm(project_id, run_manifest_path=manifest)["production"]
+    pipeline = tmp_path / ".pipeline.json"
+    pipeline.write_text(
+        json.dumps(
+            {
+                "episode_id": "episode:test-production-history",
+                "production_confirmation": {"production_run_id": previous["id"]},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    edited = tmp_path / "后续剪辑修订.mp4"
+    edited.write_bytes(b"edited-revision")
+    monkeypatch.setattr(
+        "bworkflow_sql.production_history._probe_video",
+        lambda _path: {"duration": 61.5, "size": edited.stat().st_size, "has_video": True, "has_audio": True},
+    )
+
+    result = service.confirm_external_edit_revision(
+        previous["id"],
+        final_path=edited,
+        pipeline_path=pipeline,
+    )
+    revision = result["production"]
+    source_after = service.repository.production_run(previous["id"])
+    revision_manifest = json.loads(Path(revision["run_manifest_path"]).read_text(encoding="utf-8"))
+
+    assert result["created"] is True
+    assert revision["id"] != previous["id"]
+    assert revision["supersedes_production_run_id"] == previous["id"]
+    assert revision["recipe_status"] == "external_edit"
+    assert revision["full_mp4_path"] == str(edited.resolve())
+    assert source_after["full_mp4_sha256"] == previous["full_mp4_sha256"]
+    assert revision_manifest["externalEditRevision"]["supersedesProductionRunId"] == previous["id"]
+    assert revision_manifest["outputs"]["full_mp4"] == str(edited.resolve())
+    assert {
+        item["role"] for item in revision_manifest["file_fingerprints"]
+    } >= {"full_mp4", "product_mp4"}
+    db.close()
+
+
+def test_external_edit_revision_rejects_non_current_production(tmp_path: Path):
+    db, project_id, service = _service(tmp_path)
+    previous = service.confirm(project_id, run_manifest_path=_manifest(tmp_path, project_id))["production"]
+    pipeline = tmp_path / ".pipeline.json"
+    pipeline.write_text(
+        json.dumps(
+            {
+                "episode_id": "episode:test-production-history",
+                "production_confirmation": {"production_run_id": previous["id"] + 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    edited = tmp_path / "edited.mp4"
+    edited.write_bytes(b"different")
+
+    with pytest.raises(ValueError, match="当前绑定"):
+        service.confirm_external_edit_revision(
+            previous["id"],
+            final_path=edited,
+            pipeline_path=pipeline,
+        )
+    db.close()
+
+
 def test_complete_publishing_preserves_explicit_partial_backfill(tmp_path: Path):
     db, project_id, service = _service(tmp_path)
     confirmed = service.confirm(project_id, run_manifest_path=_manifest(tmp_path, project_id))

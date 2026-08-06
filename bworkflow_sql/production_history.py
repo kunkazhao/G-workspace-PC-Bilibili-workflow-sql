@@ -219,6 +219,130 @@ class ProductionHistoryService:
         stored, created = self.repository.confirm_production_run(record)
         return {"ok": True, "created": created, "production": stored}
 
+    def confirm_external_edit_revision(
+        self,
+        production_run_id: int,
+        *,
+        final_path: str | Path,
+        pipeline_path: str | Path,
+    ) -> dict[str, Any]:
+        previous = self.repository.production_run(production_run_id)
+        if not previous:
+            raise ValueError(f"正式成片记录不存在: {production_run_id}")
+
+        pipeline = Path(pipeline_path).expanduser().resolve()
+        payload = json.loads(pipeline.read_text(encoding="utf-8-sig"))
+        episode_id = safe_text(payload.get("episode_id"))
+        if episode_id != safe_text(previous.get("episode_id")):
+            raise ValueError("正式成片记录与当前 pipeline 的 episode_id 不一致")
+        confirmation = payload.get("production_confirmation")
+        confirmation = confirmation if isinstance(confirmation, dict) else {}
+        if int(confirmation.get("production_run_id") or 0) != production_run_id:
+            raise ValueError("只能从 pipeline 当前绑定的正式成片创建外部剪辑修订")
+
+        edited = Path(final_path).expanduser().resolve()
+        if not edited.is_file():
+            raise ValueError(f"外部剪辑成片不存在: {edited}")
+        if edited.suffix.lower() != ".mp4":
+            raise ValueError("外部剪辑正式成片必须是 MP4 文件")
+        verification = _probe_video(edited)
+        if not verification["has_video"] or not verification["has_audio"] or verification["duration"] <= 0:
+            raise ValueError("外部剪辑成片必须包含有效的视频流和音频流")
+        edited_hash = _sha256(edited)
+        if edited_hash == safe_text(previous.get("full_mp4_sha256")):
+            raise ValueError("外部剪辑成片与当前正式成片哈希相同，无需创建修订")
+
+        source_manifest = Path(safe_text(previous.get("run_manifest_path"))).expanduser().resolve()
+        if not source_manifest.is_file():
+            raise ValueError(f"原正式成片 run manifest 不存在: {source_manifest}")
+        source_payload = json.loads(source_manifest.read_text(encoding="utf-8-sig"))
+        if source_payload.get("kind") != "bworkflow.final_video_run":
+            raise ValueError("原正式成片 run manifest 类型无效")
+
+        confirmed_at = now_iso()
+        revision_manifest = source_manifest.with_name(
+            f"final-video-external-edit-{production_run_id}-{edited_hash[:12]}.run-manifest.json"
+        )
+        revision_payload = json.loads(json.dumps(source_payload, ensure_ascii=False))
+        revision_payload["createdAt"] = confirmed_at
+        revision_payload["externalEditRevision"] = {
+            "kind": "external_edit",
+            "supersedesProductionRunId": production_run_id,
+            "sourceRunManifestPath": str(source_manifest),
+            "sourceRunManifestSha256": "sha256:" + _sha256(source_manifest),
+            "finalMp4Path": str(edited),
+            "finalMp4Sha256": "sha256:" + edited_hash,
+            "finalMp4Size": edited.stat().st_size,
+            "verification": verification,
+            "confirmedAt": confirmed_at,
+        }
+        outputs = revision_payload.get("outputs")
+        outputs = outputs if isinstance(outputs, dict) else {}
+        outputs["full_mp4"] = str(edited)
+        outputs["product_mp4"] = str(edited)
+        revision_payload["outputs"] = outputs
+        fingerprints = [
+            item
+            for item in (revision_payload.get("file_fingerprints") or [])
+            if not isinstance(item, dict) or safe_text(item.get("role")) not in {"full_mp4", "product_mp4"}
+        ]
+        fingerprints.extend(
+            {
+                "role": role,
+                "path": str(edited),
+                "exists": True,
+                "size": edited.stat().st_size,
+                "sha256": edited_hash,
+            }
+            for role in ("full_mp4", "product_mp4")
+        )
+        revision_payload["file_fingerprints"] = fingerprints
+        reports = revision_payload.get("reports")
+        reports = reports if isinstance(reports, dict) else {}
+        reports["verification"] = {"full_ffprobe": verification}
+        revision_payload["reports"] = reports
+
+        staged = revision_manifest.with_name(f".{revision_manifest.name}.{uuid4().hex}.tmp")
+        try:
+            staged.write_text(json.dumps(revision_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(staged, revision_manifest)
+        finally:
+            staged.unlink(missing_ok=True)
+
+        record = {
+            "episode_id": episode_id,
+            "project_id": int(previous["project_id"]),
+            "account_id": previous.get("account_id"),
+            "category_name": safe_text(previous.get("category_name")),
+            "scheme_id": safe_text(previous.get("scheme_id")),
+            "scheme_name": safe_text(previous.get("scheme_name")),
+            "account_label": safe_text(previous.get("account_label")),
+            "template_id": safe_text(previous.get("template_id")),
+            "template_display_name": safe_text(previous.get("template_display_name")),
+            "template_dir": safe_text(previous.get("template_dir")),
+            "run_manifest_path": str(revision_manifest),
+            "original_full_mp4_path": safe_text(previous.get("original_full_mp4_path")),
+            "full_mp4_path": str(edited),
+            "full_mp4_sha256": edited_hash,
+            "full_mp4_size": edited.stat().st_size,
+            "acceptance_mode": safe_text(previous.get("acceptance_mode")),
+            "generated_at": confirmed_at,
+            "confirmed_at": confirmed_at,
+            "publish_status": "confirmed",
+            "recipe_path": safe_text(previous.get("recipe_path")),
+            "recipe_sha256": safe_text(previous.get("recipe_sha256")),
+            "recipe_status": "external_edit",
+            "supersedes_production_run_id": production_run_id,
+        }
+        stored, created = self.repository.confirm_production_run(record)
+        return {
+            "ok": True,
+            "created": created,
+            "production": stored,
+            "source_production_run_id": production_run_id,
+            "verification": verification,
+        }
+
     def history(self, project_id: int, *, account_label: str) -> dict[str, Any]:
         project = self.repository.project(project_id)
         if not project:

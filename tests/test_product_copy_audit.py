@@ -69,6 +69,75 @@ def test_audit_detects_new_abstract_closing_shell_without_adding_a_phrase_to_pro
     assert finding["match"] == "这一件没毛病"
 
 
+def test_audit_reports_human_writing_template_markers_and_fake_experience():
+    source = _document(
+        "Alpha 最核心的点，不是把外观做好看，而是把性能补齐。简单说，我用下来很顺手。"
+    )
+
+    findings = audit_parsed_product_copy(parse_markdown_text(source), source_text=source)
+
+    assert {item["rule_id"] for item in findings} >= {
+        "mechanical_reversal",
+        "synthetic_summary_marker",
+        "unverified_first_person_experience",
+    }
+    fake_experience = next(
+        item for item in findings if item["rule_id"] == "unverified_first_person_experience"
+    )
+    assert fake_experience["uid"] == "P001"
+    assert fake_experience["line"] == 7
+
+
+def test_audit_allows_first_person_editorial_judgment():
+    source = _document(
+        "连接方式和续航都很明确。预算有限时，我会选续航更长的版本。"
+    )
+
+    findings = audit_parsed_product_copy(parse_markdown_text(source), source_text=source)
+
+    assert not any(item["rule_id"] == "unverified_first_person_experience" for item in findings)
+
+
+def test_audit_reports_repeated_feature_lead_only_at_document_level():
+    source = _document(
+        "商品一最核心的点是续航。每天通勤能少充一次电。",
+        "商品二最大的亮点是连接。电脑和平板切换更省事。",
+        "商品三最核心的亮点是重量。放进背包少压一点肩膀。",
+    )
+
+    findings = audit_parsed_product_copy(parse_markdown_text(source), source_text=source)
+
+    repeated = next(item for item in findings if item["rule_id"] == "repeated_feature_lead_form")
+    assert len(repeated["locations"]) == 3
+    assert {item["uid"] for item in repeated["locations"]} == {"P001", "P002", "P003"}
+
+
+def test_document_level_feature_lead_warning_does_not_count_as_flagged_variant(tmp_path: Path):
+    db = Database(tmp_path / "copy-audit.db")
+    md_path = tmp_path / "episode.md"
+    project_id = db.upsert_project(
+        {
+            "name": "键盘-磁轴键盘",
+            "scheme_id": "scheme-1",
+            "md_path": str(md_path),
+        }
+    )
+    md_path.write_text(
+        _document(
+            "商品一最核心的点是配列。桌面能少占一点空间。",
+            "商品二最大的亮点是触发。参数可以按使用习惯调整。",
+            "商品三最核心的亮点是重量。放进背包少压一点肩膀。",
+        ),
+        encoding="utf-8",
+    )
+
+    result = diagnose_product_copy_audit(db, project_id=project_id)
+
+    assert result["clean"] is False
+    assert result["summary"]["flagged_variants"] == 0
+    assert result["summary"]["findings"] == 1
+
+
 def test_diagnose_product_copy_audit_is_non_blocking_but_reports_cleanliness(tmp_path: Path):
     db = Database(tmp_path / "copy-audit.db")
     md_path = tmp_path / "episode.md"

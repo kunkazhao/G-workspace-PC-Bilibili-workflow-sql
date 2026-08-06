@@ -637,6 +637,22 @@ def cmd_confirm_production(args: argparse.Namespace) -> None:
     _json_out(result)
 
 
+def cmd_confirm_external_edit_revision(args: argparse.Namespace) -> None:
+    from .artifact_approvals import write_production_confirmation
+    from .production_history import ProductionHistoryService
+
+    _, repo, _, _ = _init()
+    result = ProductionHistoryService(repo).confirm_external_edit_revision(
+        args.production_run_id,
+        final_path=args.final_path,
+        pipeline_path=args.pipeline,
+    )
+    pipeline_path = Path(args.pipeline).expanduser().resolve()
+    write_production_confirmation(pipeline_path, result["production"])
+    result["pipeline_path"] = str(pipeline_path)
+    _json_out(result)
+
+
 def cmd_confirm_intro_video(args: argparse.Namespace) -> None:
     from .artifact_approvals import confirm_intro_video, sha256_file
     from .utils import now_iso
@@ -1507,6 +1523,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--final-path", default="", help="显式确认后续剪辑导出的最终发布版 MP4；模板与生成来源仍取 run manifest")
     p.add_argument("--pipeline", default="", help="可选 .pipeline.json；写入正式确认凭证")
 
+    p = sub.add_parser("confirm-external-edit-revision", help="把已有后期剪辑 MP4 登记为当前正式成片的新修订")
+    p.add_argument("production_run_id", type=int, help="pipeline 当前绑定的正式成片记录 ID")
+    p.add_argument("--final-path", required=True, help="已由用户验收的后期剪辑 MP4")
+    p.add_argument("--pipeline", required=True, help="当前 episode 的 .pipeline.json")
+
     p = sub.add_parser("confirm-intro-video", help="将用户验收的引言 MP4 绑定到哈希确认凭证")
     p.add_argument("--pipeline", required=True, help="当前项目 .pipeline.json")
     p.add_argument("--intro-video", required=True, help="已验收引言 MP4 路径")
@@ -1838,6 +1859,7 @@ DISPATCH = {
     "render-intro-video": cmd_render_intro_video,
     "scaffold": cmd_scaffold,
     "confirm-production": cmd_confirm_production,
+    "confirm-external-edit-revision": cmd_confirm_external_edit_revision,
     "confirm-intro-video": cmd_confirm_intro_video,
     "materialize-final-script": cmd_materialize_final_script,
     "cover-context": cmd_cover_context,
