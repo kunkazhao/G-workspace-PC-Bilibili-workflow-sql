@@ -33,9 +33,6 @@ from .sync_service import AUDIO_SUFFIXES
 from .template_config import image_set_for_template
 from .utils import compact_path, safe_text, text_hash
 
-DEFAULT_SPOKEN_MONTH_PREFIX = f"{datetime.now().month}月"
-
-
 @dataclass
 class DialogSection:
     title: str
@@ -638,13 +635,19 @@ def is_valid_windows_filename(value: str) -> bool:
     return bool(text and Path(text).name == text and not re.search(r'[<>:"/\\|?*\x00-\x1f]', text))
 
 
-def default_spoken_markdown_path(project: dict[str, Any], account_label: str = "") -> Path:
+def default_spoken_markdown_path(
+    project: dict[str, Any],
+    account_label: str = "",
+    *,
+    now: datetime | None = None,
+) -> Path:
     project_name = safe_file_component(
         safe_text(project.get("name")) or safe_text(project.get("category_name")),
         "品类名称",
     )
     user_label = safe_file_component(account_label, "用户")
-    return DEFAULT_SPOKEN_MD_ROOT / project_name / f"{DEFAULT_SPOKEN_MONTH_PREFIX}-{user_label}.md"
+    month_prefix = f"{(now or datetime.now()).month}月"
+    return DEFAULT_SPOKEN_MD_ROOT / project_name / f"{month_prefix}-{user_label}.md"
 
 
 def is_default_spoken_markdown_path(path_text: str) -> bool:

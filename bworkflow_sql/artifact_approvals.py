@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -85,7 +86,11 @@ def confirm_intro_video(
     source_revision: str = "",
     source_plan_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    artifact = Path(intro_video_path).expanduser().resolve()
+    pipeline = Path(pipeline_path).expanduser().resolve()
+    artifact = _materialize_intro_video_in_output_dir(
+        pipeline,
+        Path(intro_video_path).expanduser().resolve(),
+    )
     source_plan = Path(source_plan_path).expanduser().resolve() if source_plan_path else None
     approval = build_artifact_approval(
         "intro_video",
@@ -101,6 +106,13 @@ def confirm_intro_video(
         payload["artifact_approvals"] = approvals
         paths = payload.get("paths") if isinstance(payload.get("paths"), dict) else {}
         paths["intro_video"] = str(artifact)
+        output_dir = str(payload.get("output_dir") or "").strip()
+        if output_dir:
+            paths["intro_video_relative"] = str(
+                artifact.relative_to(Path(output_dir).expanduser().resolve())
+            )
+        else:
+            paths.pop("intro_video_relative", None)
         if source_plan is not None:
             paths["source_intro_plan"] = str(source_plan)
         payload["paths"] = paths
@@ -121,6 +133,39 @@ def confirm_intro_video(
 
     atomic_update_pipeline(pipeline_path, update)
     return approval
+
+
+def _materialize_intro_video_in_output_dir(pipeline: Path, source: Path) -> Path:
+    if not source.is_file():
+        raise FileNotFoundError(f"artifact does not exist: {source}")
+    payload = json.loads(pipeline.read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict):
+        raise ValueError("pipeline must contain a JSON object")
+    output_dir_text = str(payload.get("output_dir") or "").strip()
+    if not output_dir_text:
+        return source
+
+    output_dir = Path(output_dir_text).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    target = (output_dir / "引言视频.mp4").resolve()
+    if source == target:
+        return target
+
+    source_hash = sha256_file(source)
+    if target.exists():
+        if target.stat().st_size == source.stat().st_size and sha256_file(target) == source_hash:
+            return target
+        raise ValueError(f"pipeline output_dir contains a different intro video: {target}")
+
+    staged = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+    try:
+        shutil.copy2(source, staged)
+        if staged.stat().st_size != source.stat().st_size or sha256_file(staged) != source_hash:
+            raise ValueError("materialized intro video failed fingerprint verification")
+        os.replace(staged, target)
+    finally:
+        staged.unlink(missing_ok=True)
+    return target
 
 
 def resolve_approved_intro_video(

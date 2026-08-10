@@ -1114,3 +1114,64 @@ def test_cmd_render_intro_video_writes_standard_json(capsys, monkeypatch):
             "acceptance_candidate": False,
         }
     ]
+
+
+def test_cmd_confirm_intro_video_initializes_delivery_and_materializes_copy(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    from bworkflow_sql import production_delivery
+
+    pipeline = tmp_path / ".pipeline.json"
+    pipeline.write_text(
+        json.dumps(
+            {
+                "episode_id": "episode:new",
+                "bworkflow_project_id": 4,
+                "account": "小歪",
+                "paths": {},
+                "phases": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    external_intro = tmp_path / "older-episode" / "引言视频.mp4"
+    external_intro.parent.mkdir()
+    external_intro.write_bytes(b"approved-intro")
+    delivery = tmp_path / "delivery"
+
+    class FakeRepo:
+        def project(self, project_id: int):
+            assert project_id == 4
+            return {"id": project_id, "name": "数码-鼠标"}
+
+    def fake_resolve_project_delivery_dir(**kwargs):
+        assert kwargs["account_label"] == "小歪"
+        payload = json.loads(pipeline.read_text(encoding="utf-8"))
+        payload["output_dir"] = str(delivery)
+        pipeline.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        delivery.mkdir()
+        return delivery
+
+    monkeypatch.setattr(cli, "_init", lambda: ("db", FakeRepo(), None, None))
+    monkeypatch.setattr(
+        production_delivery,
+        "resolve_project_delivery_dir",
+        fake_resolve_project_delivery_dir,
+    )
+
+    cli.cmd_confirm_intro_video(
+        Namespace(
+            pipeline=str(pipeline),
+            intro_video=str(external_intro),
+            source_plan="",
+        )
+    )
+
+    result = json.loads(capsys.readouterr().out)
+    materialized = (delivery / "引言视频.mp4").resolve()
+    assert external_intro.is_file()
+    assert materialized.read_bytes() == b"approved-intro"
+    assert result["approval"]["path"] == str(materialized)

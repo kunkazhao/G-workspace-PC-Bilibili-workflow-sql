@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from types import SimpleNamespace
 
 from bworkflow_sql import master_contracts as contracts
@@ -286,9 +287,19 @@ def test_spoken_markdown_root_can_be_isolated_with_environment(monkeypatch, tmp_
 
 
 def test_default_spoken_markdown_path_uses_current_month_prefix():
-    path = default_spoken_markdown_path({"name": "数码-入耳蓝牙耳机"}, "小博")
+    july_path = default_spoken_markdown_path(
+        {"name": "数码-入耳蓝牙耳机"},
+        "小博",
+        now=datetime(2026, 7, 31, 23, 59),
+    )
+    august_path = default_spoken_markdown_path(
+        {"name": "数码-入耳蓝牙耳机"},
+        "小博",
+        now=datetime(2026, 8, 1),
+    )
 
-    assert path == DEFAULT_SPOKEN_MD_ROOT / "数码-入耳蓝牙耳机" / "7月-小博.md"
+    assert july_path == DEFAULT_SPOKEN_MD_ROOT / "数码-入耳蓝牙耳机" / "7月-小博.md"
+    assert august_path == DEFAULT_SPOKEN_MD_ROOT / "数码-入耳蓝牙耳机" / "8月-小博.md"
 
 
 def test_account_label_from_spoken_path_accepts_month_prefix():

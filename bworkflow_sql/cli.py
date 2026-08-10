@@ -108,12 +108,11 @@ def cmd_projects(_args: argparse.Namespace) -> None:
 def cmd_create_project(args: argparse.Namespace) -> None:
     from .settings import (
         DEFAULT_IMAGE_ROOT,
-        DEFAULT_SPOKEN_MD_ROOT,
         DEFAULT_VIDEO_ROOT,
         DEFAULT_VOICE_ROOT,
         INTERNAL_WORKSPACE_ROOT,
     )
-    from .ui_helpers import DEFAULT_SPOKEN_MONTH_PREFIX
+    from .ui_helpers import default_spoken_markdown_path
     from .utils import now_iso
 
     db, repo, sync, _ = _init()
@@ -121,7 +120,7 @@ def cmd_create_project(args: argparse.Namespace) -> None:
         "SELECT id FROM projects WHERE workspace_id=? AND category_id=? AND scheme_id=? ORDER BY id DESC LIMIT 1",
         (args.workspace_id, args.category_id, args.scheme_id),
     )
-    md_path = Path(args.md_path) if args.md_path else DEFAULT_SPOKEN_MD_ROOT / args.name / f"{DEFAULT_SPOKEN_MONTH_PREFIX}-小博.md"
+    md_path = Path(args.md_path) if args.md_path else default_spoken_markdown_path({"name": args.name}, "小博")
     project_id = db.upsert_project(
         {
             "id": int(existing["id"]) if existing else 0,
@@ -655,7 +654,28 @@ def cmd_confirm_external_edit_revision(args: argparse.Namespace) -> None:
 
 def cmd_confirm_intro_video(args: argparse.Namespace) -> None:
     from .artifact_approvals import confirm_intro_video, sha256_file
+    from .episode_lifecycle import assert_pipeline_actionable_payload
+    from .production_delivery import resolve_project_delivery_dir
     from .utils import now_iso
+
+    _, repo, _, _ = _init()
+    pipeline_path = Path(args.pipeline).expanduser().resolve()
+    pipeline = json.loads(pipeline_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(pipeline, dict):
+        raise ValueError("pipeline must contain a JSON object")
+    assert_pipeline_actionable_payload(pipeline)
+    project_id = int(pipeline.get("bworkflow_project_id") or 0)
+    project = repo.project(project_id) if project_id > 0 else None
+    if not project:
+        raise ValueError("pipeline is missing a valid bworkflow_project_id")
+    account = str(pipeline.get("account") or "").strip()
+    if not account:
+        raise ValueError("pipeline is missing account")
+    resolve_project_delivery_dir(
+        project=project,
+        account_label=account,
+        pipeline_path=pipeline_path,
+    )
 
     source_revision = ""
     if args.source_plan:
@@ -664,13 +684,13 @@ def cmd_confirm_intro_video(args: argparse.Namespace) -> None:
             raise ValueError(f"引言 source plan 不存在: {source_plan}")
         source_revision = sha256_file(source_plan)
     approval = confirm_intro_video(
-        args.pipeline,
+        pipeline_path,
         args.intro_video,
         approved_at=now_iso(),
         source_revision=source_revision,
         source_plan_path=source_plan if args.source_plan else None,
     )
-    _json_out({"ok": True, "pipeline_path": str(Path(args.pipeline).resolve()), "approval": approval})
+    _json_out({"ok": True, "pipeline_path": str(pipeline_path), "approval": approval})
 
 
 def cmd_materialize_final_script(args: argparse.Namespace) -> None:
