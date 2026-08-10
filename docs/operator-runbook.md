@@ -96,7 +96,7 @@ python -m bworkflow_sql upload-publishing-assets --pipeline <.pipeline.json> --c
 
 1. `cover-context --pipeline <path>` 只读返回完整口播稿和账号风格信息；据此生成恰好 5 个候选文案。
 2. 把候选写入 UTF-8 JSON 后运行 `record-cover-copy-options`；必须等用户选择，再运行 `confirm-cover-copy --index <1-5>`。
-3. `prepare-cover-generation` 会冻结固定账号人像、独立风格、已确认文案和完整提示词。将其返回的 `portrait_path` 与 `prompt` 原样交给 `imagegen`。
+3. `prepare-cover-generation` 会冻结固定账号人像、独立风格、已确认文案和完整提示词。账号配置可提供多个构图变体；每次尝试只冻结一个，拒绝重做时不会连续复用上一变体。将返回的 `portrait_path` 与 `prompt` 原样交给 `imagegen`。
 4. 生图模型一次只生成 1 张 4:3 图片，直接生成逐字一致的中文封面文字；只说明品类和多个同类商品，不输入具体 SKU 商品图，也不做程序化贴字。
 5. 用 `record-cover-image` 导入候选并展示给用户。通过后运行 `confirm-cover-image`；不通过运行 `reject-cover-image --reason <原因>` 后重新准备并生图。
 

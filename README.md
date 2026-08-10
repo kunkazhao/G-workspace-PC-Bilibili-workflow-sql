@@ -77,7 +77,10 @@ python -m bworkflow_sql confirm-cover-image --pipeline <.pipeline.json>
 
 The agent generates exactly five copy options from `cover-context`; the user
 selects one. `prepare-cover-generation` freezes the account-specific portrait,
-style and exact model-native Chinese headline prompt. The image model creates
+style and exact model-native Chinese headline prompt. An account may define a
+small composition-variant pool; each attempt freezes the selected variant in
+`cover-package.json`, and a retry excludes the immediately previous variant.
+The image model creates
 one 4:3 candidate with multiple generic products from the category; no SKU image
 is supplied and no deterministic text overlay is added. Rejection uses
 `reject-cover-image --reason <reason>` and keeps the selected copy for another

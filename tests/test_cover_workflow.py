@@ -33,12 +33,17 @@ def _fixture(tmp_path: Path, monkeypatch, *, confirmed: bool = True) -> tuple[Pa
         config,
         {
             "portraitRoot": str(portraits),
+            "categoryVisualGuidance": {"家居-防晒衣": "所有商品必须是防晒衣，不得混入雨衣。"},
             "accounts": {
                 "荣荣": {
                     "styleId": "rongrong-home-v1",
                     "styleVersion": "1.0.0",
                     "portraitFilename": "荣荣.jpg",
-                    "promptTemplate": "4:3 家居杂志封面，品类 {category}，多个该品类商品，文字必须逐字为：{cover_copy}，只生成一张。",
+                    "compositionVariants": [
+                        {"id": "layout-a", "prompt": "人物在左，商品错落分布。"},
+                        {"id": "layout-b", "prompt": "人物在右，商品纵深分布。"},
+                    ],
+                    "promptTemplate": "4:3 家居杂志封面，品类 {category}，多个该品类商品，形态 {category_visual_guidance}，构图 {composition_variant}，文字必须逐字为：{cover_copy}，只生成一张。",
                 }
             },
         },
@@ -124,6 +129,9 @@ def test_cover_flow_freezes_copy_prompt_portrait_and_accepts_one_image(tmp_path:
     }
     assert "家居-防晒衣" in package["prompt"]
     assert "今年怎么选" in package["prompt"]
+    assert "所有商品必须是防晒衣" in package["prompt"]
+    assert package["compositionVariantId"] in {"layout-a", "layout-b"}
+    assert package["compositionVariant"] in package["prompt"]
     assert Path(package["portraitSnapshotPath"]).read_bytes() == b"fixed portrait"
 
     generated = tmp_path / "generated.png"
@@ -153,6 +161,7 @@ def test_cover_reject_preserves_copy_and_creates_new_attempt(tmp_path: Path, mon
 
     payload = json.loads(pipeline.read_text(encoding="utf-8"))
     assert first["attempt_id"] != second["attempt_id"]
+    assert first["composition_variant_id"] != second["composition_variant_id"]
     assert payload["phases"]["cover"]["selected_copy"] == "防晒衣别乱买"
     assert payload["phases"]["cover"]["status"] == "generation_ready"
 
@@ -192,3 +201,10 @@ def test_production_config_has_four_distinct_account_styles_and_portraits() -> N
         assert "{category}" in item["promptTemplate"]
         assert "{cover_copy}" in item["promptTemplate"]
         assert "4:3" in item["promptTemplate"]
+    xiaobo = accounts["小博"]
+    assert xiaobo["styleVersion"] == "1.1.0"
+    assert "{composition_variant}" in xiaobo["promptTemplate"]
+    assert "{category_visual_guidance}" in xiaobo["promptTemplate"]
+    assert len(xiaobo["compositionVariants"]) == 5
+    assert len({item["id"] for item in xiaobo["compositionVariants"]}) == 5
+    assert "Soundbar" in payload["categoryVisualGuidance"]["电竞音响"]

@@ -5,6 +5,7 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
+from secrets import choice
 from typing import Any
 from uuid import uuid4
 
@@ -176,7 +177,15 @@ def prepare_cover_generation(pipeline_path: str | Path) -> dict[str, Any]:
     attempt_dir.mkdir(parents=True, exist_ok=False)
     portrait_snapshot = attempt_dir / f"portrait{portrait.suffix.lower()}"
     shutil.copy2(portrait, portrait_snapshot)
+    previous_attempt = cover.get("current_attempt") if isinstance(cover.get("current_attempt"), dict) else {}
+    composition_variant = _select_composition_variant(
+        config,
+        previous_variant_id=safe_text(previous_attempt.get("composition_variant_id")),
+    )
     prompt = safe_text(config["promptTemplate"]).replace("{category}", category).replace("{cover_copy}", selected)
+    prompt = prompt.replace("{category_visual_guidance}", _category_visual_guidance(config, category))
+    if composition_variant:
+        prompt = prompt.replace("{composition_variant}", composition_variant["prompt"])
     package_path = attempt_dir / "cover-package.json"
     package = {
         "schemaVersion": "1.0.0",
@@ -202,24 +211,28 @@ def prepare_cover_generation(pipeline_path: str | Path) -> dict[str, Any]:
         "prompt": prompt,
         "imageRequirements": {"aspectRatio": "4:3", "candidateCount": 1, "textMode": "model_native"},
     }
+    if composition_variant:
+        package.update(
+            {
+                "compositionVariantId": composition_variant["id"],
+                "compositionVariant": composition_variant["prompt"],
+            }
+        )
     _atomic_write_json(package_path, package)
     package_sha256 = sha256_file(package_path)
 
     def update(data: dict[str, Any]) -> None:
         current_phases = data.get("phases") if isinstance(data.get("phases"), dict) else {}
         item = current_phases.get("cover") if isinstance(current_phases.get("cover"), dict) else {}
-        item.update(
-            {
-                "status": "generation_ready",
-                "current_attempt": {
-                    "attempt_id": attempt_id,
-                    "package_path": str(package_path.resolve()),
-                    "package_sha256": package_sha256,
-                    "portrait_path": str(portrait_snapshot.resolve()),
-                },
-                "updated_at": now_iso(),
-            }
-        )
+        attempt = {
+            "attempt_id": attempt_id,
+            "package_path": str(package_path.resolve()),
+            "package_sha256": package_sha256,
+            "portrait_path": str(portrait_snapshot.resolve()),
+        }
+        if composition_variant:
+            attempt["composition_variant_id"] = composition_variant["id"]
+        item.update({"status": "generation_ready", "current_attempt": attempt, "updated_at": now_iso()})
         current_phases["cover"] = item
         data["phases"] = current_phases
         data["current_phase"] = "cover"
@@ -232,6 +245,7 @@ def prepare_cover_generation(pipeline_path: str | Path) -> dict[str, Any]:
         "cover_package_path": str(package_path.resolve()),
         "portrait_path": str(portrait_snapshot.resolve()),
         "prompt": prompt,
+        "composition_variant_id": composition_variant["id"] if composition_variant else "",
         "expected_output_path": str((attempt_dir / "cover-candidate.png").resolve()),
     }
 
@@ -418,9 +432,52 @@ def _account_config(account: str) -> dict[str, Any]:
     required = ("styleId", "styleVersion", "portraitFilename", "promptTemplate")
     missing = [key for key in required if not safe_text(config.get(key)).strip()]
     prompt = safe_text(config.get("promptTemplate"))
-    if missing or "{category}" not in prompt or "{cover_copy}" not in prompt:
+    raw_variants = config.get("compositionVariants")
+    has_variant_placeholder = "{composition_variant}" in prompt
+    if (
+        missing
+        or "{category}" not in prompt
+        or "{cover_copy}" not in prompt
+        or has_variant_placeholder != bool(raw_variants)
+    ):
         raise ValueError(f"cover prompt configuration is incomplete for account: {account}")
-    return {**config, "portraitRoot": payload.get("portraitRoot")}
+    return {
+        **config,
+        "portraitRoot": payload.get("portraitRoot"),
+        "categoryVisualGuidance": payload.get("categoryVisualGuidance"),
+    }
+
+
+def _select_composition_variant(
+    config: dict[str, Any],
+    *,
+    previous_variant_id: str,
+) -> dict[str, str] | None:
+    raw_variants = config.get("compositionVariants")
+    if not raw_variants:
+        return None
+    if not isinstance(raw_variants, list) or len(raw_variants) < 2:
+        raise ValueError("cover composition variants must contain at least 2 items")
+    variants: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for item in raw_variants:
+        variant_id = safe_text(item.get("id") if isinstance(item, dict) else "").strip()
+        variant_prompt = safe_text(item.get("prompt") if isinstance(item, dict) else "").strip()
+        if not variant_id or not variant_prompt or variant_id in seen_ids:
+            raise ValueError("cover composition variants must have unique non-empty ids and prompts")
+        seen_ids.add(variant_id)
+        variants.append({"id": variant_id, "prompt": variant_prompt})
+    eligible = [item for item in variants if item["id"] != previous_variant_id] or variants
+    return choice(eligible)
+
+
+def _category_visual_guidance(config: dict[str, Any], category: str) -> str:
+    guidance = config.get("categoryVisualGuidance")
+    if isinstance(guidance, dict):
+        exact = safe_text(guidance.get(category)).strip()
+        if exact:
+            return exact
+    return "Keep every product faithful to the category's real primary form factor; do not substitute adjacent product types."
 
 
 def _portrait_path(config: dict[str, Any]) -> Path:

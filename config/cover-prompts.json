@@ -1,6 +1,9 @@
 {
-  "schemaVersion": "1.0.0",
+  "schemaVersion": "1.1.0",
   "portraitRoot": "G:\\2026项目-b站\\素材-剪辑\\素材-人像",
+  "categoryVisualGuidance": {
+    "电竞音响": "Every primary product must be a one-piece long horizontal Soundbar-style gaming speaker. Show varied soundbar designs only; do not show paired bookshelf speakers, cylindrical speakers, standalone subwoofers, headphones or microphones."
+  },
   "accounts": {
     "小燃": {
       "styleId": "xiaoran-high-energy-tech-v1",
@@ -10,9 +13,31 @@
     },
     "小博": {
       "styleId": "xiaobo-rational-review-lab-v1",
-      "styleVersion": "1.0.0",
+      "styleVersion": "1.1.0",
       "portraitFilename": "小博.jpg",
-      "promptTemplate": "Use case: ads-marketing\nAsset type: 4:3 Bilibili video cover\nInput image: the supplied portrait is the sole identity reference. Preserve the same person, recognizable facial features and realistic proportions.\nPrimary request: create a rigorous, trustworthy Chinese consumer-tech evaluation cover about {category}, like a premium independent testing laboratory rather than an advertisement.\nScene/backdrop: clean dark-navy review studio with a precise cyan grid, brushed silver workbench details, subtle measurement light bars and generous organized space.\nSubject: calm professional half-body portrait with an observant expression; arrange multiple clearly separated {category} products like review samples on a testing table and floating comparison plane. Products are generic category representations, not specific SKUs.\nComposition/framing: stable horizontal geometry, balanced hierarchy, orderly product spacing, visual logic similar to a professional comparison report.\nLighting/mood: neutral studio key light, cool cyan edge light, accurate materials, controlled and credible.\nColor palette: navy blue, cyan, silver gray and clean white, minimal accent color.\nText (verbatim): render exactly the Chinese headline \"{cover_copy}\". Use large clean bold Chinese sans-serif lettering, straight alignment, excellent spacing and high legibility. Do not rewrite, omit, duplicate or add any character. No other text.\nConstraints: landscape 4:3; headline, portrait and every main product stay inside the safe area; show multiple category products clearly; no readable brand logos, model numbers, prices, unsupported test charts, watermark or QR code.\nAvoid: wrong Chinese characters, garbled text, extra words, dramatic explosion effects, exaggerated facial expression, neon gaming style, additional people, identity drift, clutter and low resolution."
+      "compositionVariants": [
+        {
+          "id": "angled-workbench-compare",
+          "prompt": "Place the person on the left third, standing behind an angled workbench with a slight forward lean and one natural comparison gesture. Let several products form a loose diagonal from foreground to background; place the headline on the right. Use a three-quarter camera angle and a mildly questioning expression. Treat this as a direction, not a rigid pose diagram."
+        },
+        {
+          "id": "wall-display-review",
+          "prompt": "Place the person on the right third in an upright three-quarter pose, looking toward products mounted or displayed at different heights on the left. Use a thoughtful half-smile and an open hand or a blank clipboard with no writing. Let the headline occupy the upper-left negative space; vary crop and spacing naturally."
+        },
+        {
+          "id": "oblique-top-down-demo",
+          "prompt": "Use an oblique top-down camera over a review table. Put the person in the lower-left or lower-center, reaching naturally toward one product control while the other products spread in an irregular fan across the middle. Place the headline in open space near the top-right and use a focused curious expression."
+        },
+        {
+          "id": "foreground-inspection-depth",
+          "prompt": "Use a close three-quarter side view with the person's face on the left, inspecting a large foreground product while several other products recede through the scene at varied depths and heights. Keep the headline on the upper-right. Use a concentrated analytical expression and avoid a straight showroom lineup."
+        },
+        {
+          "id": "staggered-pedestal-report",
+          "prompt": "Show the person standing near the center-right with a relaxed open-hand presentation gesture and a small confident smile. Arrange products on staggered testing pedestals around the left and lower foreground, with varied scale and orientation. Put the headline on the left or upper-left and use a wider lens than a standard seated portrait."
+        }
+      ],
+      "promptTemplate": "Use case: ads-marketing\nAsset type: 4:3 Bilibili video cover\nInput image: the supplied portrait is the sole identity reference. Preserve the same person, recognizable facial features and realistic proportions, but do not copy the reference pose, arm position, crop or camera angle.\nPrimary request: create a rigorous, trustworthy Chinese consumer-tech evaluation cover about {category}, like a premium independent testing laboratory rather than an advertisement.\nScene/backdrop: a flexible dark-navy review environment with restrained cyan and brushed-silver details. It may be a studio, comparison wall, testing island or open lab floor; keep the brand mood while allowing the space and camera to change.\nSubject: show the person in a natural professional action and expression driven by this attempt's composition direction. Arrange multiple clearly separated {category} products as generic review samples, not specific SKUs.\nCategory form requirement: {category_visual_guidance}\nComposition variation for this attempt: {composition_variant}\nCreative freedom: preserve the requested composition idea but improvise the exact gesture, body crop, facial expression, camera distance, product count, product angles and spacing so the result feels like a new photo shoot rather than a reused template.\nLighting/mood: neutral studio key light, cool cyan edge light, accurate materials, controlled and credible.\nColor palette: navy blue, cyan, silver gray and clean white, minimal accent color.\nText (verbatim): render exactly the Chinese headline \"{cover_copy}\". Use large clean bold Chinese sans-serif lettering, excellent spacing and high legibility. The line break and placement may adapt to the selected composition, but do not rewrite, omit, duplicate or add any character. No other text.\nConstraints: landscape 4:3; headline, portrait and every main product stay inside the safe area; show multiple category products clearly; no readable brand logos, model numbers, prices, unsupported test charts, watermark or QR code.\nAvoid: wrong Chinese characters, garbled text, extra words, dramatic explosion effects, exaggerated facial expression, neon gaming style, additional people, identity drift, repeated seated or chin-resting pose, fixed eye-level camera, straight uniform product rows, identical left-text/right-person layout, clutter and low resolution."
     },
     "小歪": {
       "styleId": "xiaowai-sharp-playful-editorial-v1",
